@@ -111,7 +111,7 @@ FlareSolverr is only needed for Cloudflare-protected sites and is disabled by de
 ## Installation
 
 ```bash
-git clone <your-repo-url>/HoardCore-RAG.git
+git clone https://github.com/jjjardev/HoardCore-RAG.git
 cd HoardCore-RAG
 ```
 
