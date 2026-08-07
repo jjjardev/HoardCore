@@ -19,6 +19,9 @@ htmlcov/
 # hoardcore_data/ and should NOT be committed. Re-ingest to rebuild.
 hoardcore_data/
 
+# --- Research artifacts (local deliverables only) ---
+artifacts/
+
 # Local config — auto-generated on first run and may contain cookies/credentials
 hoardcore.toml
 
