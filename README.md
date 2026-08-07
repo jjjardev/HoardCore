@@ -16,6 +16,7 @@ Lightweight, fully-local LLM document ingestion engine that scrapes, crawls, and
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [OpenCode (AI Harness) Integration](#opencode-ai-harness-integration)
+  - [`autoresearch`: the Hardcore Research Loop](#autoresearch-the-hardcore-research-loop)
   - [Workflow examples in OpenCode](#workflow-examples-in-opencode)
 - [Feature Tour](#feature-tour)
   - [Ingest (Scrape / Crawl)](#ingest-scrape--crawl)
@@ -209,6 +210,18 @@ So the chain is: **OpenCode auto-loads `AGENTS.md` → `AGENTS.md` forces `skill
 2. **Agent writes the deliverable** into `artifacts/`, tagging every quantitative claim `[V]` (verified in the current vault), `[E]` (captured earlier), or `[H]` (hypothesis).
 3. **Agent audits itself** — re-hybrid-queries the vault for each claimed figure. Anything it cannot retrace to full primary text is demoted to `[E]` or dropped.
 4. **Repeat queries** hit the vault (`--action search`), which is instant and offline.
+
+### `autoresearch`: the Hardcore Research Loop
+
+Start an agent request with **`autoresearch`** (e.g. *"autoresearch the economic impact of renewable energy in Negros"*) to trigger a full end-to-end investigation instead of an ad-hoc scrape/search. The agent reads the trigger out of `skill.md` and runs a **bounded, adversarial** loop:
+
+1. **Parse** the directive into the core question.
+2. **Hunt** — DISCOVER the web for high-authority primary sources (key-free) and INGEST them into the local vault (uses `--strategy aggressive` past anti-bot protection).
+3. **Recall** — hybrid-retrieve the **5–10 most relevant chunks**, discarding any that feel flimsy or lack context.
+4. **Synthesize** — emit `grounding_context` (source URLs + hybrid scores + distinct sources), then write the deliverable into `artifacts/`.
+5. **Provenance** — tag every claim `[V]/[E]/[H]` and **adversarially re-query the vault** to confirm each `[V]` before presenting it.
+
+**Termination — the loop always ends.** At kickoff the agent proposes a budget (**max synthesis passes, default 3** x **max distinct sources, default ≥5**) and stops as soon as **any one** trips: answer saturation (two consecutive re-queries add no new `[V]` claim), the distinct-source quota, diminishing returns (identical re-ranking scores), the pass budget, or a user interrupt. On stop it runs the audit, emits the artifact (labeled `[INCOMPLETE — N passes]` if a budget guard or interrupt cut it short), and returns a **3-bullet Executive Summary**.
 
 ### Workflow examples in OpenCode
 
