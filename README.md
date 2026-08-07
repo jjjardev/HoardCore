@@ -14,6 +14,7 @@ Lightweight, fully-local LLM document ingestion engine that scrapes, crawls, and
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [OpenCode (AI Harness) Integration](#opencode-ai-harness-integration)
 - [Feature Tour](#feature-tour)
   - [Ingest (Scrape / Crawl)](#ingest-scrape--crawl)
   - [Hybrid Retrieval](#hybrid-retrieval)
@@ -122,6 +123,32 @@ python hoardcore.py https://docs.python.org --action crawl --strategy aggressive
 ```
 
 The vault persists between runs. Later searches are instant and require no network.
+
+---
+
+## OpenCode (AI Harness) Integration
+
+**This tool is designed to be driven by an AI agent, and the only harness it has been tested against is [OpenCode](https://opencode.ai).** HoardCore-RAG's role is to give the agent a persistent, verifiable memory: the agent calls it to hoard the web and local files, then queries the vault instead of trusting its own (decaying or invented) recall.
+
+### The two companion documents
+
+| File | Audience | Purpose |
+|---|---|---|
+| `README.md` | Humans / maintainers | Install, config, architecture, CLI reference |
+| `skill.md` | The AI agent | What the agent reads to learn **how** to use the tool |
+
+`skill.md` is written as an agent skill (YAML frontmatter + instructions). It teaches the agent when to trigger, which actions map to which user request, the `[V]/[E]/[H]` provenance discipline, and the adversarial-audit step before finalizing an artifact. **Point the agent at `skill.md` first;** it is the operating manual the model is expected to read and follow.
+
+### How the agent uses it (example reasoning)
+
+1. **User asks to research a topic** → agent runs `research`, which discovers → ingests → recalls → emits a grounding-context file into `artifacts/`.
+2. **Agent writes the deliverable** into `artifacts/`, tagging every quantitative claim `[V]` (verified in the current vault), `[E]` (captured earlier), or `[H]` (hypothesis).
+3. **Agent audits itself** — re-hybrid-queries the vault for each claimed figure. Anything it cannot retrace to full primary text is demoted to `[E]` or dropped.
+4. **Repeat queries** hit the vault (`--action search`), which is instant and offline.
+
+### Agent-friendly fact
+
+Because HCRAG is key-free, offline-capable, and has no ML modeling, it runs inside most sandboxes and CI environments the moment its dependencies are installed. The `hoardcore.toml` config is auto-generated, so the agent can bootstrap a vault on first run with no setup ceremony.
 
 ---
 
@@ -293,12 +320,8 @@ HoardCore-RAG/
     hoardcore.toml         Generated config (sample shipped in repo)
     Makefile               install / run / discover / test / clean
     pyproject.toml         Packaging, deps + extras, console script
-    skill.md               Uses-guide / agent skill
-    artifacts/
-        HCRAG_Research_Master_Artifact.md        Consolidated research portfolio
-        Negros_Occidental_Economic_Advantages_Report.md
-        synthesis_negros_renewable_island.md
-        synthesis_attack_audit.md
+    skill.md               Uses-guide / agent skill (OpenCode harness doc)
+    artifacts/               Runtime deliverables (git-ignored, not in repo) —
     tests/
         conftest.py            TempConfig + vault / chunk fixtures
         test_vault.py          9 tests: indexing, RRF, backfill, empty-query safety, _fts_query

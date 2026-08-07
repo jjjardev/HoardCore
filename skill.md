@@ -1,9 +1,11 @@
 ---
 name: hoardcore-rag
-description: "Ingest websites, PDFs, DOCX, EPUBs into a persistent, searchable SQLite vault. Bypasses Cloudflare. Use when the user needs to scrape, crawl, or search text-based content from the web or local documents."
+description: "HoardCore-RAG (HCRAG) — a key-free, fully-local document ingestion engine that scrapes, crawls, and searches the web into a persistent SQLite vault, with hybrid FTS5 + vector retrieval and Cloudflare bypass. Written for the OpenCode AI harness (the only harness tested). Use when the user asks you to research, scrape, crawl, summarize, or search text-based content from the web or local files, or to build a persistent knowledge base."
 ---
 
 # HoardCore-RAG (HCRAG) Skill
+
+> **This is the agent operating manual.** Human maintainers should read `README.md` (install, config, architecture). This file tells the AI *how* to use HoardCore-RAG, and it is written for and tested against the **OpenCode** harness. If you are not running inside OpenCode, follow the same instructions — they are command-line based and harness-agnostic.
 
 You are an expert in using HoardCore-RAG, a hardcore document ingestion engine for AI agents.
 
