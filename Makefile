@@ -17,6 +17,8 @@ install:
 	@test -d venv || $(PYTHON) -m venv venv
 	venv/bin/python -m pip install --upgrade pip
 	venv/bin/python -m pip install aiohttp curl_cffi trafilatura readability-lxml tomli PyMuPDF python-docx ebooklib lxml
+	@echo "For OCR of scanned PDFs, install the optional fallback next:"
+	@echo "  venv/bin/python -m pip install rapidocr_onnxruntime"
 	@echo "✅ Lightweight install complete (venv, no torch)."
 
 run:

@@ -5,6 +5,16 @@ All notable changes to this project are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Added
+- PDF OCR fallback: scanned / image-only PDF pages are auto-OCRed when
+  `rapidocr_onnxruntime` is installed (pip-only, local ONNX, no system deps).
+  Embedded-text pages are still extracted by PyMuPDF (unchanged); only pages
+  with no extractable text get OCR'd, and metadata reports
+  `parser: pymupdf+ocr` plus an `ocr_pages` count. Degrades gracefully to a
+  `(ocr: no text extracted)` note when the OCR engine is unavailable.
+  Optional extra: `pip install .[ocr]`. Config key `parsers.enable_pdf_ocr`
+  (default `true`).
+
 ### Fixed
 - `research` action now honors the CLI `--strategy` flag (e.g.
   `--strategy aggressive`) for its `DISCOVER -> INGEST` step. Previously the

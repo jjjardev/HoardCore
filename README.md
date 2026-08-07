@@ -112,6 +112,7 @@ One module keeps install and deployment trivial (`python hoardcore.py`). The cos
 | **curl_cffi** *(optional)* | TLS-fingerprint impersonation for harder anti-bot pages | Installed via Makefile |
 | **FlareSolverr** *(optional)* | Fetch Cloudflare-protected pages for the `aggressive` strategy | `docker run -d --name=flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr` |
 | **PyMuPDF / python-docx / ebooklib** *(optional)* | PDF, DOCX, EPUB parsing | Installed via Makefile |
+| **rapidocr_onnxruntime** *(optional)* | OCR fallback for scanned/image-only PDF pages (local ONNX, no system deps) | `pip install .[ocr]` |
 
 FlareSolverr is only needed for Cloudflare-protected sites and is disabled by default in the auto-generated config (override with `[solver] enabled = true` in `hoardcore.toml`). The default endpoint is `http://localhost:8191/v1`.
 
@@ -148,6 +149,14 @@ venv/bin/python hoardcore.py https://example.com --action scrape
 ```
 
 The console script `hoardcore` (or `python -m hoardcore` / `python hoardcore.py`) all launch the same CLI. The vault is written to `hoardcore_data/vault.db` and deliverables to `artifacts/` (both configurable).
+
+**Optional — OCR for scanned PDFs** (not installed by default, per the zero-dependency ethos):
+
+```bash
+make install && venv/bin/python -m pip install rapidocr_onnxruntime   # or: pip install .[ocr]
+```
+
+Once installed, image-only/scanned PDF pages are OCR'd automatically (RapidOCR, local ONNX, no system deps); without it, those pages degrade gracefully. See [Ingest](#ingest-scrape--crawl).
 
 ---
 
@@ -330,7 +339,7 @@ Because HCRAG is key-free, offline-capable, and has no ML modeling, it runs insi
 The pipeline for each document:
 
 1. **Fetch** — tries the strategy chain (aiohttp → curl_cffi → FlareSolverr) until one returns content.
-2. **Parse** — HTML via `trafilatura` + `readability` with a self-selecting-best fallback; PDF/DOCX/EPUB via lazy-loaded binaries; else raw-text strip.
+2. **Parse** — HTML via `trafilatura` + `readability` with a self-selecting-best fallback; PDF/DOCX/EPUB via lazy-loaded binaries; else raw-text strip. **Scanned PDFs:** pages with no extractable text are auto-OCRed via RapidOCR (optional `pip install .[ocr]`, fully local ONNX, no system deps); OCR'd pages are flagged in metadata (`parser: pymupdf+ocr`, `ocr_pages`).
 3. **Junk-filter** — boilerplate/redirect/404/captcha pages and near-empty extractions are detected and refused entry to the vault.
 4. **Chunk** — semantic splitting respecting headers (or paragraphs for binaries).
 5. **Store** — chunks persisted to FTS5, mirrored as markdown + chunks JSON under `hoardcore_data/`, and embeddings backfilled.

@@ -44,6 +44,7 @@ from readability import Document
 FITZ_AVAILABLE = False
 DOCX_AVAILABLE = False
 EPUB_AVAILABLE = False
+RAPIDOCR_AVAILABLE = False
 _BINARY_IMPORTED = False
 
 # curl_cffi is optional but highly recommended (installed via Makefile)
@@ -109,6 +110,7 @@ enable_pdf = true
 enable_docx = true
 enable_epub = true
 extract_pdf_tables = true
+enable_pdf_ocr = true            # auto-OCR scanned/image-only PDF pages (needs rapidocr_onnxruntime)
 
 [crawler]
 respect_robots = true
@@ -186,7 +188,7 @@ class ConfigManager:
             "auth": {"cookie_string": ""},
             "solver": {"enabled": False, "url": "http://localhost:8191/v1", "solver_timeout": 60},
             "storage": {"root_dir": "hoardcore_data", "artifacts_dir": "artifacts", "save_binary": True, "save_raw_html": False},
-            "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "extract_pdf_tables": True},
+            "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "extract_pdf_tables": True, "enable_pdf_ocr": True},
             "crawler": {"respect_robots": True, "sitemap_limit": 500, "parallel_workers": 5},
             "indexer": {"enable_fts": True, "search_limit": 20},
             "embeddings": {"enabled": True, "dim": 256, "hybrid_search": True, "top_k": 40},
@@ -884,10 +886,12 @@ class DocumentParser:
     _fitz = None
     _docx = None
     _epub = None
+    _ocr_engine = None
+    _ocr_engine_ready = False
 
     @classmethod
     def _import_binary_parsers(cls) -> None:
-        global FITZ_AVAILABLE, DOCX_AVAILABLE, EPUB_AVAILABLE, _BINARY_IMPORTED
+        global FITZ_AVAILABLE, DOCX_AVAILABLE, EPUB_AVAILABLE, RAPIDOCR_AVAILABLE, _BINARY_IMPORTED
         if _BINARY_IMPORTED:
             return
         _BINARY_IMPORTED = True
@@ -912,6 +916,57 @@ class DocumentParser:
         except ImportError:
             EPUB_AVAILABLE = False
             print("Warning: ebooklib not installed. EPUB parsing disabled.", file=sys.stderr)
+        try:
+            from rapidocr_onnxruntime import RapidOCR  # optional PDF OCR fallback
+            cls._RapidOCR = RapidOCR
+            RAPIDOCR_AVAILABLE = True
+        except ImportError:
+            RAPIDOCR_AVAILABLE = False
+            print("Warning: rapidocr_onnxruntime not installed. PDF OCR fallback disabled.", file=sys.stderr)
+
+    @classmethod
+    def _get_ocr_engine(cls):
+        """Return the shared RapidOCR engine (one instance, lazy) or None."""
+        if not RAPIDOCR_AVAILABLE:
+            return None
+        if not cls._ocr_engine_ready:
+            try:
+                cls._ocr_engine = cls._RapidOCR()
+            except Exception as e:
+                logger.warning(f"Failed to initialise RapidOCR engine: {e}")
+                cls._ocr_engine = None
+            finally:
+                cls._ocr_engine_ready = True
+        return cls._ocr_engine
+
+    @staticmethod
+    def _ocr_page(page, dpi: int = 200) -> str:
+        """OCR a single rendered page; returns extracted lines or '' if unavailable."""
+        engine = DocumentParser._get_ocr_engine()
+        if engine is None:
+            return ""
+        try:
+            pix = page.get_pixmap(dpi=dpi)
+            result = engine(pix.tobytes("png"))
+            items = result[0] if isinstance(result, (list, tuple)) else result
+            if not items:
+                return ""
+            lines = []
+            for item in items:
+                try:
+                    box, text = item[0], item[1]
+                    top = min(pt[1] for pt in box)
+                    left = min(pt[0] for pt in box)
+                except (TypeError, ValueError, IndexError):
+                    top, left, text = 0, 0, ""
+                text = str(text).strip()
+                if text:
+                    lines.append((top, left, text))
+            lines.sort(key=lambda t: (int(t[0]) // 4, t[1]))
+            return "\n".join(t[2] for t in lines)
+        except Exception as e:
+            logger.warning(f"OCR failed on a page: {e}")
+            return ""
 
     @staticmethod
     async def parse_pdf(binary: bytes) -> tuple[str, dict[str, Any]]:
@@ -922,6 +977,7 @@ class DocumentParser:
         try:
             doc = DocumentParser._fitz.open(stream=binary, filetype="pdf")
             text_parts = []
+            ocr_pages = 0
             meta = {"page_count": doc.page_count, "parser": "pymupdf"}
 
             for page_num in range(doc.page_count):
@@ -929,8 +985,19 @@ class DocumentParser:
                 text = page.get_text()
                 if text.strip():
                     text_parts.append(f"## Page {page_num + 1}\n\n{text.strip()}")
+                    continue
+                # Scanned / image-only page: fall back to OCR when available.
+                ocr_text = DocumentParser._ocr_page(page)
+                if ocr_text:
+                    text_parts.append(f"## Page {page_num + 1} (ocr)\n\n{ocr_text}")
+                    ocr_pages += 1
+                else:
+                    text_parts.append(f"## Page {page_num + 1} (ocr: no text extracted)\n\n")
 
             doc.close()
+            if ocr_pages:
+                meta["parser"] = "pymupdf+ocr"
+                meta["ocr_pages"] = ocr_pages
             full_text = "\n\n".join(text_parts)
             return full_text, meta
         except Exception as e:
@@ -1095,7 +1162,7 @@ class SemanticChunker:
             return [Chunk(text="[Empty content]", metadata={"source": url, "empty": True})]
 
         # If source is a binary (PDF/DOCX), use paragraph strategy
-        if parser_meta.get('parser') in ['pymupdf', 'python-docx', 'ebooklib']:
+        if parser_meta.get('parser') in ['pymupdf', 'pymupdf+ocr', 'python-docx', 'ebooklib']:
             strategy = "paragraph"
         else:
             strategy = self.strategy

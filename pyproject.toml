@@ -32,6 +32,7 @@ dependencies = [
 pdf = ["PyMuPDF>=1.21"]
 docx = ["python-docx>=1.0"]
 epub = ["ebooklib>=0.18"]
+ocr = ["rapidocr_onnxruntime>=1.4"]
 test = ["pytest>=8"]
 
 [project.scripts]
