@@ -3,9 +3,14 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-08-07
 
 ### Added
+- Autoresearch ("Hardcore Research Loop"): a bounded agent-research trigger in
+  `skill.md` with provenance-tagged `[V]`/`[E]`/`[H]` grounding, adversarial
+  audit, termination conditions (saturation, source quota, diminishing returns,
+  pass budget, user interrupt), and depth presets (`standard`/`deep`/`exhaustive`)
+  with conversational deepening ("go deeper" / "that's enough").
 - PDF OCR fallback: scanned / image-only PDF pages are auto-OCRed when
   `rapidocr_onnxruntime` is installed (pip-only, local ONNX, no system deps).
   Embedded-text pages are still extracted by PyMuPDF (unchanged); only pages
