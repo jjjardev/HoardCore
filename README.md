@@ -221,7 +221,15 @@ Start an agent request with **`autoresearch`** (e.g. *"autoresearch the economic
 4. **Synthesize** — emit `grounding_context` (source URLs + hybrid scores + distinct sources), then write the deliverable into `artifacts/`.
 5. **Provenance** — tag every claim `[V]/[E]/[H]` and **adversarially re-query the vault** to confirm each `[V]` before presenting it.
 
-**Termination — the loop always ends.** At kickoff the agent proposes a budget (**max synthesis passes, default 3** x **max distinct sources, default ≥5**) and stops as soon as **any one** trips: answer saturation (two consecutive re-queries add no new `[V]` claim), the distinct-source quota, diminishing returns (identical re-ranking scores), the pass budget, or a user interrupt. On stop it runs the audit, emits the artifact (labeled `[INCOMPLETE — N passes]` if a budget guard or interrupt cut it short), and returns a **3-bullet Executive Summary**.
+**Depth presets — control effort, not a raw number.** At kickoff the agent maps a direction to a budget, then stops as soon as **any one** trips:
+
+| Direction | Passes | Sources |
+|-----------|--------|---------|
+| `autoresearch` (default) | 3 | ≥5 |
+| `autoresearch deep` | 6 | ≥8 |
+| `autoresearch exhaustive` | up to 10 | ≥15 |
+
+A raw-count override exists for strictness: `autoresearch x 10 <topic>` hard-caps the loop at exactly 10 passes. The stop conditions are answer saturation (two re-queries with no new `[V]` claim), the distinct-source quota, diminishing returns (identical re-ranking), the pass cap, or a user interrupt. **Conversational deepening** — after a stop the user can simply say **"go deeper"** to re-enter one more pass (retaining all prior evidence, interruptible, capped by the session's pass budget) or **"that's enough"** to finalize — so nobody has to predict the right count up front. On stop the agent runs the audit, emits the artifact (labeled `[INCOMPLETE — N passes]` if a budget guard or interrupt cut it short), and returns a **3-bullet Executive Summary**.
 
 ### Workflow examples in OpenCode
 
@@ -230,19 +238,22 @@ The examples below assume you run OpenCode inside the `HoardCore-RAG` project di
 **0. `autoresearch` — the Hardcore Research Loop**
 
 ```
-You: autoresearch the economic impact of renewable energy in Negros
+You: autoresearch deep the economic impact of renewable energy in Negros
 
-Agent: (loads skill.md -> recognizes the 'autoresearch' trigger -> opens the
-       Hardcore Research Loop)
+Agent: (loads skill.md -> recognizes the 'autoresearch' trigger + 'deep' preset
+       -> opens the Hardcore Research Loop, budget: 6 passes x >=8 sources)
   venv/bin/python hoardcore.py _ --action research \
      --query "economic impact renewable energy Negros" \
      --discover 6 --recall 8 --strategy aggressive
-  -> "Engaging the Hardcore Research Loop... budget: 3 passes x >=5 sources"
+  -> "Engaging the Hardcore Research Loop... budget: 6 passes x >=8 sources"
   -> DISCOVER (web) -> INGEST (vault) -> RECALL 5-10 chunks -> EMIT
   -> stops on saturation / source quota / pass budget / user interrupt
   -> writes artifacts/*.md with source URLs + hybrid scores + distinct-sources
   -> tags each claim [V]/[E]/[H] and adversarially audits them against the vault
   -> replies with a 3-bullet Executive Summary; full evidence in the artifact file
+
+You: go deeper
+Agent: (re-enters the loop for one more pass, retaining all prior evidence)
 ```
 
 **1. Research a new topic from scratch**
