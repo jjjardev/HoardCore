@@ -3,6 +3,14 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- `research` action now honors the CLI `--strategy` flag (e.g.
+  `--strategy aggressive`) for its `DISCOVER -> INGEST` step. Previously the
+  strategy was silently ignored and the config default was used, so
+  `research --strategy aggressive` still fetched with the `balanced` chain.
+
 ## [0.1.0] - 2026-08-07
 
 ### Added

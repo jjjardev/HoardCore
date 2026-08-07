@@ -447,7 +447,8 @@ HoardCore-RAG/
     tests/
         conftest.py            TempConfig + vault / chunk fixtures
         test_vault.py          9 tests: indexing, RRF, backfill, empty-query safety, _fts_query
-        test_network.py        8 tests: fetch chain fallback, provider parsing/fallback
+        test_network.py        9 tests: fetch chain fallback, provider parsing/fallback,
+                           research strategy forwarding
         test_junk.py           4 tests: boilerplate/empty/real-content detection
     hoardcore_data/         The vault (vault.db, per-domain binaries/extracted)
 ```
@@ -468,7 +469,7 @@ make clean              # wipe vault, caches, and config
 
 ```bash
 venv/bin/python -m pip install -e ".[test]"
-venv/bin/python -m pytest tests/ -v     # 21 tests
+venv/bin/python -m pytest tests/ -v     # 22 tests
 ```
 
 ### Test structure
@@ -480,7 +481,8 @@ tests/
                        hybrid ranking, lexical-similarity, empty/punctuation query safety,
                        _fts_query operator stripping
     test_network.py    strategy chain (fast/balanced/aggressive), all-fail raise,
-                       DuckDuckGo & Mojeek link parsing, provider fallback, empty query
+                       DuckDuckGo & Mojeek link parsing, provider fallback, empty query,
+                       research strategy forwarding
     test_junk.py       empty extraction, boilerplate/captcha/404, real content,
                        short-low-quality vs short-valid
 ```

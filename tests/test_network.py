@@ -100,3 +100,32 @@ def test_discovery_empty_query_returns_nothing(tmp_path):
     p = hc.WebSearchProvider(cfg, FakeFetcher())
     res = asyncio.run(p.search("   ", max_results=5))
     assert res == []
+
+
+def test_research_forwards_strategy_to_discovery(tmp_path, monkeypatch):
+    """`research` must pass the explicit --strategy to the discovery/ingest step
+    instead of silently falling back to the config default. Regression test for
+    the bug where `research --strategy aggressive` still fetched with `balanced`."""
+    cfg = TempConfig(str(tmp_path))  # default network.default_strategy = "fast"
+    # Point HoardCore at an isolated temp config, not the real hoardcore.toml.
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+
+    scraper = hc.HoardCore()
+    captured = {}
+
+    async def fake_discover(query, max_results, strategy, force_refresh):
+        captured["strategy"] = strategy
+        return []
+
+    scraper._discover_and_ingest = fake_discover
+    # Avoid touching the real vault; empty recall short-circuits research.
+    monkeypatch.setattr(scraper.vault, "search_vault",
+                        lambda query, limit=None, hybrid=None: [])
+
+    # Explicit strategy is honored...
+    asyncio.run(scraper.research("q", discover=2, recall=4, strategy="aggressive"))
+    assert captured["strategy"] == "aggressive"
+
+    # ...and when omitted, the config default is used.
+    asyncio.run(scraper.research("q", discover=2, recall=4))
+    assert captured["strategy"] == "fast"

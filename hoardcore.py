@@ -1377,15 +1377,22 @@ class HoardCore:
         return path
 
     async def research(self, question: str, out_path: str | None = None,
-                       discover: int = 5, recall: int = 6) -> str | None:
+                       discover: int = 5, recall: int = 6,
+                       strategy: str | None = None) -> str | None:
         """Agentic research workflow: DISCOVER -> INGEST -> RECALL -> EMIT.
 
         Live web-searches the question (via the configured discovery provider),
         ingests the top-ranked sources into the vault, hybrid-retrieves the best
         chunks, and writes a grounding-context file. Returns the path written,
         or None if nothing was retrieved.
+
+        strategy: "fast", "balanced", or "aggressive"; defaults to
+            network.default_strategy from config. Controls the fetch chain used
+            for both discovery and ingestion (e.g. "aggressive" enables the
+            FlareSolverr path for anti-bot-protected sources).
         """
-        strategy = self.config.get("network.default_strategy", "aggressive")
+        if strategy is None:
+            strategy = self.config.get("network.default_strategy", "balanced")
 
         print(f"\n[1/DISCOVER] searching web for: {question!r} (top {discover})", flush=True)
         await self._discover_and_ingest(question, discover, strategy, force_refresh=False)
@@ -1789,7 +1796,8 @@ async def main():
             print("  ⚠️  --query required for --action research", file=sys.stderr)
             sys.exit(2)
         written = await scraper.research(query, out_path=out_path,
-                                         discover=discover or 5, recall=recall)
+                                         discover=discover or 5, recall=recall,
+                                         strategy=strategy)
         sys.exit(0 if written else 1)
 
     result = await scraper.fetch(
