@@ -11,6 +11,7 @@ Lightweight, fully-local LLM document ingestion engine that scrapes, crawls, and
 ## Table of Contents
 
 - [About](#about)
+- [Design Decisions](#design-decisions)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
@@ -51,13 +52,56 @@ Key characteristics:
 
 ---
 
+## Design Decisions
+
+This section explains *why* HCRAG is built the way it is. It is written for engineers deciding whether the trade-offs are intentional (they are) or accidental (they are not).
+
+### Why no embeddings model (why "RAG without vectors")
+
+HCRAG deliberately does **not** use a neural embedding model. Retrieval fuses SQLite **FTS5** keyword ranking with dependency-free **lexical hashing** (FNV-1a feature hashing of words + 3-gram shingles into 256-dim unit vectors) via Reciprocal Rank Fusion. This is an opinionated trade, not an omission:
+
+- **Zero dependence.** No torch, no model downloads, no GPU, no API key. It runs on a bare Python 3.11+ box and inside sandboxes/CI where model weights are forbidden.
+- **Deterministic and auditable.** Two identical inputs always produce identical vectors, so every `[V]`-tagged claim is re-runnable. A neural model can drift across versions; lexical hashing cannot.
+- **Cheap at every scale that matters here.** The brute-force vector scan is O(N), ideal for a hoard vault of thousands of chunks — not for millions.
+
+The cost of this choice is clear: it cannot do synonym/semantic generalization the way a transformer embedding can. That is a real limitation for fuzzy, meaning-based retrieval.
+
+**Where embeddings would plug in (and what we'd change).** If semantic recall became the bottleneck, the design already separates the vector table (`chunk_vectors`) and the RRF fuse from the parser/storage code, so a real embedding model could be added cleanly:
+
+- Store float vectors from a local model (e.g. **Ollama** + `nomic-embed-text`) or an API in place of (or beside) the hashed vectors.
+- Keep FTS5 + RRF unchanged — embeddings augment the lexical rank, they don't replace it.
+- Trade-offs would shift: you gain synonym recall and pay with model downloads, RAM, possible key cost, and vector-DB scaling (e.g. `sqlite-vec` for ANN).
+
+That is the standard alternative in this space; HCRAG's default is the dependency-free end of the spectrum.
+
+### Why SQLite / FTS5 / RRF (not a vector database)
+
+- **SQLite is everywhere.** It ships with Python, needs no server, stores the whole hoard as one file that can be copied and backed up trivially.
+- **FTS5 is surprisingly good.** BM25-style ranking with Unicode61 tokenization and a Porter stemmer gives solid keyword search for free.
+- **RRF fuses two cheap signals.** Keyword + lexical-vector ranks blend without needing to calibrate scores across completely different metrics. `k=60` is the standard RRF constant.
+
+### Why key-free web discovery
+
+Querying DuckDuckGo's HTML endpoint (with Mojeek fallback) through the *same* resilient fetch chain as the crawler means research costs no API key and no per-query fee. The cost is that free endpoints can rate-limit (which the bounded backoff + provider fallback absorbs) and return noisier results than a paid index.
+
+### Why single-file
+
+One module keeps install and deployment trivial (`python hoardcore.py`). The cost is that the code is large relative to a modular split; this is acceptable for a tool whose total surface is one coherent pipeline (fetch → parse → filter → chunk → store → retrieve).
+
+### Hard constraints that are not negotiable
+
+- **No secrets in the repo.** API keys, session cookies, and credentials never belong in the codebase — the whole engine is key-free by design, and runtime config (`hoardcore.toml`) is git-ignored for exactly this reason.
+- **Respect for third-party sites.** HCRAG respects `robots.txt`, honors ToS, and its anti-bot escalation (TLS impersonation, optional FlareSolverr) is for *legitimate* access to pages the operator is entitled to read — not for breaking access controls. `cookie_string` is only ever the *user's own* session.
+
+---
+
 ## Prerequisites
 
 | Requirement | Purpose | Install |
 |---|---|---|
 | **Python 3.11+** | Runtime (uses `tomllib`) | `python3 --version` |
 | **curl_cffi** *(optional)* | TLS-fingerprint impersonation for harder anti-bot pages | Installed via Makefile |
-| **FlareSolverr** *(optional)* | Cloudflare bypass for the `aggressive` strategy | `docker run -d --name=flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr` |
+| **FlareSolverr** *(optional)* | Fetch Cloudflare-protected pages for the `aggressive` strategy | `docker run -d --name=flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr` |
 | **PyMuPDF / python-docx / ebooklib** *(optional)* | PDF, DOCX, EPUB parsing | Installed via Makefile |
 
 FlareSolverr is only needed for Cloudflare-protected sites and is disabled by default in the shipped config sample (override with `[solver] enabled = true` in `hoardcore.toml`). The default endpoint is `http://localhost:8191/v1`.
@@ -208,13 +252,13 @@ Agent: venv/bin/python hoardcore.py _ --action ingest \
   -> indexes all three; your follow-ups now hit the vault instantly
 ```
 
-**5. Bypass a Cloudflare wall**
+**5. Reach a Cloudflare-protected page**
 
 ```
 You: That page is behind Cloudflare. Get me the text of
-  https://blocked.example.com/article
+  https://protected.example.com/article
 
-Agent: venv/bin/python hoardcore.py https://blocked.example.com/article \
+Agent: venv/bin/python hoardcore.py https://protected.example.com/article \
        --action scrape --strategy aggressive
   -> aiohttp -> curl_cffi -> (FlareSolverr if enabled) until it succeeds
 ```
@@ -398,6 +442,7 @@ HoardCore-RAG/
     AGENTS.md              Agent trigger doc — auto-loaded by OpenCode at
                            session start; mandates reading skill.md first
     skill.md               Uses-guide / agent skill (OpenCode harness doc)
+    CHANGELOG.md           Release history (SemVer)
     artifacts/               Runtime deliverables (git-ignored, not in repo) —
     tests/
         conftest.py            TempConfig + vault / chunk fixtures

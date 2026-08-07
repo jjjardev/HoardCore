@@ -1,6 +1,6 @@
 ---
 name: hoardcore-rag
-description: "HoardCore-RAG (HCRAG) — a key-free, fully-local document ingestion engine that scrapes, crawls, and searches the web into a persistent SQLite vault, with hybrid FTS5 + vector retrieval and Cloudflare bypass. Written for the OpenCode AI harness (the only harness tested). Use when the user asks you to research, scrape, crawl, summarize, or search text-based content from the web or local files, or to build a persistent knowledge base."
+description: "HoardCore-RAG (HCRAG) — a key-free, fully-local document ingestion engine that scrapes, crawls, and searches the web into a persistent SQLite vault, with hybrid FTS5 + vector retrieval and Cloudflare-aware fetching. Written for the OpenCode AI harness (the only harness tested). Use when the user asks you to research, scrape, crawl, summarize, or search text-based content from the web or local files, or to build a persistent knowledge base."
 ---
 
 # HoardCore-RAG (HCRAG) Skill
@@ -34,7 +34,7 @@ HoardCore-RAG **hoards** knowledge. It turns the web and local files into a perm
 - The user asks you to "read", "summarize", or "analyze" a website, research paper (PDF), or document.
 - The user wants to build a local knowledge base from a documentation site (e.g., "ingest the entire Python docs").
 - The user needs to find information within a set of documents they've previously provided.
-- The user is hitting paywalls or Cloudflare blocks; this tool bypasses them.
+- The user is hitting paywalls or Cloudflare blocks; this tool can usually reach them through its resilient fetch chain.
 
 ## Available Actions
 
@@ -45,7 +45,7 @@ Use this for a single document or webpage.
 
 - **`url`** (string, required): The full URL to the document (e.g., `https://arxiv.org/pdf/1706.03762.pdf`).
 - **`action`** (string, required): Set to `"scrape"`.
-- **`strategy`** (string, optional): Determines how aggressively to bypass blocks. Options:
+- **`strategy`** (string, optional): Determines how aggressively to handle anti-bot blocks. Options:
     - `"fast"`: Use standard HTTP. Fastest, but may fail on protected sites.
     - `"balanced"` (default): Tries standard HTTP, then falls back to TLS fingerprint spoofing. Recommended.
     - `"aggressive"`: Uses all methods including FlareSolverr (requires local setup). Use for Cloudflare-heavy sites.

@@ -2,7 +2,7 @@
 
 You are working inside **HoardCore-RAG (HCRAG)**, a key-free, fully-local document
 ingestion engine for AI agents (SQLite FTS5 + hybrid retrieval, web discovery,
-Cloudflare bypass). HCRAG is driven **by you, the agent**, via its CLI.
+Cloudflare-aware fetching). HCRAG is driven **by you, the agent**, via its CLI.
 
 ## Mandatory first step: read `skill.md` before every task
 

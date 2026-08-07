@@ -15,28 +15,28 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import logging
 import os
 import re
+import sqlite3
 import sys
 import time
-import sqlite3
-import io
+import tomllib
 import zipfile
 from array import array
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List, Optional, Tuple
-from urllib.parse import urlparse, unquote
+from typing import Any
+from urllib.parse import unquote, urlparse
 
 # --- GUARANTEED DEPENDENCIES (Installed via Makefile) ---
 import aiohttp
-from aiohttp import ClientTimeout, TCPConnector
 import trafilatura
+from aiohttp import ClientTimeout, TCPConnector
 from readability import Document
-from lxml import html as lxml_html
-import tomllib
 
 # Heavy binary parsers are lazy-imported so that HTML/text-only usage works
 # even without PDF/DOCX/EPUB libraries installed. Modules are fetched on first
@@ -69,9 +69,9 @@ logger = logging.getLogger("hoardcore")
 class Chunk:
     """A semantic chunk of text ready for LLM injection."""
     text: str
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {"text": self.text, "metadata": self.metadata}
 
 # =============================================================================
@@ -145,7 +145,7 @@ ttl_seconds = 86400              # 24 hours
 class ConfigManager:
     CONFIG_PATH = "hoardcore.toml"
     _instance = None
-    _config: Dict[str, Any] = {}
+    _config: dict[str, Any] = {}
 
     def __new__(cls):
         if cls._instance is None:
@@ -179,7 +179,7 @@ class ConfigManager:
                     if sub_key not in self._config[key]:
                         self._config[key][sub_key] = sub_value
 
-    def _defaults(self) -> Dict[str, Any]:
+    def _defaults(self) -> dict[str, Any]:
         return {
             "general": {"timeout_seconds": 30, "max_retries": 2, "user_agent": "HoardCore/5.0"},
             "network": {"default_strategy": "balanced", "enable_preflight": True},
@@ -233,10 +233,10 @@ class EmbeddingsEngine:
         self.dim = int(config.get('embeddings.dim', 256))
 
     @staticmethod
-    def _tokens(text: str) -> List[str]:
+    def _tokens(text: str) -> list[str]:
         """Word unigrams + 3-gram shingles for sparse lexical features."""
         words = re.findall(r"[a-zà-ÿ0-9']+", text.lower())
-        shingles: List[str] = []
+        shingles: list[str] = []
         for w in words:
             if len(w) <= 3:
                 shingles.append(w)
@@ -248,7 +248,7 @@ class EmbeddingsEngine:
     def _hash_vector(self, text: str) -> bytes:
         """Feature-hash tokens into an L2-normalized float32 vector."""
         vec = [0.0] * self.dim
-        counts: Dict[str, int] = {}
+        counts: dict[str, int] = {}
         for t in self._tokens(text):
             counts[t] = counts.get(t, 0) + 1
         for token, n in counts.items():
@@ -267,11 +267,15 @@ class EmbeddingsEngine:
 
     @staticmethod
     def cosine(a: bytes, b: bytes, dim: int) -> float:
-        va = array('f'); va.frombytes(a)
-        vb = array('f'); vb.frombytes(b)
-        if len(va) > dim: va = va[:dim]
-        if len(vb) > dim: vb = vb[:dim]
-        dot = sum(x * y for x, y in zip(va, vb))
+        va = array('f')
+        va.frombytes(a)
+        vb = array('f')
+        vb.frombytes(b)
+        if len(va) > dim:
+            va = va[:dim]
+        if len(vb) > dim:
+            vb = vb[:dim]
+        dot = sum(x * y for x, y in zip(va, vb, strict=False))
         return float(dot)  # vectors are L2-normalized at build, so dot == cosine
 
 # =============================================================================
@@ -294,7 +298,7 @@ class VaultManager:
         self.backfill_vectors()
 
     @contextmanager
-    def _db(self) -> Iterator[Tuple[sqlite3.Connection, sqlite3.Cursor]]:
+    def _db(self) -> Iterator[tuple[sqlite3.Connection, sqlite3.Cursor]]:
         """Yield a committed-on-success, surfaced-on-exception DB cursor.
 
         Guarantees the connection is always closed and transactions are never
@@ -348,8 +352,8 @@ class VaultManager:
 
             # Trigger to clean up FTS when documents are updated
             cursor.execute("""
-                CREATE TRIGGER IF NOT EXISTS documents_after_delete 
-                AFTER DELETE ON documents 
+                CREATE TRIGGER IF NOT EXISTS documents_after_delete
+                AFTER DELETE ON documents
                 BEGIN
                     DELETE FROM chunks_fts WHERE url = OLD.url;
                 END;
@@ -385,7 +389,7 @@ class VaultManager:
         name = re.sub(r'\?.*$', '', name)
         if not name:
             name = hashlib.md5(url.encode()).hexdigest()[:8]
-        
+
         # Determine extension
         ext_map = {
             'application/pdf': '.pdf',
@@ -405,35 +409,35 @@ class VaultManager:
         bin_dir = os.path.join(folder, 'binaries')
         filename = self._generate_filename(url, content_type)
         bin_path = os.path.join(bin_dir, filename)
-        
+
         if not os.path.exists(bin_path):
             with open(bin_path, 'wb') as f:
                 f.write(data)
             logger.info(f"Saved binary: {bin_path}")
         return bin_path
 
-    def save_extracted_text(self, url: str, markdown: str, chunks: List[Chunk], meta: Dict[str, Any]) -> None:
+    def save_extracted_text(self, url: str, markdown: str, chunks: list[Chunk], meta: dict[str, Any]) -> None:
         """Save extracted text and chunks to domain/extracted/."""
         folder = self._get_domain_folder(url)
         ext_dir = os.path.join(folder, 'extracted')
-        
+
         # Create a safe filename
         filename = self._generate_filename(url, meta.get('content_type', 'text/plain'))
         base_name = os.path.splitext(filename)[0]
-        
+
         # Save full markdown
         md_path = os.path.join(ext_dir, f"{base_name}.content.md")
         with open(md_path, 'w', encoding='utf-8') as f:
             f.write(markdown)
-        
+
         # Save chunks JSON
         chunks_path = os.path.join(ext_dir, f"{base_name}.chunks.json")
         with open(chunks_path, 'w', encoding='utf-8') as f:
             json.dump([c.to_dict() for c in chunks], f, indent=2, ensure_ascii=False)
-        
+
         logger.info(f"Saved extracted text to {ext_dir}")
 
-    def index_document(self, url: str, chunks: List[Chunk], meta: Dict[str, Any]) -> None:
+    def index_document(self, url: str, chunks: list[Chunk], meta: dict[str, Any]) -> None:
         """Insert/update document and chunks in SQLite FTS."""
         if not self.config.get('indexer.enable_fts', True):
             return
@@ -449,7 +453,7 @@ class VaultManager:
             domain = urlparse(url).netloc
             cursor.execute("""
                 INSERT INTO documents (
-                    url, domain, file_name, content_type, fetched_at, 
+                    url, domain, file_name, content_type, fetched_at,
                     parser_used, quality_score, total_chunks, metadata_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
@@ -519,7 +523,7 @@ class VaultManager:
         return count
 
     @staticmethod
-    def _fts_query(query: str) -> Optional[str]:
+    def _fts_query(query: str) -> str | None:
         """Build a safe FTS5 MATCH expression from a raw user query.
 
         Wraps each whitespace token as a quoted phrase so FTS operators
@@ -535,8 +539,8 @@ class VaultManager:
                 tokens.append(f'"{cleaned}"')
         return ' AND '.join(tokens) or None
 
-    def search_vault(self, query: str, limit: int = 20, domain: Optional[str] = None,
-                     hybrid: Optional[bool] = None) -> List[Chunk]:
+    def search_vault(self, query: str, limit: int = 20, domain: str | None = None,
+                     hybrid: bool | None = None) -> list[Chunk]:
         """Perform FTS5 search (or hybrid FTS+vector when enabled).
 
         Args:
@@ -561,7 +565,7 @@ class VaultManager:
             if not fts_match:
                 return []  # punctuation-only query -> nothing to match
             where = "chunks_fts MATCH ?"
-            params: List[Any] = [fts_match]
+            params: list[Any] = [fts_match]
 
             if domain:
                 where += " AND url LIKE ?"
@@ -585,7 +589,7 @@ class VaultManager:
 
         return results
 
-    def _search_hybrid(self, query: str, limit: int, domain: Optional[str]) -> List[Chunk]:
+    def _search_hybrid(self, query: str, limit: int, domain: str | None) -> list[Chunk]:
         """Fuse FTS5 keyword ranks and vector-similarity ranks via Reciprocal
         Rank Fusion (RRF). Returns Chunks best matching the query."""
         if not query or not query.strip():
@@ -600,7 +604,7 @@ class VaultManager:
             if not fts_match:
                 return []
             fts_where = "chunks_fts MATCH ?"
-            fts_params: List[Any] = [fts_match]
+            fts_params: list[Any] = [fts_match]
             if domain:
                 fts_where += " AND url LIKE ?"
                 fts_params.append(f'%{domain}%')
@@ -610,14 +614,14 @@ class VaultManager:
                 ORDER BY rank
                 LIMIT ?
             """, (*fts_params, fts_pool))
-            fts_rows: List[Tuple[int, str]] = cursor.fetchall()
+            fts_rows: list[tuple[int, str]] = cursor.fetchall()
 
             # --- vector candidate list (brute force; fine for a hoard vault) ---
-            scored: List[Tuple[float, int, str]] = []
+            scored: list[tuple[float, int, str]] = []
             if vec_pool > 0:
                 qvec = self.embeddings.vectorize(query)
                 vec_where = ""
-                vec_params: List[Any] = []
+                vec_params: list[Any] = []
                 if domain:
                     vec_where = " WHERE url LIKE ?"
                     vec_params.append(f'%{domain}%')
@@ -632,10 +636,10 @@ class VaultManager:
                 scored = scored[:vec_pool]
 
             # --- RRF fuse ---
-            rrf: Dict[int, float] = {}
+            rrf: dict[int, float] = {}
             for rank, (rid, _u) in enumerate(fts_rows):
                 rrf[rid] = rrf.get(rid, 0.0) + 1.0 / (k + rank + 1)
-            for rank, (score, rid, _u) in enumerate(scored):
+            for rank, (_score, rid, _u) in enumerate(scored):
                 rrf[rid] = rrf.get(rid, 0.0) + 1.0 / (k + rank + 1)
 
             if not rrf:
@@ -645,7 +649,7 @@ class VaultManager:
             order = fused[:limit] if limit > 0 else fused
             ids = [rid for rid, _ in (fused[:limit] if limit > 0 else fused)]
 
-            results: List[Chunk] = []
+            results: list[Chunk] = []
             if ids:
                 placeholders = ",".join("?" * len(ids))
                 order_map = {rid: i for i, (rid, _) in enumerate(order)}
@@ -667,7 +671,7 @@ class VaultManager:
         """Check if a document is in the vault and not expired."""
         with self._db() as (_conn, cursor):
             cursor.execute(
-                "SELECT fetched_at FROM documents WHERE url = ?", 
+                "SELECT fetched_at FROM documents WHERE url = ?",
                 (url,)
             )
             row = cursor.fetchone()
@@ -694,7 +698,7 @@ class NetworkFetcher:
         self._max_retries = config.get('general.max_retries', 2)
         self._enable_preflight = config.get('network.enable_preflight', True)
 
-    def _parse_cookies(self) -> Dict[str, str]:
+    def _parse_cookies(self) -> dict[str, str]:
         cookies = {}
         if not self._cookie_string:
             return cookies
@@ -708,25 +712,25 @@ class NetworkFetcher:
     async def preflight(self, url: str) -> bool:
         if not self._enable_preflight or not self._parse_cookies():
             return True
-        
+
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.head(
-                    url,
-                    cookies=self._parse_cookies(),
-                    headers={'User-Agent': self._user_agent},
-                    timeout=ClientTimeout(total=5),
-                    allow_redirects=False
-                ) as resp:
-                    if resp.status in (403, 429):
-                        return False
-                    if resp.status in (302, 303) and 'captcha' in resp.headers.get('Location', '').lower():
-                        return False
-                    return True
+            async with aiohttp.ClientSession() as session, session.head(
+                url,
+                cookies=self._parse_cookies(),
+                headers={'User-Agent': self._user_agent},
+                timeout=ClientTimeout(total=5),
+                allow_redirects=False
+            ) as resp:
+                blocked = resp.status in (403, 429)
+                captcha_redirect = (
+                    resp.status in (302, 303)
+                    and 'captcha' in resp.headers.get('Location', '').lower()
+                )
+                return not (blocked or captcha_redirect)
         except Exception:
             return True
 
-    async def _fetch_aiohttp(self, url: str) -> Tuple[Optional[str], Optional[bytes], str]:
+    async def _fetch_aiohttp(self, url: str) -> tuple[str | None, bytes | None, str]:
         """Attempt 1: Standard aiohttp. Returns (text, binary, content_type)."""
         cookies = self._parse_cookies()
         headers = {'User-Agent': self._user_agent}
@@ -734,25 +738,26 @@ class NetworkFetcher:
         timeout = ClientTimeout(total=self._timeout)
 
         try:
-            async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
-                async with session.get(url, cookies=cookies, timeout=timeout, allow_redirects=True) as resp:
-                    content_type = resp.headers.get('Content-Type', 'text/plain').split(';')[0].strip()
-                    if resp.status == 200:
-                        if 'text' in content_type:
-                            return await resp.text(), None, content_type
-                        else:
-                            return None, await resp.read(), content_type
-                    elif resp.status == 403:
-                        logger.warning("aiohttp: 403 Blocked.")
-                        return None, None, content_type
+            async with aiohttp.ClientSession(connector=connector, headers=headers) as session, session.get(
+                url, cookies=cookies, timeout=timeout, allow_redirects=True
+            ) as resp:
+                content_type = resp.headers.get('Content-Type', 'text/plain').split(';')[0].strip()
+                if resp.status == 200:
+                    if 'text' in content_type:
+                        return await resp.text(), None, content_type
                     else:
-                        logger.warning(f"aiohttp: Status {resp.status}")
-                        return None, None, content_type
+                        return None, await resp.read(), content_type
+                elif resp.status == 403:
+                    logger.warning("aiohttp: 403 Blocked.")
+                    return None, None, content_type
+                else:
+                    logger.warning(f"aiohttp: Status {resp.status}")
+                    return None, None, content_type
         except Exception as e:
             logger.debug(f"aiohttp failed: {e}")
             return None, None, ''
 
-    async def _fetch_curl_cffi(self, url: str) -> Tuple[Optional[str], Optional[bytes], str]:
+    async def _fetch_curl_cffi(self, url: str) -> tuple[str | None, bytes | None, str]:
         if not CURL_AVAILABLE:
             return None, None, ''
 
@@ -768,7 +773,7 @@ class NetworkFetcher:
                 )
                 return resp
             resp = await asyncio.to_thread(_sync_fetch)
-            
+
             content_type = resp.headers.get('Content-Type', 'text/plain').split(';')[0].strip()
             if resp.status_code == 200:
                 if 'text' in content_type:
@@ -785,7 +790,7 @@ class NetworkFetcher:
             logger.debug(f"curl_cffi failed: {e}")
             return None, None, ''
 
-    async def _fetch_flaresolverr(self, url: str) -> Tuple[Optional[str], Optional[bytes], str]:
+    async def _fetch_flaresolverr(self, url: str) -> tuple[str | None, bytes | None, str]:
         if not self._solver_enabled:
             return None, None, ''
 
@@ -801,28 +806,29 @@ class NetworkFetcher:
 
         try:
             timeout = ClientTimeout(total=self._solver_timeout + 10)
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self._solver_url, json=payload, timeout=timeout) as resp:
-                    if resp.status != 200:
-                        return None, None, ''
-                    data = await resp.json()
-                    if data.get("status") != "ok":
-                        return None, None, ''
-                    solution = data.get("solution", {})
-                    if solution.get("status") == 200:
-                        content_type = solution.get('headers', {}).get('Content-Type', 'text/html').split(';')[0]
-                        response = solution.get('response', '')
-                        if 'text' in content_type:
-                            return response, None, content_type
-                        else:
-                            # FlareSolverr usually returns binary as b64, but we handle text mostly
-                            return None, response.encode('utf-8'), content_type
+            async with aiohttp.ClientSession() as session, session.post(
+                self._solver_url, json=payload, timeout=timeout
+            ) as resp:
+                if resp.status != 200:
                     return None, None, ''
+                data = await resp.json()
+                if data.get("status") != "ok":
+                    return None, None, ''
+                solution = data.get("solution", {})
+                if solution.get("status") == 200:
+                    content_type = solution.get('headers', {}).get('Content-Type', 'text/html').split(';')[0]
+                    response = solution.get('response', '')
+                    if 'text' in content_type:
+                        return response, None, content_type
+                    else:
+                        # FlareSolverr usually returns binary as b64, but we handle text mostly
+                        return None, response.encode('utf-8'), content_type
+                return None, None, ''
         except Exception as e:
             logger.error(f"FlareSolverr failed: {e}")
             return None, None, ''
 
-    async def fetch(self, url: str, strategy: str) -> Tuple[Optional[str], Optional[bytes], str]:
+    async def fetch(self, url: str, strategy: str) -> tuple[str | None, bytes | None, str]:
         """
         Execute the explicit strategy chain.
         Returns: (text, binary_data, content_type)
@@ -830,13 +836,13 @@ class NetworkFetcher:
         logger.info(f"Fetching {url} with strategy: {strategy}")
 
         # Preflight validation
-        if self._enable_preflight and self._parse_cookies():
-            if not await self.preflight(url):
-                raise RuntimeError("CF_COOKIE_EXPIRED")
+        if (self._enable_preflight and self._parse_cookies()
+                and not await self.preflight(url)):
+            raise RuntimeError("CF_COOKIE_EXPIRED")
 
         # Strategy dispatch
         text, binary, ctype = None, None, ''
-        
+
         if strategy == "fast":
             text, binary, ctype = await self._fetch_aiohttp(url)
             if text is not None or binary is not None:
@@ -908,7 +914,7 @@ class DocumentParser:
             print("Warning: ebooklib not installed. EPUB parsing disabled.", file=sys.stderr)
 
     @staticmethod
-    async def parse_pdf(binary: bytes) -> Tuple[str, Dict[str, Any]]:
+    async def parse_pdf(binary: bytes) -> tuple[str, dict[str, Any]]:
         """Extract text from PDF using PyMuPDF."""
         DocumentParser._import_binary_parsers()
         if not FITZ_AVAILABLE:
@@ -917,13 +923,13 @@ class DocumentParser:
             doc = DocumentParser._fitz.open(stream=binary, filetype="pdf")
             text_parts = []
             meta = {"page_count": doc.page_count, "parser": "pymupdf"}
-            
+
             for page_num in range(doc.page_count):
                 page = doc.load_page(page_num)
                 text = page.get_text()
                 if text.strip():
                     text_parts.append(f"## Page {page_num + 1}\n\n{text.strip()}")
-            
+
             doc.close()
             full_text = "\n\n".join(text_parts)
             return full_text, meta
@@ -932,7 +938,7 @@ class DocumentParser:
             return "", {"parser": "failed", "error": str(e)}
 
     @staticmethod
-    async def parse_docx(binary: bytes) -> Tuple[str, Dict[str, Any]]:
+    async def parse_docx(binary: bytes) -> tuple[str, dict[str, Any]]:
         """Extract text from DOCX."""
         DocumentParser._import_binary_parsers()
         if not DOCX_AVAILABLE:
@@ -947,7 +953,7 @@ class DocumentParser:
             return "", {"parser": "failed", "error": str(e)}
 
     @staticmethod
-    async def parse_epub(binary: bytes) -> Tuple[str, Dict[str, Any]]:
+    async def parse_epub(binary: bytes) -> tuple[str, dict[str, Any]]:
         """Extract text from EPUB."""
         DocumentParser._import_binary_parsers()
         if EPUB_AVAILABLE:
@@ -991,7 +997,7 @@ class DocumentParser:
             return "", {"parser": "failed", "error": str(e2)}
 
     @staticmethod
-    async def clean_html(html: str, url: str) -> Tuple[str, Dict[str, Any]]:
+    async def clean_html(html: str, url: str) -> tuple[str, dict[str, Any]]:
         """Clean HTML using trafilatura + readability fallback."""
         results = {}
 
@@ -1014,7 +1020,7 @@ class DocumentParser:
         try:
             traf_md, read_html = await asyncio.gather(traf_task, read_task)
             results["trafilatura"] = traf_md
-            
+
             if read_html:
                 # Rough conversion to markdown-ish text
                 clean = re.sub(r'<script[^>]*>.*?</script>', '', read_html, flags=re.DOTALL | re.IGNORECASE)
@@ -1049,14 +1055,14 @@ class DocumentParser:
             return body, {"parser": "fallback"}
 
     @staticmethod
-    async def parse_binary(content_type: str, binary: bytes) -> Tuple[str, Dict[str, Any]]:
+    async def parse_binary(content_type: str, binary: bytes) -> tuple[str, dict[str, Any]]:
         """Route binary to appropriate parser based on content type."""
         parsers = {
             'application/pdf': DocumentParser.parse_pdf,
             'application/vnd.openxmlformats-officedocument.wordprocessingml.document': DocumentParser.parse_docx,
             'application/epub+zip': DocumentParser.parse_epub,
         }
-        
+
         parser = parsers.get(content_type)
         if parser:
             return await parser(binary)
@@ -1065,7 +1071,7 @@ class DocumentParser:
             try:
                 text = binary.decode('utf-8', errors='ignore')
                 return text, {"parser": "binary_as_text"}
-            except:
+            except Exception:
                 return "", {"parser": "unknown_binary", "error": "Cannot parse"}
 
 # =============================================================================
@@ -1084,7 +1090,7 @@ class SemanticChunker:
     def _estimate_tokens(text: str) -> int:
         return len(text) // 4
 
-    async def chunk(self, markdown: str, url: str, parser_meta: Dict[str, Any]) -> List[Chunk]:
+    async def chunk(self, markdown: str, url: str, parser_meta: dict[str, Any]) -> list[Chunk]:
         if not markdown:
             return [Chunk(text="[Empty content]", metadata={"source": url, "empty": True})]
 
@@ -1161,32 +1167,34 @@ class CrawlerPlanner:
         self.respect_robots = config.get('crawler.respect_robots', True)
         self.sitemap_limit = config.get('crawler.sitemap_limit', 500)
 
-    async def get_robots_urls(self, domain: str) -> List[str]:
+    async def get_robots_urls(self, domain: str) -> list[str]:
         """Fetch robots.txt and extract sitemap URLs."""
         if not self.respect_robots:
             return []
 
         base_url = f"{domain}/robots.txt"
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(base_url, timeout=10) as resp:
-                    if resp.status == 200:
-                        text = await resp.text()
-                        sitemap_urls = re.findall(r'^Sitemap:\s*(.+)$', text, re.MULTILINE | re.IGNORECASE)
-                        return [url.strip() for url in sitemap_urls]
+            async with aiohttp.ClientSession() as session, session.get(
+                base_url, timeout=10
+            ) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    sitemap_urls = re.findall(r'^Sitemap:\s*(.+)$', text, re.MULTILINE | re.IGNORECASE)
+                    return [url.strip() for url in sitemap_urls]
         except Exception as e:
             logger.warning(f"Failed to fetch robots.txt: {e}")
-        
+
         # Fallback to default sitemap location
         return [f"{domain}/sitemap.xml"]
 
-    async def parse_sitemap(self, sitemap_url: str) -> List[str]:
+    async def parse_sitemap(self, sitemap_url: str) -> list[str]:
         """Parse sitemap XML and extract URLs."""
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(sitemap_url, timeout=30) as resp:
-                    if resp.status != 200:
-                        return []
+            async with aiohttp.ClientSession() as session, session.get(
+                sitemap_url, timeout=30
+            ) as resp:
+                if resp.status != 200:
+                    return []
                     xml = await resp.text()
                     # Simple regex extraction for <loc> tags
                     urls = re.findall(r'<loc>(.+?)</loc>', xml, re.IGNORECASE)
@@ -1196,17 +1204,17 @@ class CrawlerPlanner:
             logger.warning(f"Failed to parse sitemap {sitemap_url}: {e}")
             return []
 
-    async def discover_urls(self, url: str) -> List[str]:
+    async def discover_urls(self, url: str) -> list[str]:
         """Discover URLs for a given domain."""
         parsed = urlparse(url)
         domain = f"{parsed.scheme}://{parsed.netloc}"
-        
+
         sitemap_urls = await self.get_robots_urls(domain)
         all_urls = []
         for sitemap_url in sitemap_urls:
             urls = await self.parse_sitemap(sitemap_url)
             all_urls.extend(urls)
-        
+
         # Deduplicate
         return list(dict.fromkeys(all_urls))
 
@@ -1231,7 +1239,7 @@ class WebSearchProvider:
     to feed into _ingest_many.
     """
 
-    def __init__(self, config: ConfigManager, fetcher: 'NetworkFetcher'):
+    def __init__(self, config: ConfigManager, fetcher: NetworkFetcher):
         self.config = config
         self.fetcher = fetcher
         self.max_retries = int(config.get('discovery.max_retries', 2))
@@ -1241,9 +1249,9 @@ class WebSearchProvider:
     def _clean_title(raw: str) -> str:
         return re.sub(r"<[^>]+>", "", raw).strip()
 
-    async def _fetch_with_backoff(self, url: str, strategy: str) -> Optional[str]:
+    async def _fetch_with_backoff(self, url: str, strategy: str) -> str | None:
         """Fetch a search page, retrying transient failures with backoff."""
-        last_exc: Optional[Exception] = None
+        last_exc: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
                 text, _binary, _ctype = await self.fetcher.fetch(url, strategy)
@@ -1263,8 +1271,8 @@ class WebSearchProvider:
         return None
 
     @staticmethod
-    def _parse_duckduckgo(text: str, max_results: int) -> List[SearchResult]:
-        results: List[SearchResult] = []
+    def _parse_duckduckgo(text: str, max_results: int) -> list[SearchResult]:
+        results: list[SearchResult] = []
         for m in re.finditer(
             r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
             text, re.IGNORECASE | re.DOTALL
@@ -1284,8 +1292,8 @@ class WebSearchProvider:
         return results
 
     @staticmethod
-    def _parse_mojeek(text: str, max_results: int) -> List[SearchResult]:
-        results: List[SearchResult] = []
+    def _parse_mojeek(text: str, max_results: int) -> list[SearchResult]:
+        results: list[SearchResult] = []
         for m in re.finditer(
             r'<a class="ob"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
             text, re.IGNORECASE | re.DOTALL
@@ -1302,14 +1310,14 @@ class WebSearchProvider:
         return results
 
     async def _try_provider(self, url: str, strategy: str, max_results: int,
-                            parser) -> List[SearchResult]:
+                            parser) -> list[SearchResult]:
         text = await self._fetch_with_backoff(url, strategy)
         if not text:
             return []
         return parser(text, max_results)
 
     async def search(self, query: str, max_results: int = 10,
-                     strategy: str = "aggressive") -> List[SearchResult]:
+                     strategy: str = "aggressive") -> list[SearchResult]:
         q = re.sub(r"\s+", "+", query.strip())
         # (label, url, parser) ordered by preference; later entries are fallbacks.
         providers = [
@@ -1319,7 +1327,7 @@ class WebSearchProvider:
              self._parse_mojeek),
         ]
 
-        last_results: List[SearchResult] = []
+        last_results: list[SearchResult] = []
         for label, url, parser in providers:
             results = await self._try_provider(url, strategy, max_results, parser)
             if results:
@@ -1368,8 +1376,8 @@ class HoardCore:
         logger.info(f"Artifact written -> {path}")
         return path
 
-    async def research(self, question: str, out_path: Optional[str] = None,
-                       discover: int = 5, recall: int = 6) -> Optional[str]:
+    async def research(self, question: str, out_path: str | None = None,
+                       discover: int = 5, recall: int = 6) -> str | None:
         """Agentic research workflow: DISCOVER -> INGEST -> RECALL -> EMIT.
 
         Live web-searches the question (via the configured discovery provider),
@@ -1383,7 +1391,7 @@ class HoardCore:
         await self._discover_and_ingest(question, discover, strategy, force_refresh=False)
 
         print(f"\n[2/RECALL] hybrid-retrieving top {recall} chunks", flush=True)
-        chunks: List[Chunk] = self.vault.search_vault(question, limit=recall, hybrid=True)
+        chunks: list[Chunk] = self.vault.search_vault(question, limit=recall, hybrid=True)
         if not chunks:
             print("  -> no chunks retrieved")
             return None
@@ -1393,7 +1401,7 @@ class HoardCore:
         else:
             os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
 
-        print(f"\n[3/EMIT] writing grounding context", flush=True)
+        print("\n[3/EMIT] writing grounding context", flush=True)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(f"# Grounding Context\n## Question\n{question}\n\n")
             f.write(f"## Retrieved sources ({len(chunks)})\n\n")
@@ -1411,7 +1419,7 @@ class HoardCore:
         print(f"\n=== DONE. {len(chunks)} chunks, {len(seen)} sources -> {abs_path}")
         return abs_path
 
-    async def _process_document(self, url: str, strategy: str, force_refresh: bool) -> Tuple[List[Chunk], Dict[str, Any]]:
+    async def _process_document(self, url: str, strategy: str, force_refresh: bool) -> tuple[list[Chunk], dict[str, Any]]:
         """
         Core processing pipeline for a single URL.
         Returns (chunks, meta_overrides).
@@ -1499,7 +1507,7 @@ class HoardCore:
         return chunks, parser_meta
 
     @staticmethod
-    def _detect_junk(markdown: str, raw_text: Optional[str], parser_meta: Dict[str, Any], quality_score: float) -> Optional[str]:
+    def _detect_junk(markdown: str, raw_text: str | None, parser_meta: dict[str, Any], quality_score: float) -> str | None:
         """Return a reason string if extraction is boilerplate/empty, else None."""
         stripped = markdown.strip()
 
@@ -1528,7 +1536,7 @@ class HoardCore:
         # rely on structural signals above, not raw length ratio alone.
         return False
 
-    async def _scrape_single(self, url: str, strategy: str, force_refresh: bool) -> List[Chunk]:
+    async def _scrape_single(self, url: str, strategy: str, force_refresh: bool) -> list[Chunk]:
         """Scrape a single URL."""
         chunks, meta = await self._process_document(url, strategy, force_refresh)
         if meta.get('cached'):
@@ -1540,11 +1548,11 @@ class HoardCore:
             return []
         return chunks
 
-    async def _crawl_domain(self, url: str, strategy: str, force_refresh: bool) -> List[Chunk]:
+    async def _crawl_domain(self, url: str, strategy: str, force_refresh: bool) -> list[Chunk]:
         """Crawl an entire domain using sitemap."""
         all_chunks = []
         discovered_urls = await self.crawler.discover_urls(url)
-        
+
         if not discovered_urls:
             logger.warning(f"No URLs discovered for {url}. Falling back to single scrape.")
             return await self._scrape_single(url, strategy, force_refresh)
@@ -1555,7 +1563,7 @@ class HoardCore:
         max_workers = self.config.get('crawler.parallel_workers', 5)
         semaphore = asyncio.Semaphore(max_workers)
 
-        async def _crawl_one(single_url: str) -> List[Chunk]:
+        async def _crawl_one(single_url: str) -> list[Chunk]:
             async with semaphore:
                 try:
                     chunks, _ = await self._process_document(single_url, strategy, force_refresh)
@@ -1575,12 +1583,12 @@ class HoardCore:
         self,
         url: str,
         action: str = "scrape",
-        strategy: Optional[str] = None,
-        query: Optional[str] = None,
+        strategy: str | None = None,
+        query: str | None = None,
         force_refresh: bool = False,
-        urls: Optional[List[str]] = None,
+        urls: list[str] | None = None,
         max_results: int = 0
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Public entry point.
 
@@ -1634,17 +1642,17 @@ class HoardCore:
 
         elif action == "crawl":
             chunks = await self._crawl_domain(url, strategy, force_refresh)
-            return [c.to_dict() for c in chunks if c.metadata.get('error', False) == False]
+            return [c.to_dict() for c in chunks if not c.metadata.get('error', False)]
 
         else:  # "scrape" (default)
             chunks = await self._scrape_single(url, strategy, force_refresh)
             return [c.to_dict() for c in chunks]
 
-    async def _ingest_many(self, urls: List[str], strategy: str, force_refresh: bool) -> List[Dict[str, Any]]:
+    async def _ingest_many(self, urls: list[str], strategy: str, force_refresh: bool) -> list[dict[str, Any]]:
         """Process an explicit list of URLs with a bounded-worker pool."""
         max_workers = self.config.get('crawler.parallel_workers', 5)
         semaphore = asyncio.Semaphore(max_workers)
-        results: List[Dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
 
         async def _ingest_one(target: str) -> None:
             async with semaphore:
@@ -1667,7 +1675,7 @@ class HoardCore:
         return results
 
     async def _discover_and_ingest(self, query: str, max_results: int,
-                                   strategy: str, force_refresh: bool) -> List[Dict[str, Any]]:
+                                   strategy: str, force_refresh: bool) -> list[dict[str, Any]]:
         """Run a live web search, then ingest the top-ranked URLs.
 
         Uses the free DuckDuckGo HTML provider (no API key) through the existing
@@ -1727,7 +1735,7 @@ async def main():
     max_results = 0
     discover = None
     recall = 6
-    out_path: Optional[str] = None
+    out_path: str | None = None
 
     i = 2
     while i < len(sys.argv):
@@ -1793,14 +1801,14 @@ async def main():
 
     print("\n" + "=" * 80)
     print(f"✅ Done. Returned {len(result)} chunks.")
-    
+
     # Preview
     for i, chunk in enumerate(result[:3]):
         print(f"\n--- CHUNK {i+1} ---")
         print(f"Metadata: {chunk['metadata']}")
         preview = chunk['text'][:300] + "..." if len(chunk['text']) > 300 else chunk['text']
         print(f"Preview: {preview}")
-    
+
     if len(result) > 3:
         print(f"\n... and {len(result) - 3} more chunks.")
 

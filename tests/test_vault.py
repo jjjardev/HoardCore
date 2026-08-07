@@ -1,6 +1,5 @@
 """Tests for the vault: indexing, hybrid retrieval (RRF), backfill, db hygiene."""
 
-import sqlite3
 
 import pytest
 
