@@ -15,6 +15,7 @@ Lightweight, fully-local LLM document ingestion engine that scrapes, crawls, and
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [OpenCode (AI Harness) Integration](#opencode-ai-harness-integration)
+  - [Workflow examples in OpenCode](#workflow-examples-in-opencode)
 - [Feature Tour](#feature-tour)
   - [Ingest (Scrape / Crawl)](#ingest-scrape--crawl)
   - [Hybrid Retrieval](#hybrid-retrieval)
@@ -145,6 +146,69 @@ The vault persists between runs. Later searches are instant and require no netwo
 2. **Agent writes the deliverable** into `artifacts/`, tagging every quantitative claim `[V]` (verified in the current vault), `[E]` (captured earlier), or `[H]` (hypothesis).
 3. **Agent audits itself** — re-hybrid-queries the vault for each claimed figure. Anything it cannot retrace to full primary text is demoted to `[E]` or dropped.
 4. **Repeat queries** hit the vault (`--action search`), which is instant and offline.
+
+### Workflow examples in OpenCode
+
+The examples below assume you run OpenCode inside the `HoardCore-RAG` project directory and are chatting with the agent. In each, the agent reads `skill.md` first, then drives the `hoardcore` CLI.
+
+**1. Research a new topic from scratch**
+
+```
+You: Summarize the latest state of renewable energy in Negros Occidental,
+     with sources.
+
+Agent: (loads skill.md -> runs)
+  venv/bin/python hoardcore.py _ --action research \
+     --query "negros occidental renewable energy 2026" --discover 6 --recall 8
+  -> writes artifacts/grounding_context.md  (sources + scores)
+  -> drafts a synthesis into artifacts/, tagging each figure [V]/[E]/[H]
+  -> re-queries the vault to verify the key numbers before showing you
+```
+
+**2. Persistent memory across sessions**
+
+```
+You: I had you ingest docs on solar earlier. Now: "which figure did we capture
+     on bagasse vs wind capacity?"
+
+Agent: (no network needed)
+  venv/bin/python hoardcore.py _ --action search --query "bagasse wind capacity"
+  -> instant, offline answer grounded in the local vault, with source URLs
+```
+
+**3. A single source, now**
+
+```
+You: Read and summarize this: https://arxiv.org/pdf/2401.xxxxx.pdf
+
+Agent: venv/bin/python hoardcore.py https://arxiv.org/pdf/2401.xxxxx.pdf --action scrape
+  -> fetches, parses, chunks, indexes, returns the text to summarize
+  -> FYI: also saved to hoardcore_data/.../extracted/ for future lookup
+```
+
+**4. An explicit list of documents**
+
+```
+You: Soak up these three URLs so I can ask follow-ups later:
+  https://a.example/report , https://b.example/analysis , https://c.example/paper
+
+Agent: venv/bin/python hoardcore.py _ --action ingest \
+       --urls "https://a.example/report,https://b.example/analysis,https://c.example/paper"
+  -> indexes all three; your follow-ups now hit the vault instantly
+```
+
+**5. Bypass a Cloudflare wall**
+
+```
+You: That page is behind Cloudflare. Get me the text of
+  https://blocked.example.com/article
+
+Agent: venv/bin/python hoardcore.py https://blocked.example.com/article \
+       --action scrape --strategy aggressive
+  -> aiohttp -> curl_cffi -> (FlareSolverr if enabled) until it succeeds
+```
+
+Each example ends with content that is **grounded and recallable later** — the vault is the source of truth, not the agent's memory.
 
 ### Agent-friendly fact
 
