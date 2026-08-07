@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.1] - 2026-08-07
 
 ### Changed
 - DeepResearch is now the **default research mode**. The bounded Hardcore
