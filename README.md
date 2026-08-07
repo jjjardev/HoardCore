@@ -104,7 +104,7 @@ One module keeps install and deployment trivial (`python hoardcore.py`). The cos
 | **FlareSolverr** *(optional)* | Fetch Cloudflare-protected pages for the `aggressive` strategy | `docker run -d --name=flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr` |
 | **PyMuPDF / python-docx / ebooklib** *(optional)* | PDF, DOCX, EPUB parsing | Installed via Makefile |
 
-FlareSolverr is only needed for Cloudflare-protected sites and is disabled by default in the shipped config sample (override with `[solver] enabled = true` in `hoardcore.toml`). The default endpoint is `http://localhost:8191/v1`.
+FlareSolverr is only needed for Cloudflare-protected sites and is disabled by default in the auto-generated config (override with `[solver] enabled = true` in `hoardcore.toml`). The default endpoint is `http://localhost:8191/v1`.
 
 ---
 
