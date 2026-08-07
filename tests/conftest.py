@@ -31,7 +31,7 @@ class TempConfig:
             "auth": {"cookie_string": ""},
             "solver": {"enabled": False, "url": "http://localhost:8191/v1", "solver_timeout": 60},
             "storage": {"root_dir": self._root, "save_binary": False, "save_raw_html": False},
-            "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "extract_pdf_tables": True},
+            "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "extract_pdf_tables": True, "enable_pdf_ocr": True},
             "crawler": {"respect_robots": False, "sitemap_limit": 500, "parallel_workers": 2},
             "indexer": {"enable_fts": True, "search_limit": 20},
             "embeddings": {"enabled": True, "dim": 64, "hybrid_search": True, "top_k": 40},
