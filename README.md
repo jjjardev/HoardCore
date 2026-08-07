@@ -16,6 +16,7 @@ Lightweight, fully-local LLM document ingestion engine that scrapes, crawls, and
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [OpenCode (AI Harness) Integration](#opencode-ai-harness-integration)
+  - [HCRAG + agent = the research harness](#hcrag--agent--the-research-harness)
   - [DeepResearch: the Hardcore Research Loop](#deepresearch-the-hardcore-research-loop)
   - [Workflow examples in OpenCode](#workflow-examples-in-opencode)
 - [Feature Tour](#feature-tour)
@@ -192,6 +193,19 @@ The vault persists between runs. Later searches are instant and require no netwo
 ## OpenCode (AI Harness) Integration
 
 **This tool is designed to be driven by an AI agent, and the only harness it has been tested against is [OpenCode](https://opencode.ai).** HoardCore-RAG's role is to give the agent a persistent, verifiable memory: the agent calls it to hoard the web and local files, then queries the vault instead of trusting its own (decaying or invented) recall.
+
+### HCRAG + agent = the research harness
+
+HCRAG is **not** a standalone appliance — it is one half of a research harness. The other half is an AI agent. The division of labor is simple and intentional:
+
+| HCRAG does (on your machine, key-free) | The agent does (any model) |
+|---|---|
+| Fetch web + local files (HTML/PDF/DOCX/EPUB/OCR) | Reads the user's request and `skill.md` |
+| Store everything in a persistent SQLite vault | Drives the `hoardcore` CLI (discover / ingest / search / research) |
+| Hybrid-retrieve the most relevant chunks (FTS5 + vectors, RRF) | Reads the grounding context and cross-checks claims |
+| Keep it offline, single-file, with zero model dependency | Writes the finished, `[V]/[E]/[H]`-tagged report |
+
+HCRAG is the **retrieval and grounding layer**; the agent is the **reasoning and writing layer**. HCRAG has no model dependency and runs on modest hardware — the agent can be any LLM (cloud or local) of your choice. That separation is what makes the harness both lightweight *and* flexible: swap the agent, keep the vault.
 
 ### The three companion documents
 
