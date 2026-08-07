@@ -56,6 +56,14 @@ Key characteristics:
 
 This section explains *why* HCRAG is built the way it is. It is written for engineers deciding whether the trade-offs are intentional (they are) or accidental (they are not).
 
+### A precise label: HCRAG is a retrieval layer, not a whole RAG system
+
+RAG *sensu stricto* (Lewis et al., 2020) couples a **retriever** with a **generator** (an LLM that produces tokens conditioned on the retrieved passages). HCRAG deliberately implements only the **retrieval** half: it ingests, indexes, recalls, and emits grounding context. It contains **no generator** — the LLM that turns recalled chunks into prose is external (typically the agent harness, e.g. OpenCode, that calls HCRAG).
+
+So, precisely: HCRAG is the **retrieval / grounding layer** of a RAG system. It only becomes "RAG" in the full sense once you attach an LLM that generates from its recalled context. The name `RAG` is retained because it is the reliable, searchable term for this class — but the honest description is *"a key-free, fully-local retrieval engine that grounds AI agents."*
+
+This split is a feature, not a gap: **generation is bring-your-own-LLM.** Because HCRAG prices no model, gate, or API key, the cost of grounding is zero and forever-local; the only non-zero cost is the LLM you choose to attach for composition.
+
 ### Why no embeddings model (why "RAG without vectors")
 
 HCRAG deliberately does **not** use a neural embedding model. Retrieval fuses SQLite **FTS5** keyword ranking with dependency-free **lexical hashing** (FNV-1a feature hashing of words + 3-gram shingles into 256-dim unit vectors) via Reciprocal Rank Fusion. This is an opinionated trade, not an omission:
