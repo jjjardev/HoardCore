@@ -1,0 +1,29 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# --- Virtualenv ---
+venv/
+.venv/
+
+# --- Testing ---
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Runtime data & vault ---
+# The SQLite vault and per-domain extracted/binary content live under
+# hoardcore_data/ and should NOT be committed. Re-ingest to rebuild.
+hoardcore_data/
+
+# Local config — auto-generated on first run and may contain cookies/credentials
+hoardcore.toml
+
+# --- Editors / OS ---
+.DS_Store
+*.swp
+.idea/
+.vscode/
