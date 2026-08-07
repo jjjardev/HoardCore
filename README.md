@@ -224,8 +224,9 @@ Agent: (loads skill.md -> recognizes the 'autoresearch' trigger -> opens the
   venv/bin/python hoardcore.py _ --action research \
      --query "economic impact renewable energy Negros" \
      --discover 6 --recall 8 --strategy aggressive
-  -> "Engaging the Hardcore Research Loop..."
+  -> "Engaging the Hardcore Research Loop... budget: 3 passes x >=5 sources"
   -> DISCOVER (web) -> INGEST (vault) -> RECALL 5-10 chunks -> EMIT
+  -> stops on saturation / source quota / pass budget / user interrupt
   -> writes artifacts/*.md with source URLs + hybrid scores + distinct-sources
   -> tags each claim [V]/[E]/[H] and adversarially audits them against the vault
   -> replies with a 3-bullet Executive Summary; full evidence in the artifact file

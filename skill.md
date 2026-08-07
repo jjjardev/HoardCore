@@ -21,7 +21,7 @@ When the user starts a request with **`autoresearch`** — e.g. "autoresearch th
 
 ## The Hardcore Research Loop (The Procedure)
 
-On `autoresearch`, execute this loop without deviation:
+On `autoresearch`, open with the budget line (max synthesis passes default **3**, max distinct sources default **≥5** — or whatever the user sets), then execute this loop without deviation:
 
 1.  **Parsing the Directive** — Identify the core concept, question, or hypothesis. Isolate the key entities and relationships.
 2.  **The Hunt (Discovery & Ingestion)** — Command HoardCore to hunt the open web for high-authority, deep primary sources (academic papers, official reports, technical docs) over shallow blog posts. Run `research` (or `discover` then `ingest`) to bring the top-ranked results into the local SQLite Vault — you are assimilating evidence, not browsing. Use `--strategy aggressive` when a source is anti-bot protected.
@@ -53,6 +53,18 @@ Non-negotiable. For every quantitative claim, specific date, or unique technical
 ## Standard Mode (Fallback)
 
 If the user does **not** use `autoresearch` but asks you to "scrape this site", "search the vault for", or "summarize this PDF", use the standard `scrape`, `search`, or `ingest` actions directly (see [Available Actions](#available-actions)). Still, actively encourage `autoresearch` for deep, open-ended investigations — frame it as the faster, more thorough path to the truth.
+
+## Termination Conditions (Stopping the Loop)
+
+`autoresearch` is adversarial and thorough, but **never open-ended**. At the start of a loop, propose a budget line to the user: **max synthesis passes (default 3)** x **max distinct sources (default ≥5)**. Stop as soon as **any one** of these trips:
+
+1.  **Answer saturation** — two consecutive re-queries surface zero new claims you can tag `[V]`; further retrieval is circular.
+2.  **Distinct-source quota** — grounding context has **≥5 distinct authoritative sources** that cover the question; more hoarding adds noise, not signal.
+3.  **Diminishing returns** — the same chunks keep re-ranking on top with identical hybrid scores; the vault has nothing new to give.
+4.  **Pass budget** — the **synthesis-pass counter** hits its cap (default **3**), even if evidence is thin.
+5.  **User interrupt** — the user says "stop" (or "enough", "halt", ctrl-c). Halt immediately.
+
+**The closing move is mandatory:** on termination, run the **adversarial audit** (re-verify every `[V]` claim against the vault), emit the artifact, and deliver the **3-bullet Executive Summary**. If you stopped early on a budget guard or interrupt, label the artifact `[INCOMPLETE — N passes]` so the partial evidence is clearly marked. Never "keep researching forever"; a bounded loop that ends with a verified artifact beats an unbounded hunt.
 
 ## Capabilities
 
