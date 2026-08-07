@@ -214,6 +214,23 @@ So the chain is: **OpenCode auto-loads `AGENTS.md` → `AGENTS.md` forces `skill
 
 The examples below assume you run OpenCode inside the `HoardCore-RAG` project directory and are chatting with the agent. In each, the agent reads `skill.md` first, then drives the `hoardcore` CLI.
 
+**0. `autoresearch` — the Hardcore Research Loop**
+
+```
+You: autoresearch the economic impact of renewable energy in Negros
+
+Agent: (loads skill.md -> recognizes the 'autoresearch' trigger -> opens the
+       Hardcore Research Loop)
+  venv/bin/python hoardcore.py _ --action research \
+     --query "economic impact renewable energy Negros" \
+     --discover 6 --recall 8 --strategy aggressive
+  -> "Engaging the Hardcore Research Loop..."
+  -> DISCOVER (web) -> INGEST (vault) -> RECALL 5-10 chunks -> EMIT
+  -> writes artifacts/*.md with source URLs + hybrid scores + distinct-sources
+  -> tags each claim [V]/[E]/[H] and adversarially audits them against the vault
+  -> replies with a 3-bullet Executive Summary; full evidence in the artifact file
+```
+
 **1. Research a new topic from scratch**
 
 ```

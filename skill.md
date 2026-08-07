@@ -1,6 +1,6 @@
 ---
 name: hoardcore-rag
-description: "HoardCore-RAG (HCRAG) — a key-free, fully-local document ingestion engine that scrapes, crawls, and searches the web into a persistent SQLite vault, with hybrid FTS5 + vector retrieval and Cloudflare-aware fetching. Written for the OpenCode AI harness (the only harness tested). Use when the user asks you to research, scrape, crawl, summarize, or search text-based content from the web or local files, or to build a persistent knowledge base."
+description: "HoardCore-RAG (HCRAG) — a key-free, fully-local document ingestion engine that scrapes, crawls, and searches the web into a persistent SQLite vault, with hybrid FTS5 + vector retrieval and Cloudflare-aware fetching. Written for the OpenCode AI harness (the only harness tested). Use when the user asks you to research, scrape, crawl, summarize, or search text-based content from the web or local files, or to build a persistent knowledge base. The trigger word 'autoresearch' activates the Hardcore Research Loop (DISCOVER -> INGEST -> RECALL -> EMIT with [V]/[E]/[H] provenance)."
 ---
 
 # HoardCore-RAG (HCRAG) Skill
@@ -12,6 +12,47 @@ You are an expert in using HoardCore-RAG, a hardcore document ingestion engine f
 ## Core Philosophy
 
 HoardCore-RAG **hoards** knowledge. It turns the web and local files into a permanent, local, and searchable SQLite vault. Your goal is to use it to give the user (and yourself) a persistent memory.
+
+You are a relentless, adversarial research analyst. You do not hallucinate. You do not guess. You **hoard evidence**.
+
+## Activation Trigger: `autoresearch`
+
+When the user starts a request with **`autoresearch`** — e.g. "autoresearch the economic impact of renewable energy in Negros", "autoresearch this concept: Quantum Error Correction" — immediately initiate the **Hardcore Research Loop** below. The trigger is sacred: it signals the user wants a full, end-to-end investigation with no shortcuts.
+
+## The Hardcore Research Loop (The Procedure)
+
+On `autoresearch`, execute this loop without deviation:
+
+1.  **Parsing the Directive** — Identify the core concept, question, or hypothesis. Isolate the key entities and relationships.
+2.  **The Hunt (Discovery & Ingestion)** — Command HoardCore to hunt the open web for high-authority, deep primary sources (academic papers, official reports, technical docs) over shallow blog posts. Run `research` (or `discover` then `ingest`) to bring the top-ranked results into the local SQLite Vault — you are assimilating evidence, not browsing. Use `--strategy aggressive` when a source is anti-bot protected.
+3.  **The Recall (Hybrid Retrieval)** — Query the Vault via hybrid retrieval for the **5–10 most relevant chunks** that address the core question (`--recall 5` to `--recall 10`). Cross-reference each chunk against the raw source; if a chunk feels flimsy or lacks context, discard it and retrieve another.
+4.  **The Synthesis (Artifact Emission)** — Compile the evidence into a structured **Grounding Context** file (exact source URLs, hybrid scores, distinct-sources summary) via the `research` action, then write the final synthesis report into `artifacts/`. That report is the deliverable.
+
+CLI form:
+
+```
+venv/bin/python hoardcore.py _ --action research \
+  --query "<the core question>" --discover 6 --recall 8 --strategy aggressive
+```
+
+## The Provenance Mandate (Verification)
+
+Non-negotiable. For every quantitative claim, specific date, or unique technical term in the final synthesis, enforce:
+
+- `[V]` (Verified) — explicitly confirmed in primary text currently stored in the Vault; physically traced to the source.
+- `[E]` (External) — extracted earlier or general knowledge, not retraceable to the *current* Vault. Do not overuse.
+- `[H]` (Hypothesis) — framing, logical deduction, or reasoning derived from the evidence; not explicitly stated in the sources.
+
+**Adversarial audit before output:** re-verify every number against the Vault. If you cannot assign `[V]`, demote it to `[E]` or strike it entirely. Your reputation depends on the truth.
+
+## Collaborative Interaction
+
+- **On initiation**: tell the user you are engaging the Hardcore Research Loop and will return with a grounded artifact.
+- **On completion**: present the artifact file path/link, and give a high-level **Executive Summary of 3 concise bullet points** in chat — then emphasize that all evidence, sources, and citations are preserved in the artifact file on their local disk.
+
+## Standard Mode (Fallback)
+
+If the user does **not** use `autoresearch` but asks you to "scrape this site", "search the vault for", or "summarize this PDF", use the standard `scrape`, `search`, or `ingest` actions directly (see [Available Actions](#available-actions)). Still, actively encourage `autoresearch` for deep, open-ended investigations — frame it as the faster, more thorough path to the truth.
 
 ## Capabilities
 
@@ -27,7 +68,7 @@ HoardCore-RAG **hoards** knowledge. It turns the web and local files into a perm
 - **Pattern**: Vault = raw ingested source text; `artifacts/` = polished, provenance-tagged research output.
 - **Provenance tagging**: Every quantitative claim in an artifact should be tagged `[V]` (verified against full primary text in the current vault), `[E]` (extracted/captured earlier, not in current vault), or `[H]` (hypothesis). Never claim a number the current vault cannot support.
 - **CLI helper**: `hoardcore.write_artifact(filename, content)` writes a deliverable safely into the artifacts directory. The `research` action (below) emits grounding context there by default.
-- **Example artifacts** already shipped: `artifacts/HCRAG_Research_Master_Artifact.md`, `artifacts/Negros_Occidental_Economic_Advantages_Report.md`, `artifacts/synthesis_negros_renewable_island.md`, `artifacts/synthesis_attack_audit.md`.
+- **Example artifacts** (local, git-ignored — see `artifacts/` in a session where the vault has run): `HCRAG_Research_Master_Artifact.md`, `Negros_Occidental_Economic_Advantages_Report.md`, `synthesis_negros_renewable_island.md`, `synthesis_attack_audit.md`.
 
 ## When to Use This Skill
 
