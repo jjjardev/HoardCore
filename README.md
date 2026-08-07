@@ -279,25 +279,6 @@ Agent: (loads skill.md -> runs)
   -> re-queries the vault to verify the key numbers before showing you
 ```
 
-**1b. Enforced Provenance — machine-verify `[V]` claims**
-
-Provenance is system-enforced, not just a manual rule. The CLI can machine-check
-a claim (or adversarially audit an entire artifact) against the current vault:
-
-```bash
-# verify a single claim -> prints a [V] / [E] / [H] verdict
-venv/bin/python hoardcore.py _ --action verify \
-  --claim "sugarcane bagasse briquettes burn longer than regular charcoal"
-
-# audit an artifact: every [V]-tagged line is checked and demoted if unbacked
-venv/bin/python hoardcore.py _ --action verify-file --query artifacts/report.md
-```
-
-A claim only earns `[V]` when the vault substantiates it (lexical overlap ≥ 0.35
-AND hybrid score ≥ 0.005); otherwise it is demoted to `[E]` (partial) or `[H]`
-(unbacked). This turns "we ask agents to be honest" into "the system guarantees
-it."
-
 **2. Persistent memory across sessions**
 
 ```
@@ -415,23 +396,20 @@ hoardcore [URL] [options]
 | `ingest` | Index an explicit URL list given as a comma/space separated `--urls` string. |
 | `discover` | Web-search `--query`, ingest the top `--limit` results. |
 | `research` | Run `discover -> ingest -> recall -> emit`; writes to `--out` or `artifacts/grounding_context.md`. |
-| `verify` | Enforced provenance: machine-check a single `--claim` against the vault, returning a `[V]/[E]/[H]` verdict. |
-| `verify-file` | Adversarially audit an artifact (`--query <path>`): check every `[V]`-tagged line and demote any the vault cannot substantiate. |
 
-Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `verify-file`) does not need a URL.
+Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`) does not need a URL.
 
 ### Flags
 
 | Flag | Description |
 |---|---|
-| `--action ACTION` | One of `scrape`, `crawl`, `search`, `ingest`, `discover`, `research`, `verify`, `verify-file`. |
+| `--action ACTION` | One of `scrape`, `crawl`, `search`, `ingest`, `discover`, `research`. |
 | `--strategy S` | `fast`, `balanced` (default from config), or `aggressive`. |
-| `--query Q` | Required for `search`, `discover`, `research`; the claim/path for `verify`/`verify-file`. |
-| `--claim C` | Alias for `--query` (used by `verify`). |
+| `--query Q` | Required for `search`, `discover`, `research`. |
 | `--limit N` | Web results to ingest for `discover`. |
 | `--urls U1,U2,U3` | Explicit URL list for `ingest`. |
 | `--discover N` | Sources to discover first in `research` (default 5). |
-| `--recall N` | Chunks to retrieve in `research` / `verify` (default 6). |
+| `--recall N` | Chunks to retrieve in `research` (default 6). |
 | `--out PATH` | Output file for `research` (default `artifacts/grounding_context.md`). |
 | `--force` | Ignore the cache and re-fetch / re-index. |
 

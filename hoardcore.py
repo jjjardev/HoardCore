@@ -1443,124 +1443,6 @@ class HoardCore:
         logger.info(f"Artifact written -> {path}")
         return path
 
-    # ------------------------------------------------------------------
-    # ENFORCED PROVENANCE: machine-verify [V]/[E]/[H] claims vs the vault
-    # ------------------------------------------------------------------
-
-    def verify_claim(self, claim: str, recall: int = 6,
-                     overlap_threshold: float = 0.35,
-                     score_threshold: float = 0.005) -> dict[str, Any]:
-        """Machine-enforce the provenance of a single claim.
-
-        Retrieves the chunks in the vault most similar to ``claim`` and scores
-        the lexical overlap between the claim's content tokens and each chunk
-        (combined with its hybrid score). This turns the manual ``[V]/[E]/[H]``
-        audit in ``skill.md`` into a check the system can *guarantee*: a claim
-        labelled ``[V]`` must actually be substantiated by full primary text
-        currently in the vault.
-
-        Verdicts returned:
-          - ``[V]`` verified: some vault chunk substantively overlaps the claim
-            AND meets the hybrid-score threshold.
-          - ``[E]`` external: partial overlap only (indirect / weaker support);
-            not fully retraceable to the current vault.
-          - ``[H]`` unsupported: nothing in the vault backs the claim.
-
-        Args:
-            claim: a natural-language statement asserting a fact.
-            recall: how many chunks to retrieve for evaluation.
-            overlap_threshold: minimum token-overlap ratio for ``[V]``.
-            score_threshold: minimum hybrid score for a supporting chunk.
-
-        Returns a dict: {claim, verdict, overlap, score, top_source, support[]}.
-        """
-        claim = (claim or "").strip()
-        empty = {"claim": claim, "verdict": "[H]", "overlap": 0.0, "score": 0.0,
-                 "top_source": None, "support": []}
-        if not claim:
-            empty["verdict"] = "[H]"
-            empty["reason"] = "empty claim"
-            return empty
-
-        content_tokens = {
-            t for t in EmbeddingsEngine._tokens(claim) if len(t) > 2
-        }
-        if not content_tokens:
-            empty["verdict"] = "[H]"
-            empty["reason"] = "no substantive tokens"
-            return empty
-
-        chunks = self.vault.search_vault(claim, limit=recall, hybrid=True)
-        if not chunks:
-            empty["verdict"] = "[H]"
-            empty["reason"] = "no chunks retrieved"
-            return empty
-
-        scored = []
-        for c in chunks:
-            chunk_tokens = set(EmbeddingsEngine._tokens(c.text))
-            if not chunk_tokens:
-                continue
-            overlap = len(content_tokens & chunk_tokens) / len(content_tokens)
-            hy = float(c.metadata.get("hybrid_score", 0.0))
-            scored.append({
-                "overlap": round(overlap, 4),
-                "score": round(hy, 5),
-                "source": c.metadata.get("source_url", "?"),
-                "snippet": c.text[:220],
-            })
-
-        if not scored:
-            empty["verdict"] = "[H]"
-            empty["reason"] = "no scored chunks"
-            return empty
-
-        top = max(scored, key=lambda s: (s["overlap"], s["score"]))
-        result = {
-            "claim": claim,
-            "verdict": "[H]",
-            "overlap": top["overlap"],
-            "score": top["score"],
-            "top_source": top["source"],
-            "support": sorted(scored, key=lambda s: (-s["overlap"], -s["score"]))[:3],
-        }
-        if top["overlap"] >= overlap_threshold and top["score"] >= score_threshold:
-            result["verdict"] = "[V]"
-        elif top["overlap"] >= overlap_threshold * 0.5:
-            result["verdict"] = "[E]"
-        else:
-            result["verdict"] = "[H]"
-        return result
-
-    def verify_artifact(self, path: str, recall: int = 6,
-                        overlap_threshold: float = 0.35,
-                        score_threshold: float = 0.005) -> list[dict[str, Any]]:
-        """Adversarial-audit an artifact: verify every ``[V]``-tagged claim.
-
-        Scans the file for lines carrying a ``[V]`` provenance tag, runs each
-        claim through :meth:`verify_claim`, and returns a per-claim report.
-        Any ``[V]`` the vault cannot substantiate is surfaced as a demotion to
-        ``[E]``/``[H]`` — the enforcement guarantee made concrete.
-
-        Returns a list of verify_claim dicts for every ``[V]`` claim found.
-        """
-        if not os.path.exists(path):
-            logger.warning(f"verify_artifact: no such file {path}")
-            return []
-        reports: list[dict[str, Any]] = []
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                if "[V]" not in line:
-                    continue
-                claim = line.strip().lstrip("-#* >").strip()
-                if not claim:
-                    continue
-                if claim.startswith("[V]"):
-                    claim = claim[3:].strip()
-                reports.append(self.verify_claim(claim, recall,
-                                                 overlap_threshold, score_threshold))
-        return reports
-
     async def research(self, question: str, out_path: str | None = None,
                        discover: int = 5, recall: int = 6,
                        strategy: str | None = None) -> str | None:
@@ -1916,8 +1798,6 @@ async def main():
         print("  python hoardcore.py _ --action discover --query 'negros renewable energy' --limit 5")
         print("  python hoardcore.py _ --action research --query 'how does bokashi compost' --discover 5 --recall 6")
         print("  python hoardcore.py _ --action research --query 'negros economy' --out artifacts/report.md")
-        print("  python hoardcore.py _ --action verify --claim 'HCRAG uses FTS5 + RRF hybrid retrieval'")
-        print("  python hoardcore.py _ --action verify-file --query artifacts/report.md")
         sys.exit(1)
 
     url = sys.argv[1]
@@ -1939,7 +1819,7 @@ async def main():
         elif sys.argv[i] == "--strategy" and i + 1 < len(sys.argv):
             strategy = sys.argv[i + 1]
             i += 2
-        elif sys.argv[i] in ("--query", "--claim") and i + 1 < len(sys.argv):
+        elif sys.argv[i] == "--query" and i + 1 < len(sys.argv):
             query = sys.argv[i + 1]
             i += 2
         elif sys.argv[i] == "--discover" and i + 1 < len(sys.argv):
@@ -1986,35 +1866,6 @@ async def main():
                                          discover=discover or 5, recall=recall,
                                          strategy=strategy)
         sys.exit(0 if written else 1)
-
-    if action == "verify":
-        if not query:
-            print("  ⚠️  --claim (via --query) required for --action verify", file=sys.stderr)
-            sys.exit(2)
-        report = scraper.verify_claim(query, recall=recall)
-        print("\n=== ENFORCED PROVENANCE: claim verification ===")
-        print(f"Claim   : {report['claim']}")
-        print(f"Verdict : {report['verdict']}")
-        print(f"Overlap : {report['overlap']:.3f}  |  Hybrid score: {report['score']:.5f}")
-        print(f"Top src : {report['top_source']}")
-        for s in report.get("support", []):
-            print(f"  - {s['source']}  (overlap {s['overlap']:.3f}, score {s['score']:.5f})")
-            print(f"    {s['snippet']!r}")
-        sys.exit(0)
-
-    if action == "verify-file":
-        if not query:
-            print("  ⚠️  --query (path to artifact) required for --action verify-file", file=sys.stderr)
-            sys.exit(2)
-        reports = scraper.verify_artifact(query, recall=recall)
-        print(f"\n=== ENFORCED PROVENANCE: adversarial audit of {query} ===")
-        print(f"Verified [V] claims found: {len(reports)}\n")
-        for r in reports:
-            flag = "OK  " if r["verdict"] == "[V]" else "DEMOTE"
-            print(f"[{flag}] {r['verdict']}  overlap {r['overlap']:.3f}  :: {r['claim'][:90]}")
-            if r["verdict"] != "[V]":
-                print(f"        -> best support: {r['top_source']}")
-        sys.exit(0)
 
     result = await scraper.fetch(
         url, action=action, strategy=strategy,

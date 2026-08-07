@@ -59,20 +59,6 @@ Non-negotiable. For every quantitative claim, specific date, or unique technical
 
 **Adversarial audit before output:** re-verify every number against the Vault. If you cannot assign `[V]`, demote it to `[E]` or strike it entirely. Your reputation depends on the truth.
 
-### Enforced Provenance (machine-verified `[V]`)
-
-Provenance is not just a manual rule — it is **enforced by the system**. Use the CLI to machine-check a claim (or an entire artifact) against the current Vault:
-
-```
-# verify a single claim -> returns a [V] / [E] / [H] verdict
-venv/bin/python hoardcore.py _ --action verify --claim "sugarcane bagasse briquettes burn longer than regular charcoal"
-
-# adversarially audit an artifact: every [V]-tagged line is checked
-venv/bin/python hoardcore.py _ --action verify-file --query artifacts/report.md
-```
-
-The verifier hybrid-retrieves the claim and scores lexical overlap against each chunk. A claim only earns `[V]` if the Vault substantiates it (overlap ≥ 0.35 AND hybrid score ≥ 0.005); otherwise it is demoted to `[E]` (partial) or `[H]` (unbacked). Run this on every artifact before delivery. If a `[V]` demotes, fix the claim or strike it.
-
 ## Collaborative Interaction
 
 - **On initiation**: tell the user you are engaging the Hardcore Research Loop (at its depth preset), and will return with a grounded artifact.
