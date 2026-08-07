@@ -131,14 +131,25 @@ The vault persists between runs. Later searches are instant and require no netwo
 
 **This tool is designed to be driven by an AI agent, and the only harness it has been tested against is [OpenCode](https://opencode.ai).** HoardCore-RAG's role is to give the agent a persistent, verifiable memory: the agent calls it to hoard the web and local files, then queries the vault instead of trusting its own (decaying or invented) recall.
 
-### The two companion documents
+### The three companion documents
 
 | File | Audience | Purpose |
 |---|---|---|
 | `README.md` | Humans / maintainers | Install, config, architecture, CLI reference |
-| `skill.md` | The AI agent | What the agent reads to learn **how** to use the tool |
+| `AGENTS.md` | The AI agent (loaded first) | The **trigger**: a short file OpenCode auto-loads into the agent's context at every session start, mandating that the agent read `skill.md` before any task |
+| `skill.md` | The AI agent | The **manual**: what the agent reads to learn **how** to use the tool |
 
-`skill.md` is written as an agent skill (YAML frontmatter + instructions). It teaches the agent when to trigger, which actions map to which user request, the `[V]/[E]/[H]` provenance discipline, and the adversarial-audit step before finalizing an artifact. **Point the agent at `skill.md` first;** it is the operating manual the model is expected to read and follow.
+`skill.md` is written as an agent skill (YAML frontmatter + instructions). It teaches the agent when to trigger, which actions map to which user request, the `[V]/[E]/[H]` provenance discipline, and the adversarial-audit step before finalizing an artifact.
+
+### Where the agent reads `skill.md` first
+
+The order is enforced by the harness, not by habit:
+
+1. **Session start** — OpenCode (and other harnesses that honor `AGENTS.md`) loads the repo-root `AGENTS.md` into the agent's context automatically. It contains one hard rule: *"Before any task, you MUST read `skill.md` in full."*
+2. **First task** — the agent obeys that rule and reads `skill.md` before touching the web, the vault, or `artifacts/`. Everything the agent then does (scrape / crawl / search / discover / research) is driven by `skill.md`'s action mapping.
+3. **Ongoing** — `skill.md` stays the reference: if a task needs an action the agent is unsure of, it re-consults `skill.md`, never its own memory.
+
+So the chain is: **OpenCode auto-loads `AGENTS.md` → `AGENTS.md` forces `skill.md` → `skill.md` drives the CLI.** If your harness does not auto-read `AGENTS.md`, treat that file as the instruction to point the agent at first.
 
 ### How the agent uses it (example reasoning)
 
@@ -381,9 +392,11 @@ HoardCore-RAG/
     hoardcore.py           The entire engine (config, fetcher, parsers, chunker,
                            crawler, discovery, vault, CLI, research action)
                            (research.py was merged into this single file)
-    hoardcore.toml         Generated config (sample shipped in repo)
+    hoardcore.toml         Generated config on first run (git-ignored)
     Makefile               install / run / discover / test / clean
     pyproject.toml         Packaging, deps + extras, console script
+    AGENTS.md              Agent trigger doc — auto-loaded by OpenCode at
+                           session start; mandates reading skill.md first
     skill.md               Uses-guide / agent skill (OpenCode harness doc)
     artifacts/               Runtime deliverables (git-ignored, not in repo) —
     tests/
