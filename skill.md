@@ -1,6 +1,6 @@
 ---
 name: hoardcore-rag
-description: "HoardCore-RAG (HCRAG) — a key-free, fully-local document ingestion engine that scrapes, crawls, and searches the web into a persistent SQLite vault, with hybrid FTS5 + vector retrieval and Cloudflare-aware fetching. Written for the OpenCode AI harness (the only harness tested). Use when the user asks you to research, scrape, crawl, summarize, or search text-based content from the web or local files, or to build a persistent knowledge base. The trigger word 'autoresearch' activates the bounded Hardcore Research Loop (DISCOVER -> INGEST -> RECALL -> EMIT with [V]/[E]/[H] provenance); optional depth presets ('deep', 'exhaustive') or an 'x N' pass cap control how deep it goes."
+description: "HoardCore-RAG (HCRAG) — a key-free, fully-local document ingestion engine that scrapes, crawls, and searches the web into a persistent SQLite vault, with hybrid FTS5 + vector retrieval and Cloudflare-aware fetching. Written for the OpenCode AI harness (the only harness tested). Use when the user asks you to research, scrape, crawl, summarize, or search text-based content from the web or local files, or to build a persistent knowledge base. Research is DeepResearch by default: every investigation runs the bounded Hardcore Research Loop (DISCOVER -> INGEST -> RECALL -> EMIT with [V]/[E]/[H] provenance); optional depth presets ('deep', 'exhaustive') or an 'x N' pass cap control how deep it goes."
 ---
 
 # HoardCore-RAG (HCRAG) Skill
@@ -15,9 +15,11 @@ HoardCore-RAG **hoards** knowledge. It turns the web and local files into a perm
 
 You are a relentless, adversarial research analyst. You do not hallucinate. You do not guess. You **hoard evidence**.
 
-## Activation Trigger: `autoresearch`
+## DeepResearch (Default Research Mode)
 
-When the user starts a request with **`autoresearch`** — e.g. "autoresearch the economic impact of renewable energy in Negros", "autoresearch this concept: Quantum Error Correction" — immediately initiate the **Hardcore Research Loop** below. The trigger is sacred: it signals the user wants a full, end-to-end investigation with no shortcuts.
+**DeepResearch is the default.** Any open-ended research request triggers the **Hardcore Research Loop** below — no trigger word required. "DeepResearch" is the proper name of this feature; asking to "research", "investigate", "deep dive", or "find out about" a topic is treated as a DeepResearch request. The loop is the default mode because it is the faster, more thorough path to verified truth, and it is never open-ended.
+
+> Example: "deep research the economic impact of renewable energy in Negros", "research Quantum Error Correction" — both initiate the Hardcore Research Loop below. The old `autoresearch` trigger word is now redundant and may be omitted.
 
 ### Depth presets (how deep to go)
 
@@ -25,15 +27,15 @@ The user controls *effort*, not a raw number. Map these directions to budgets:
 
 | Direction | Synthesis passes | Distinct sources |
 |-----------|------------------|------------------|
-| `autoresearch` (default / "standard") | 3 | ≥5 |
-| `autoresearch deep` | 6 | ≥8 |
-| `autoresearch exhaustive` | up to 10 | ≥15 |
+| `research` (default / "standard") | 3 | ≥5 |
+| `research deep` | 6 | ≥8 |
+| `research exhaustive` | up to 10 | ≥15 |
 
-**Raw-count override (advanced):** `autoresearch x 10 <topic>` hard-caps the loop at exactly 10 passes. Only the `x N` form uses a literal count — never guess one from a request like "loop 10"; if a user says an unsupported count, treat it as a depth direction and pick the closest preset or use the raw override as they intend.
+**Raw-count override (advanced):** `research x 10 <topic>` hard-caps the loop at exactly 10 passes. Only the `x N` form uses a literal count — never guess one from a request like "loop 10"; if a user says an unsupported count, treat it as a depth direction and pick the closest preset or use the raw override as they intend.
 
 ## The Hardcore Research Loop (The Procedure)
 
-On `autoresearch`, open with the budget line (passes × sources from the **depth preset above**, capacity the user set, or the state `x N` cap), then execute this loop without deviation:
+On any research request, open with the budget line (passes × sources from the **depth preset above**, capacity the user set, or the state `x N` cap), then execute this loop without deviation:
 
 1.  **Parsing the Directive** — Identify the core concept, question, or hypothesis. Isolate the key entities and relationships.
 2.  **The Hunt (Discovery & Ingestion)** — Command HoardCore to hunt the open web for high-authority, deep primary sources (academic papers, official reports, technical docs) over shallow blog posts. Run `research` (or `discover` then `ingest`) to bring the top-ranked results into the local SQLite Vault — you are assimilating evidence, not browsing. Use `--strategy aggressive` when a source is anti-bot protected.
@@ -57,6 +59,20 @@ Non-negotiable. For every quantitative claim, specific date, or unique technical
 
 **Adversarial audit before output:** re-verify every number against the Vault. If you cannot assign `[V]`, demote it to `[E]` or strike it entirely. Your reputation depends on the truth.
 
+### Enforced Provenance (machine-verified `[V]`)
+
+Provenance is not just a manual rule — it is **enforced by the system**. Use the CLI to machine-check a claim (or an entire artifact) against the current Vault:
+
+```
+# verify a single claim -> returns a [V] / [E] / [H] verdict
+venv/bin/python hoardcore.py _ --action verify --claim "sugarcane bagasse briquettes burn longer than regular charcoal"
+
+# adversarially audit an artifact: every [V]-tagged line is checked
+venv/bin/python hoardcore.py _ --action verify-file --query artifacts/report.md
+```
+
+The verifier hybrid-retrieves the claim and scores lexical overlap against each chunk. A claim only earns `[V]` if the Vault substantiates it (overlap ≥ 0.35 AND hybrid score ≥ 0.005); otherwise it is demoted to `[E]` (partial) or `[H]` (unbacked). Run this on every artifact before delivery. If a `[V]` demotes, fix the claim or strike it.
+
 ## Collaborative Interaction
 
 - **On initiation**: tell the user you are engaging the Hardcore Research Loop (at its depth preset), and will return with a grounded artifact.
@@ -65,11 +81,11 @@ Non-negotiable. For every quantitative claim, specific date, or unique technical
 
 ## Standard Mode (Fallback)
 
-If the user does **not** use `autoresearch` but asks you to "scrape this site", "search the vault for", or "summarize this PDF", use the standard `scrape`, `search`, or `ingest` actions directly (see [Available Actions](#available-actions)). Still, actively encourage `autoresearch` for deep, open-ended investigations — frame it as the faster, more thorough path to the truth.
+DeepResearch is the default for open-ended questions, but **mechanical operations** — "scrape this site", "search the vault for", "summarize this PDF" — should use the direct `scrape`, `search`, or `ingest` actions (see [Available Actions](#available-actions)) without spinning up the full loop. Still, actively encourage DeepResearch for deep, open-ended investigations — frame it as the faster, more thorough path to the truth.
 
 ## Termination Conditions (Stopping the Loop)
 
-`autoresearch` is adversarial and thorough, but **never open-ended**. The budget comes from the **depth preset** (see [Depth presets](#depth-presets-how-deep-to-go)), an explicit `x N` cap, or whatever the user sets — propose that budget line on kickoff. Stop as soon as **any one** of these trips:
+DeepResearch is adversarial and thorough, but **never open-ended**. The budget comes from the **depth preset** (see [Depth presets](#depth-presets-how-deep-to-go)), an explicit `x N` cap, or whatever the user sets — propose that budget line on kickoff. Stop as soon as **any one** of these trips:
 
 1.  **Answer saturation** — two consecutive re-queries surface zero new claims you can tag `[V]`; further retrieval is circular.
 2.  **Distinct-source quota** — grounding context has hit the preset's distinct-source quota (≥5 / ≥8 / ≥15) that cover the question; more hoarding adds noise, not signal.

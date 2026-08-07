@@ -3,6 +3,25 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Enforced Provenance**: machine-verified `[V]/[E]/[H]` claims. New `--action
+  verify` checks a single claim against the vault and returns a `[V]`/`[E]`/`[H]`
+  verdict; `--action verify-file` adversarially audits an artifact, checking
+  every `[V]`-tagged line and demoting any the vault cannot substantiate. This
+  turns the provenance discipline from a manual agent rule into a system
+  guarantee. Thresholds (overlap ≥ 0.35, hybrid score ≥ 0.005) are configurable
+  via the method args. `--claim` is now an alias for `--query`.
+
+### Changed
+- DeepResearch is now the **default research mode**. The bounded Hardcore
+  Research Loop (with `[V]`/`[E]`/`[H]` provenance and adversarial audit)
+  triggers on any open-ended research request; the former `autoresearch`
+  trigger word is redundant and may be omitted. Feature renamed `autoresearch`
+  → **DeepResearch** (depth presets are now `research`, `research deep`,
+  `research exhaustive`, and the `x N` cap).
+
 ## [0.2.0] - 2026-08-07
 
 ### Added
