@@ -3,6 +3,28 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-08-09
+
+### Fixed
+- **Sitemap crawler was effectively dead.** In `parse_sitemap` the `<loc>` XML
+  extraction sat *after* a `return []` inside the non-200 branch, so a live
+  sitemap that responded 200 fell through and returned `None` — crashing
+  `discover_urls` with `TypeError` and silently degrading `--action crawl` to a
+  single scrape. Rewrote it with a namespace-aware `_extract_locs()` (lxml,
+  regex fallback) plus dedupe.
+- **`scrape` returned an empty result on a cache hit.** `_scrape_single` now
+  serves the already-vaulted chunks via the new `VaultManager.get_chunks_for_url()`
+  instead of an empty list.
+- **Full-vault O(n) scan on every CLI run.** `backfill_vectors()` now short-
+  circuits with a cheap count-equality check when nothing is missing.
+- Unrecognized CLI flags are now warned about instead of silently ignored.
+- Stale `v0.1` version strings removed; the CLI banner and config template now
+  use a module-level `__version__`.
+
+### Quality
+- New `tests/test_crawler.py` suite (sitemap, robots, discovery — no network
+  I/O) plus cache-hit and backfill regression tests. Suite is now **37 tests**.
+
 ## [0.2.1] - 2026-08-07
 
 ### Changed

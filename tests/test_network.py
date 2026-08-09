@@ -129,3 +129,23 @@ def test_research_forwards_strategy_to_discovery(tmp_path, monkeypatch):
     # ...and when omitted, the config default is used.
     asyncio.run(scraper.research("q", discover=2, recall=4))
     assert captured["strategy"] == "fast"
+
+
+def test_scrape_returns_cached_chunks_on_cache_hit(tmp_path, monkeypatch):
+    """`scrape` of an already-vaulted URL must serve the stored chunks instead
+    of returning an empty result (no network touched, no re-index)."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+
+    scraper = hc.HoardCore()
+    url = "https://example.test/cached-doc"
+    scraper.vault.index_document(
+        url,
+        [hc.Chunk(text="cached body sentence here", metadata={"source": url})],
+        {},
+    )
+
+    chunks = asyncio.run(scraper._scrape_single(url, "fast", force_refresh=False))
+    assert chunks
+    assert "cached body" in chunks[0].text
+    assert chunks[0].metadata["source_url"] == url

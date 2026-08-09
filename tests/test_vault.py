@@ -74,6 +74,22 @@ def test_backfill_vectors_populates_missing(vault, make_chunk):
         assert cur.fetchone()[0] == 1
 
 
+def test_backfill_skips_full_scan_when_nothing_missing(vault, make_chunk):
+    vault.index_document("https://example.test/filled", [make_chunk("some text")], {})
+    assert vault.backfill_vectors() == 0
+
+
+def test_get_chunks_for_url_returns_stored_chunks_in_order(vault, make_chunk):
+    vault.index_document("https://example.test/ordered", [
+        make_chunk("first chunk", "Sec One"),
+        make_chunk("second chunk", "Sec Two"),
+    ], {})
+    chunks = vault.get_chunks_for_url("https://example.test/ordered")
+    assert [c.text for c in chunks] == ["first chunk", "second chunk"]
+    assert all(c.metadata.get("source_url") == "https://example.test/ordered" for c in chunks)
+    assert vault.get_chunks_for_url("https://example.test/missing") == []
+
+
 def test_hybrid_search_ranks_relevant_first(vault, make_chunk):
     docs = [
         ("https://solar.test/1", "solar farm inverters panels megawatt capacity"),

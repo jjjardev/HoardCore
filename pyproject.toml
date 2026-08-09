@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hoardcore-rag"
-version = "0.2.1"
+version = "0.2.2"
 description = "Key-free, fully-local document ingestion and hybrid retrieval engine for AI agents (SQLite FTS5 + lexical vectors + RRF)."
 readme = "README.md"
 requires-python = ">=3.11"

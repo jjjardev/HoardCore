@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-HoardCore-RAG v0.1 (HCRAG) - Universal LLM Document Ingestion Engine.
+HoardCore-RAG v0.2.2 (HCRAG) - Universal LLM Document Ingestion Engine.
 Ingests HTML, PDF, DOCX, EPUB, and TXT into a persistent, searchable SQLite Vault.
-Handles Cloudflare, Sitemap crawling, and semantic chunking.
 Hybrid retrieval fuses FTS5 keyword search with vector search (RRF), and a
 web-discovery action feeds the crawler from a live search query.
 
@@ -12,6 +11,8 @@ Usage:
     python hoardcore.py _ --action discover --query "negros occidental renewable energy" --limit 5
 """
 from __future__ import annotations
+
+__version__ = "0.2.2"
 
 import asyncio
 import hashlib
@@ -80,7 +81,7 @@ class Chunk:
 # =============================================================================
 
 DEFAULT_CONFIG = """
-# HoardCore-RAG (HCRAG) v0.1 Configuration
+# HoardCore-RAG (HCRAG) v0.2.2 Configuration
 
 [general]
 timeout_seconds = 30
@@ -500,6 +501,15 @@ class VaultManager:
         indexed before the vector table existed). Returns count backfilled."""
         if not self.config.get('embeddings.enabled', True):
             return 0
+        # Cheap count check first: once the vault is fully vectorized this
+        # returns 0 immediately, avoiding an O(n) join+scan on every CLI run.
+        with self._db() as (_conn, cursor):
+            cursor.execute("SELECT COUNT(*) FROM chunks_fts")
+            fts_count = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM chunk_vectors")
+            vec_count = cursor.fetchone()[0]
+        if fts_count == vec_count:
+            return 0
         count = 0
         with self._db() as (_conn, cursor):
             cursor.execute("""
@@ -681,6 +691,23 @@ class VaultManager:
             return False
         fetched_at = row[0]
         return (time.time() - fetched_at) < ttl_seconds
+
+    def get_chunks_for_url(self, url: str) -> list[Chunk]:
+        """Return every stored chunk for a URL (in insertion order)."""
+        results: list[Chunk] = []
+        with self._db() as (_conn, cursor):
+            cursor.execute(
+                "SELECT header_path, text, metadata_json FROM chunks_fts WHERE url = ?",
+                (url,)
+            )
+            for header_path, text, meta_json in cursor.fetchall():
+                meta = json.loads(meta_json)
+                if "source_url" not in meta:
+                    meta["source_url"] = url
+                if header_path and "header_path" not in meta:
+                    meta["header_path"] = header_path
+                results.append(Chunk(text=text, metadata=meta))
+        return results
 
 # =============================================================================
 # 4. NETWORK RESILIENCE CORE
@@ -1254,6 +1281,29 @@ class CrawlerPlanner:
         # Fallback to default sitemap location
         return [f"{domain}/sitemap.xml"]
 
+    @staticmethod
+    def _extract_locs(xml: str) -> list[str]:
+        """Extract <loc> URLs from sitemap XML.
+
+        Namespace-aware via lxml (a guaranteed dependency); falls back to a
+        regex scan if the payload cannot be parsed as XML.
+        """
+        try:
+            from lxml import etree as _etree
+            root = _etree.fromstring(xml.encode("utf-8"))
+            locs: list[str] = []
+            for el in root.iter():
+                if el.text and el.text.strip() and _etree.QName(el).localname == "loc":
+                    locs.append(el.text.strip())
+        except Exception:
+            locs = [
+                loc.strip()
+                for loc in re.findall(
+                    r"<loc[^>]*>\s*(.*?)\s*</loc>", xml, re.IGNORECASE | re.DOTALL
+                )
+            ]
+        return locs
+
     async def parse_sitemap(self, sitemap_url: str) -> list[str]:
         """Parse sitemap XML and extract URLs."""
         try:
@@ -1262,11 +1312,8 @@ class CrawlerPlanner:
             ) as resp:
                 if resp.status != 200:
                     return []
-                    xml = await resp.text()
-                    # Simple regex extraction for <loc> tags
-                    urls = re.findall(r'<loc>(.+?)</loc>', xml, re.IGNORECASE)
-                    # Limit
-                    return urls[:self.sitemap_limit]
+                xml = await resp.text()
+            return list(dict.fromkeys(self._extract_locs(xml)))[:self.sitemap_limit]
         except Exception as e:
             logger.warning(f"Failed to parse sitemap {sitemap_url}: {e}")
             return []
@@ -1614,12 +1661,9 @@ class HoardCore:
         """Scrape a single URL."""
         chunks, meta = await self._process_document(url, strategy, force_refresh)
         if meta.get('cached'):
-            # If cached, we need to fetch from vault
-            # We'll just return an empty list, but the caller should handle.
-            # Actually, let's force a re-fetch if cached and force_refresh is False.
-            # Since we returned early, we don't have chunks.
-            # Better: If cached, just return an empty list.
-            return []
+            # Cache hit: the pipeline fetches nothing, so serve the vaulted
+            # chunks back to the caller instead of an empty result.
+            return self.vault.get_chunks_for_url(url)
         return chunks
 
     async def _crawl_domain(self, url: str, strategy: str, force_refresh: bool) -> list[Chunk]:
@@ -1852,10 +1896,11 @@ async def main():
                 max_results = 0
             i += 2
         else:
+            print(f"  ⚠️  Unrecognized flag ignored: {sys.argv[i]!r}", file=sys.stderr)
             i += 1
 
     scraper = HoardCore()
-    print(f"\n🚀 HoardCore-RAG v0.1 (HCRAG): Action={action}, URL={url}, Strategy={strategy or 'default'}")
+    print(f"\n🚀 HoardCore-RAG v{__version__} (HCRAG): Action={action}, URL={url}, Strategy={strategy or 'default'}")
     print(f"   📁 Vault: {scraper.vault.root_dir}/vault.db | 🏛 Artifacts: {scraper.artifacts_dir}/")
 
     if action == "research":
