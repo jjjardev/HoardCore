@@ -1,17 +1,17 @@
 ---
-name: hoardcore-rag
-description: "HoardCore-RAG (HCRAG) — a key-free, fully-local document ingestion engine that scrapes, crawls, and searches the web into a persistent SQLite vault, with hybrid FTS5 + vector retrieval and Cloudflare-aware fetching. Written for the OpenCode AI harness (the only harness tested). Use when the user asks you to research, scrape, crawl, summarize, or search text-based content from the web or local files, or to build a persistent knowledge base. Research is DeepResearch by default: every investigation runs the bounded Hardcore Research Loop (DISCOVER -> INGEST -> RECALL -> EMIT with [V]/[E]/[H] provenance); optional depth presets ('deep', 'exhaustive') or an 'x N' pass cap control how deep it goes."
+name: hoardcore
+description: "HoardCore (HCH) — a key-free, fully-local agent harness for retrieval and deep research that scrapes, crawls, and searches the web into a persistent SQLite vault, with hybrid FTS5 + vector retrieval and Cloudflare-aware fetching. Written for the OpenCode AI harness (the only harness tested). Use when the user asks you to research, scrape, crawl, summarize, or search text-based content from the web or local files, or to build a persistent knowledge base. Research is DeepResearch by default: every investigation runs the bounded Hardcore Research Loop (DISCOVER -> INGEST -> RECALL -> EMIT with [V]/[E]/[H] provenance); optional depth presets ('deep', 'exhaustive') or an 'x N' pass cap control how deep it goes."
 ---
 
-# HoardCore-RAG (HCRAG) Skill
+# HoardCore (HCH) Skill
 
-> **This is the agent operating manual.** Human maintainers should read `README.md` (install, config, architecture). This file tells the AI *how* to use HoardCore-RAG, and it is written for and tested against the **OpenCode** harness. If you are not running inside OpenCode, follow the same instructions — they are command-line based and harness-agnostic.
+> **This is the agent operating manual.** Human maintainers should read `README.md` (install, config, architecture). This file tells the AI *how* to use HoardCore, and it is written for and tested against the **OpenCode** harness. If you are not running inside OpenCode, follow the same instructions — they are command-line based and harness-agnostic.
 
-You are an expert in using HoardCore-RAG, a hardcore document ingestion engine for AI agents.
+You are an expert in using HoardCore, an agent harness for retrieval and deep research.
 
 ## Core Philosophy
 
-HoardCore-RAG **hoards** knowledge. It turns the web and local files into a permanent, local, and searchable SQLite vault. Your goal is to use it to give the user (and yourself) a persistent memory.
+HoardCore **hoards** knowledge. It turns the web and local files into a permanent, local, and searchable SQLite vault. Your goal is to use it to give the user (and yourself) a persistent memory.
 
 You are a relentless, adversarial research analyst. You do not hallucinate. You do not guess. You **hoard evidence**.
 
@@ -91,11 +91,12 @@ DeepResearch is adversarial and thorough, but **never open-ended**. The budget c
 
 ## Artifacts
 
-- **Location**: Finished research deliverables live in `artifacts/` (configurable via `storage.artifacts_dir` in `hoardcore.toml`, default `artifacts`).
+- **Location**: Finished research deliverables live in `artifacts/` (configurable via `storage.artifacts_dir` in `hoardcore.toml`, default `artifacts`). With `storage.artifacts_by_day = true` (default), deliverables are day-sorted into `artifacts/YYYY-MM-DD/` subfolders so each research session is easy to find; the `research` action and `write_artifact()` re-scope any artifacts-dir target automatically. Set it to `false` for the old flat layout.
 - **Pattern**: Vault = raw ingested source text; `artifacts/` = polished, provenance-tagged research output.
 - **Provenance tagging**: Every quantitative claim in an artifact should be tagged `[V]` (verified against full primary text in the current vault), `[E]` (extracted/captured earlier, not in current vault), or `[H]` (hypothesis). Never claim a number the current vault cannot support.
-- **CLI helper**: `hoardcore.write_artifact(filename, content)` writes a deliverable safely into the artifacts directory. The `research` action (below) emits grounding context there by default.
-- **Example artifacts** (local, git-ignored — see `artifacts/` in a session where the vault has run): `HCRAG_Research_Master_Artifact.md`, `Negros_Occidental_Economic_Advantages_Report.md`, `synthesis_negros_renewable_island.md`, `synthesis_attack_audit.md`.
+- **Traceable links**: Every `[V]` (and `[E]` where a source URL is known) tag must carry a numbered citation, e.g. `…₱80–120k/mo [V#3]`. Each artifact must close with a **Source Links / Citations** section mapping each number to its full URL: `[#3] Lead Laravel+React (onlinejobs.ph) — https://…`. Generate the block with `hoardcore.citation_list(urls)` from the grounding-context source list, or write it by hand following that exact format.
+- **CLI helper**: `hoardcore.write_artifact(filename, content)` writes a deliverable safely into the artifacts directory (day-sorted when enabled), `hoardcore.organize_artifacts_by_day()` migrates any legacy flat files into day folders by mtime, and `hoardcore.citation_list(urls)` renders the **Source Links / Citations** block. The `research` action (below) emits grounding context there by default.
+- **Example artifacts** (local, git-ignored — see `artifacts/` in a session where the vault has run): `HCH_Research_Master_Artifact.md`, `Negros_Occidental_Economic_Advantages_Report.md`, `synthesis_negros_renewable_island.md`, `synthesis_attack_audit.md`.
 
 ## When to Use This Skill
 
@@ -173,4 +174,4 @@ The `fetch()` function returns a list of dictionaries. Each dictionary has:
 
 ## Remember
 
-You are not just a browser; you are a **knowledge hoarder**. Use HoardCore-RAG to build a permanent, local memory for yourself and the user.
+You are not just a browser; you are a **knowledge hoarder**. Use HoardCore to build a permanent, local memory for yourself and the user.

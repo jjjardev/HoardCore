@@ -1,8 +1,10 @@
-# HoardCore-RAG (HCRAG)
+# HoardCore
 
-Lightweight, fully-local LLM document ingestion engine that scrapes, crawls, and searches the web into a persistent SQLite vault with hybrid FTS5 + lexical-vector retrieval, Cloudflare-aware fetching, and key-free web discovery. Vendored into a ready-made research workflow (`discover -> ingest -> recall -> emit`).
+Agent Harness for Retrieval & Deep Research — give your agent a memory it can prove.
 
-![Version](https://img.shields.io/badge/version-0.1.0-blue)
+Terminal tool that turns the web and local files into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. Key-free web discovery, Cloudflare-aware fetching, hybrid FTS5 + lexical-vector retrieval, and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance.
+
+![Version](https://img.shields.io/badge/version-0.3.0-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -11,22 +13,17 @@ Lightweight, fully-local LLM document ingestion engine that scrapes, crawls, and
 ## Table of Contents
 
 - [About](#about)
-- [Design Decisions](#design-decisions)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-- [OpenCode (AI Harness) Integration](#opencode-ai-harness-integration)
-  - [HCRAG + agent = the research harness](#hcrag--agent--the-research-harness)
-  - [DeepResearch: the Hardcore Research Loop](#deepresearch-the-hardcore-research-loop)
-  - [Workflow examples in OpenCode](#workflow-examples-in-opencode)
+- [Agent Harness Integration](#agent-harness-integration)
 - [Feature Tour](#feature-tour)
-  - [Ingest (Scrape / Crawl)](#ingest-scrape--crawl)
+  - [Ingest Mode](#ingest-mode-scrape--crawl)
   - [Hybrid Retrieval](#hybrid-retrieval)
-  - [Discovery (key-free web search)](#discovery-key-free-web-search)
+  - [Discovery Mode](#discovery-mode-key-free-web-search)
   - [Research Workflow](#research-workflow)
   - [Artifacts](#artifacts)
 - [CLI Reference](#cli-reference)
-- [Configuration](#configuration)
 - [Architecture](#architecture)
 - [Package Structure](#package-structure)
 - [Development](#development)
@@ -38,7 +35,9 @@ Lightweight, fully-local LLM document ingestion engine that scrapes, crawls, and
 
 ## About
 
-HoardCore-RAG is a hardcore document ingestion engine for AI agents. It hoards knowledge: it turns the web and local files into a permanent, local, searchable SQLite vault that gives you and your agents persistent memory. It runs fully offline-capable, needs **no API keys**, and requires **no ML modeling** (no torch) — retrieval is a hybrid of SQLite FTS5 keyword search and dependency-free lexical hashing vectors fused via Reciprocal Rank Fusion (RRF).
+HoardCore is a single-file agent harness for retrieval and deep research. It hoards knowledge: it turns the web and local files into a permanent, local, searchable SQLite vault, then backs your agent's research with explicit discovery budgets, hybrid retrieval, and citeable provenance. It runs offline-capable, needs **no API keys**, and requires **no ML modeling** (no torch) — retrieval is a hybrid of SQLite FTS5 keyword search and dependency-free lexical hashing vectors fused via Reciprocal Rank Fusion (RRF).
+
+The relationship to the agent is the point. Chat-based "deep research" is a ride — you get in, it drives, you hope it took the right route. HoardCore is a **vehicle with the hood off**: you set the discovery budget (`--discover N`), the recall depth (`--recall N`), the anti-bot escalation (`--strategy`), the output schema, and the epistemic standard (`[V]/[E]/[H]` on every claim). Consumer AI is a portal you enter; HoardCore is a protocol your agent follows.
 
 Key characteristics:
 
@@ -47,61 +46,9 @@ Key characteristics:
 - **Lightweight and self-hosted.** Everything stays on your machine. Optional FlareSolverr (Docker) enables Cloudflare-heavy sites via the `aggressive` strategy; lazy binary imports mean HTML-only usage never pulls in PDF/DOCX/EPUB libraries.
 - **Resilient fetch chain.** `fast` → aiohttp, `balanced` → aiohttp then curl_cffi TLS-impersonation, `aggressive` → adds FlareSolverr. Discovery adds bounded retry with exponential backoff and automatic provider fallback.
 - **Hybrid retrieval.** Merges keyword (BM25-style FTS5) and vector-similarity ranks via RRF, so both exact terms and near-literal matches surface. Empty or punctuation-only queries return safely instead of crashing.
-- **DB hygiene.** Every write goes through a context manager that commits on success, rolls back on exception, and always closes the connection (WAL + `busy_timeout`). No leaked connections, no dangling transactions.
-- **Research workflow.** A single `research` action runs `DISCOVER -> INGEST -> RECALL -> EMIT`, writing a grounding-context file into the `artifacts/` directory for direct injection into an LLM.
-- **Artifacts discipline.** Finished deliverables live in `artifacts/` with `[V]/[E]/[H]` provenance tags; a safe `write_artifact()` helper includes path-traversal protection.
+- **Research workflow.** A single `research` action runs `DISCOVER → INGEST → RECALL → EMIT`, writing a grounding-context file into the `artifacts/` directory for direct injection into an LLM.
+- **Artifacts discipline.** Finished deliverables live in `artifacts/` with `[V]/[E]/[H]` provenance tags and numbered source links; a safe `write_artifact()` helper includes path-traversal protection, and deliverables are day-sorted into `artifacts/YYYY-MM-DD/`.
 - **MIT licensed.** Free to use, modify, and redistribute.
-
----
-
-## Design Decisions
-
-This section explains *why* HCRAG is built the way it is. It is written for engineers deciding whether the trade-offs are intentional (they are) or accidental (they are not).
-
-### A precise label: HCRAG is a retrieval layer, not a whole RAG system
-
-RAG *sensu stricto* (Lewis et al., 2020) couples a **retriever** with a **generator** (an LLM that produces tokens conditioned on the retrieved passages). HCRAG deliberately implements only the **retrieval** half: it ingests, indexes, recalls, and emits grounding context. It contains **no generator** — the LLM that turns recalled chunks into prose is external (typically the agent harness, e.g. OpenCode, that calls HCRAG).
-
-So, precisely: HCRAG is the **retrieval / grounding layer** of a RAG system. It only becomes "RAG" in the full sense once you attach an LLM that generates from its recalled context. The name `RAG` is retained because it is the reliable, searchable term for this class — but the honest description is *"a key-free, fully-local retrieval engine that grounds AI agents."*
-
-This split is a feature, not a gap: **generation is bring-your-own-LLM.** Because HCRAG prices no model, gate, or API key, the cost of grounding is zero and forever-local; the only non-zero cost is the LLM you choose to attach for composition.
-
-### Why no embeddings model (why "RAG without vectors")
-
-HCRAG deliberately does **not** use a neural embedding model. Retrieval fuses SQLite **FTS5** keyword ranking with dependency-free **lexical hashing** (FNV-1a feature hashing of words + 3-gram shingles into 256-dim unit vectors) via Reciprocal Rank Fusion. This is an opinionated trade, not an omission:
-
-- **Zero dependence.** No torch, no model downloads, no GPU, no API key. It runs on a bare Python 3.11+ box and inside sandboxes/CI where model weights are forbidden.
-- **Deterministic and auditable.** Two identical inputs always produce identical vectors, so every `[V]`-tagged claim is re-runnable. A neural model can drift across versions; lexical hashing cannot.
-- **Cheap at every scale that matters here.** The brute-force vector scan is O(N), ideal for a hoard vault of thousands of chunks — not for millions.
-
-The cost of this choice is clear: it cannot do synonym/semantic generalization the way a transformer embedding can. That is a real limitation for fuzzy, meaning-based retrieval.
-
-**Where embeddings would plug in (and what we'd change).** If semantic recall became the bottleneck, the design already separates the vector table (`chunk_vectors`) and the RRF fuse from the parser/storage code, so a real embedding model could be added cleanly:
-
-- Store float vectors from a local model (e.g. **Ollama** + `nomic-embed-text`) or an API in place of (or beside) the hashed vectors.
-- Keep FTS5 + RRF unchanged — embeddings augment the lexical rank, they don't replace it.
-- Trade-offs would shift: you gain synonym recall and pay with model downloads, RAM, possible key cost, and vector-DB scaling (e.g. `sqlite-vec` for ANN).
-
-That is the standard alternative in this space; HCRAG's default is the dependency-free end of the spectrum.
-
-### Why SQLite / FTS5 / RRF (not a vector database)
-
-- **SQLite is everywhere.** It ships with Python, needs no server, stores the whole hoard as one file that can be copied and backed up trivially.
-- **FTS5 is surprisingly good.** BM25-style ranking with Unicode61 tokenization and a Porter stemmer gives solid keyword search for free.
-- **RRF fuses two cheap signals.** Keyword + lexical-vector ranks blend without needing to calibrate scores across completely different metrics. `k=60` is the standard RRF constant.
-
-### Why key-free web discovery
-
-Querying DuckDuckGo's HTML endpoint (with Mojeek fallback) through the *same* resilient fetch chain as the crawler means research costs no API key and no per-query fee. The cost is that free endpoints can rate-limit (which the bounded backoff + provider fallback absorbs) and return noisier results than a paid index.
-
-### Why single-file
-
-One module keeps install and deployment trivial (`python hoardcore.py`). The cost is that the code is large relative to a modular split; this is acceptable for a tool whose total surface is one coherent pipeline (fetch → parse → filter → chunk → store → retrieve).
-
-### Hard constraints that are not negotiable
-
-- **No secrets in the repo.** API keys, session cookies, and credentials never belong in the codebase — the whole engine is key-free by design, and runtime config (`hoardcore.toml`) is git-ignored for exactly this reason.
-- **Respect for third-party sites.** HCRAG respects `robots.txt`, honors ToS, and its anti-bot escalation (TLS impersonation, optional FlareSolverr) is for *legitimate* access to pages the operator is entitled to read — not for breaking access controls. `cookie_string` is only ever the *user's own* session.
 
 ---
 
@@ -122,8 +69,8 @@ FlareSolverr is only needed for Cloudflare-protected sites and is disabled by de
 ## Installation
 
 ```bash
-git clone https://github.com/jjjardev/HoardCore-RAG.git
-cd HoardCore-RAG
+git clone https://github.com/jjjardev/HoardCore.git
+cd HoardCore
 ```
 
 ### Option A: Makefile (zero-config)
@@ -157,7 +104,7 @@ The console script `hoardcore` (or `python -m hoardcore` / `python hoardcore.py`
 make install && venv/bin/python -m pip install rapidocr_onnxruntime   # or: pip install .[ocr]
 ```
 
-Once installed, image-only/scanned PDF pages are OCR'd automatically (RapidOCR, local ONNX, no system deps); without it, those pages degrade gracefully. See [Ingest](#ingest-scrape--crawl).
+Once installed, image-only/scanned PDF pages are OCR'd automatically (RapidOCR, local ONNX, no system deps); without it, those pages degrade gracefully. See [Ingest](#ingest-mode-scrape--crawl).
 
 ---
 
@@ -190,22 +137,34 @@ The vault persists between runs. Later searches are instant and require no netwo
 
 ---
 
-## OpenCode (AI Harness) Integration
+## Agent Harness Integration
 
-**This tool is designed to be driven by an AI agent, and the only harness it has been tested against is [OpenCode](https://opencode.ai).** HoardCore-RAG's role is to give the agent a persistent, verifiable memory: the agent calls it to hoard the web and local files, then queries the vault instead of trusting its own (decaying or invented) recall.
+**This tool is designed to be driven by an AI agent, and the only harness it has been tested against is [OpenCode](https://opencode.ai).** HoardCore's role is to give the agent a persistent, verifiable memory: the agent calls it to hoard the web and local files, then queries the vault instead of trusting its own (decaying or invented) recall.
 
-### HCRAG + agent = the research harness
+**HoardCore is a protocol, not a portal.** Chat products are portals you enter and whose epistemic standards you accept. HoardCore specifies *how* your agent hunts (`discover` → `ingest`), recalls (`FTS5 + RRF`), verifies (`[V]/[E]/[H]` + adversarial audit), and emits (`artifacts/` with grounding context). You can plug any LLM into this protocol; the harness doesn't care who drives it, only that the driver follows the protocol.
 
-HCRAG is **not** a standalone appliance — it is one half of a research harness. The other half is an AI agent. The division of labor is simple and intentional:
-
-| HCRAG does (on your machine, key-free) | The agent does (any model) |
+| HoardCore does (on your machine, key-free) | The agent does (any model) |
 |---|---|
 | Fetch web + local files (HTML/PDF/DOCX/EPUB/OCR) | Reads the user's request and `skill.md` |
 | Store everything in a persistent SQLite vault | Drives the `hoardcore` CLI (discover / ingest / search / research) |
 | Hybrid-retrieve the most relevant chunks (FTS5 + vectors, RRF) | Reads the grounding context and cross-checks claims |
 | Keep it offline, single-file, with zero model dependency | Writes the finished, `[V]/[E]/[H]`-tagged report |
 
-HCRAG is the **retrieval and grounding layer**; the agent is the **reasoning and writing layer**. HCRAG has no model dependency and runs on modest hardware — the agent can be any LLM (cloud or local) of your choice. That separation is what makes the harness both lightweight *and* flexible: swap the agent, keep the vault.
+### The harness controls the chat products hide
+
+Because HoardCore is a harness (driven by an agent via `skill.md`), these parameters are **exposed as first-class controls**, not buried in prompt engineering:
+
+| Parameter | What It Controls | Why It Matters |
+|---|---|---|
+| `--discover N` | How many sources to hunt before ingesting | More sources = broader coverage; fewer = faster turnaround |
+| `--recall N` | How many chunks to retrieve per synthesis pass | More chunks = deeper context; fewer = sharper focus |
+| `--strategy {fast,balanced,aggressive}` | Anti-bot escalation chain | Government sites and job boards require FlareSolverr; lightweight blogs don't |
+| **Depth presets** (`research` / `deep` / `exhaustive` / `x N`) | Pass count × source quota | You decide when "enough" is enough, not the platform |
+| **Output schema** | Defined in the prompt / `skill.md` | A SWOT matrix, a legal brief, a lead list — the harness emits what you specify |
+| **Provenance tags** | `[V]/[E]/[H]` enforcement | You decide the epistemic standard |
+| **Termination conditions** | Saturation, source quota, diminishing returns, pass cap, user interrupt | The loop is bounded and auditable |
+
+In a chat product you *plead* ("please be thorough, cite sources, check your work"). In HoardCore you *command* via `skill.md` — and the agent **must** read the manual before it acts.
 
 ### The three companion documents
 
@@ -227,13 +186,6 @@ The order is enforced by the harness, not by habit:
 
 So the chain is: **OpenCode auto-loads `AGENTS.md` → `AGENTS.md` forces `skill.md` → `skill.md` drives the CLI.** If your harness does not auto-read `AGENTS.md`, treat that file as the instruction to point the agent at first.
 
-### How the agent uses it (example reasoning)
-
-1. **User asks to research a topic** → agent runs `research`, which discovers → ingests → recalls → emits a grounding-context file into `artifacts/`.
-2. **Agent writes the deliverable** into `artifacts/`, tagging every quantitative claim `[V]` (verified in the current vault), `[E]` (captured earlier), or `[H]` (hypothesis).
-3. **Agent audits itself** — re-hybrid-queries the vault for each claimed figure. Anything it cannot retrace to full primary text is demoted to `[E]` or dropped.
-4. **Repeat queries** hit the vault (`--action search`), which is instant and offline.
-
 ### DeepResearch: the Hardcore Research Loop
 
 **DeepResearch is the default research mode.** Any open-ended research request — "research", "investigate", "deep dive", "find out about" — triggers a full end-to-end investigation instead of an ad-hoc scrape/search. The agent reads the behavior out of `skill.md` and runs a **bounded, adversarial** loop:
@@ -254,9 +206,9 @@ So the chain is: **OpenCode auto-loads `AGENTS.md` → `AGENTS.md` forces `skill
 
 A raw-count override exists for strictness: `research x 10 <topic>` hard-caps the loop at exactly 10 passes. The stop conditions are answer saturation (two re-queries with no new `[V]` claim), the distinct-source quota, diminishing returns (identical re-ranking), the pass cap, or a user interrupt. **Conversational deepening** — after a stop the user can simply say **"go deeper"** to re-enter one more pass (retaining all prior evidence, interruptible, capped by the session's pass budget) or **"that's enough"** to finalize — so nobody has to predict the right count up front. On stop the agent runs the audit, emits the artifact (labeled `[INCOMPLETE — N passes]` if a budget guard or interrupt cut it short), and returns a **3-bullet Executive Summary**.
 
-### Workflow examples in OpenCode
+### Workflow examples in an agent harness
 
-The examples below assume you run OpenCode inside the `HoardCore-RAG` project directory and are chatting with the agent. In each, the agent reads `skill.md` first, then drives the `hoardcore` CLI.
+The examples below assume you run an agent inside the `HoardCore` project directory and are chatting with it. In each, the agent reads `skill.md` first, then drives the `hoardcore` CLI.
 
 **0. DeepResearch — the Hardcore Research Loop (default)**
 
@@ -340,13 +292,13 @@ Each example ends with content that is **grounded and recallable later** — the
 
 ### Agent-friendly fact
 
-Because HCRAG is key-free, offline-capable, and has no ML modeling, it runs inside most sandboxes and CI environments the moment its dependencies are installed. The `hoardcore.toml` config is auto-generated, so the agent can bootstrap a vault on first run with no setup ceremony.
+Because HoardCore is key-free, offline-capable, and has no ML modeling, it runs inside most sandboxes and CI environments the moment its dependencies are installed. The `hoardcore.toml` config is auto-generated, so the agent can bootstrap a vault on first run with no setup ceremony.
 
 ---
 
 ## Feature Tour
 
-### Ingest (Scrape / Crawl)
+### Ingest Mode (Scrape / Crawl)
 
 **Scrape** fetches a single URL (HTML, PDF, DOCX, EPUB), cleans it, chunks it semantically by headings, and indexes it. **Crawl** discovers a site's URLs via `robots.txt` / sitemap and ingests them with a bounded, semaphore-limited worker pool (`crawler.parallel_workers`).
 
@@ -368,7 +320,7 @@ Because it's lexical, a query that doesn't literally match can still surface nea
 
 Queries are sanitized: operator characters (`" ( ) * ^ : -`) are stripped and tokens quoted, so free-text input cannot alter query semantics or raise FTS syntax errors.
 
-### Discovery (key-free web search)
+### Discovery Mode (key-free web search)
 
 `discover` turns a plain-language query into ingested sources *without an API key*. It hits DuckDuckGo's HTML endpoint via the same resilient fetch chain (so a rate-limited/shaped search page gets retried and can even be solved by FlareSolverr), with Mojeek as an automatic fallback provider. Only the top-N ranked results (`discovery.top_rank`) are ingested, with bounded retry + exponential backoff on transient failures.
 
@@ -380,11 +332,11 @@ Queries are sanitized: operator characters (`" ( ) * ^ : -`) are stripped and to
 [2/RECALL]   hybrid-retrieve the best chunks
 [3/EMIT]     write a grounding-context file
 ```
-The emitted file lists each retrieved chunk with its source URL and hybrid score, plus a distinct-sources summary — ready to be injected verbatim as grounding context for an LLM.
+The emitted file lists each retrieved chunk with its source URL and hybrid score, plus a distinct-sources summary and a **Source Links / Citations** block — ready to be injected verbatim as grounding context for an LLM.
 
 ### Artifacts
 
-Finished deliverables live in `artifacts/` (configurable via `storage.artifacts_dir`). The tool ships `write_artifact(filename, content)` which refuses path-traversing names. Research outputs carry provenance tags:
+Finished deliverables live in `artifacts/` (configurable via `storage.artifacts_dir`), day-sorted into `artifacts/YYYY-MM-DD/` subfolders. The tool ships `write_artifact(filename, content)` which refuses path-traversing names, plus `citation_list()` to render the source-links block. Research outputs carry provenance tags:
 
 - `[V]` — verified against full primary text in the current vault
 - `[E]` — extracted/captured earlier, not in the current vault
@@ -400,7 +352,7 @@ Example artifacts already produced: the renewable-island synthesis, its adversar
 hoardcore [URL] [options]
 ```
 
-### Actions (the sub-command concept)
+### Actions
 
 | Action | Purpose |
 |---|---|
@@ -437,7 +389,7 @@ Created automatically on first run. Key sections:
 | `[network]` | `default_strategy` (`fast`/`balanced`/`aggressive`), `enable_preflight` |
 | `[auth]` | `cookie_string` (e.g. `cf_clearance=...; session=...`) |
 | `[solver]` | `enabled`, `url`, `solver_timeout` |
-| `[storage]` | `root_dir`, `artifacts_dir`, `save_binary`, `save_raw_html` |
+| `[storage]` | `root_dir`, `artifacts_dir`, `artifacts_by_day`, `save_binary`, `save_raw_html` |
 | `[parsers]` | `enable_pdf`, `enable_docx`, `enable_epub`, `extract_pdf_tables` |
 | `[crawler]` | `respect_robots`, `sitemap_limit`, `parallel_workers` |
 | `[indexer]` | `enable_fts`, `search_limit` |
@@ -505,7 +457,7 @@ WAL mode and `synchronous=NORMAL` balance durability against speed. FTS cleanup 
 ## Package Structure
 
 ```
-HoardCore-RAG/
+HoardCore/
     hoardcore.py           The entire engine (config, fetcher, parsers, chunker,
                            crawler, discovery, vault, CLI, research action)
                            (research.py was merged into this single file)
@@ -516,13 +468,14 @@ HoardCore-RAG/
                            session start; mandates reading skill.md first
     skill.md               Uses-guide / agent skill (OpenCode harness doc)
     CHANGELOG.md           Release history (SemVer)
-    artifacts/               Runtime deliverables (git-ignored, not in repo) —
+    artifacts/               Runtime deliverables (git-ignored, not in repo)
     tests/
         conftest.py            TempConfig + vault / chunk fixtures
-        test_vault.py          9 tests: indexing, RRF, backfill, empty-query safety, _fts_query
-        test_network.py        9 tests: fetch chain fallback, provider parsing/fallback,
-                           research strategy forwarding
-        test_junk.py           4 tests: boilerplate/empty/real-content detection
+        test_vault.py          indexing, RRF, backfill, empty-query safety, _fts_query
+        test_network.py        fetch chain fallback, provider parsing/fallback,
+                               research strategy forwarding
+        test_junk.py           boilerplate/empty/real-content detection
+        test_crawler.py        sitemap/robots/discovery (no network I/O)
     hoardcore_data/         The vault (vault.db, per-domain binaries/extracted)
 ```
 
@@ -542,22 +495,7 @@ make clean              # wipe vault, caches, and config
 
 ```bash
 venv/bin/python -m pip install -e ".[test]"
-venv/bin/python -m pytest tests/ -v     # 22 tests
-```
-
-### Test structure
-
-```
-tests/
-    conftest.py        TempConfig (isolated vault in tmp), chunk fixtures
-    test_vault.py      indexing, update/delete, db-leak, TTL, backfill,
-                       hybrid ranking, lexical-similarity, empty/punctuation query safety,
-                       _fts_query operator stripping
-    test_network.py    strategy chain (fast/balanced/aggressive), all-fail raise,
-                       DuckDuckGo & Mojeek link parsing, provider fallback, empty query,
-                       research strategy forwarding
-    test_junk.py       empty extraction, boilerplate/captcha/404, real content,
-                       short-low-quality vs short-valid
+venv/bin/python -m pytest tests/ -v     # 37 tests
 ```
 
 ### Code standards

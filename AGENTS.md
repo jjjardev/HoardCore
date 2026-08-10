@@ -1,8 +1,8 @@
 # Repo Instructions (loaded by OpenCode at every session start)
 
-You are working inside **HoardCore-RAG (HCRAG)**, a key-free, fully-local document
-ingestion engine for AI agents (SQLite FTS5 + hybrid retrieval, web discovery,
-Cloudflare-aware fetching). HCRAG is driven **by you, the agent**, via its CLI.
+You are working inside **HoardCore (HCH)**, a key-free, fully-local agent harness
+for retrieval and deep research (SQLite FTS5 + hybrid retrieval, web discovery,
+Cloudflare-aware fetching). HoardCore is driven **by you, the agent**, via its CLI.
 
 ## Mandatory first step: read `skill.md` before every task
 
@@ -14,7 +14,7 @@ audit step, and artifact conventions. Follow it.
 
 - If you run a task *without* having read `skill.md`, stop and read it first.
 - If the user asks to research/scrape/crawl/search content, default to driving
-  HoardCore-RAG rather than trustings your own (decaying or invented) memory.
+  HoardCore rather than trusting your own (decaying or invented) memory.
 - `README.md` is for human maintainers (install/config/architecture); `skill.md`
   is for you, the agent.
 

@@ -3,6 +3,19 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-08-10
+
+### Rebrand: HoardCore-RAG (HCRAG) → HoardCore (HCH)
+- Renamed from **HoardCore-RAG** to **HoardCore** — an *Agent Harness for
+  Retrieval & Deep Research*, not a RAG library. The HCRAG acronym is retired;
+  the harness is now branded **HoardCore / HCH** everywhere.
+- Branding updated across `README.md` (fully rewritten in the pahebatcher
+  template format, Design Decisions section removed), `skill.md`, `AGENTS.md`,
+  `Makefile`, `hoardcore.toml`, `pyproject.toml` (package `name = "hoardcore"`,
+  v0.3.0), the CLI banner, and the module docstring.
+- Added `CHANGELOG` release discipline: **v0.3.0** marks the rebrand and is
+  shipped as a git tag + GitHub release.
+
 ## [0.2.2] - 2026-08-09
 
 ### Fixed

@@ -1,4 +1,4 @@
-# Makefile for HoardCore-RAG (HCRAG) - Universal LLM Document Ingestion Engine
+# Makefile for HoardCore (HCH) - Agent Harness for Retrieval & Deep Research
 # Usage:
 #   make install   - Install all dependencies (including heavy PDF/DOCX parsers)
 #   make run       - Run a quick test scrape
@@ -13,7 +13,7 @@
 PYTHON ?= python3.11
 
 install:
-	@echo "🔧 Installing HoardCore-RAG core deps into a virtualenv..."
+	@echo "🔧 Installing HoardCore core deps into a virtualenv..."
 	@test -d venv || $(PYTHON) -m venv venv
 	venv/bin/python -m pip install --upgrade pip
 	venv/bin/python -m pip install aiohttp curl_cffi trafilatura readability-lxml tomli PyMuPDF python-docx ebooklib lxml
@@ -22,7 +22,7 @@ install:
 	@echo "✅ Lightweight install complete (venv, no torch)."
 
 run:
-	@echo "🚀 Testing HoardCore-RAG on a sample URL..."
+	@echo "🚀 Testing HoardCore on a sample URL..."
 	venv/bin/python hoardcore.py https://example.com --action scrape
 
 discover:
@@ -30,11 +30,11 @@ discover:
 	venv/bin/python hoardcore.py "_" --action discover --query "nothing here -- pass a query like 'negros renewable energy'"
 
 test:
-	@echo "🧪 Running HCRAG test suite (pytest)..."
+	@echo "🧪 Running HCH test suite (pytest)..."
 	venv/bin/python -m pytest tests/ -q
 
 clean:
-	@echo "🧹 Cleaning up HoardCore-RAG data..."
+	@echo "🧹 Cleaning up HoardCore data..."
 	rm -rf hoardcore_data/
 	rm -rf __pycache__/
 	rm -rf .pytest_cache/

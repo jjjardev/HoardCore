@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HoardCore-RAG v0.2.2 (HCRAG) - Universal LLM Document Ingestion Engine.
+HoardCore v0.3.0 (HCH) - Agent Harness for Retrieval & Deep Research.
 Ingests HTML, PDF, DOCX, EPUB, and TXT into a persistent, searchable SQLite Vault.
 Hybrid retrieval fuses FTS5 keyword search with vector search (RRF), and a
 web-discovery action feeds the crawler from a live search query.
@@ -12,7 +12,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.2.2"
+__version__ = "0.3.0"
 
 import asyncio
 import hashlib
@@ -81,7 +81,7 @@ class Chunk:
 # =============================================================================
 
 DEFAULT_CONFIG = """
-# HoardCore-RAG (HCRAG) v0.2.2 Configuration
+# HoardCore (HCH) v0.3.0 Configuration
 
 [general]
 timeout_seconds = 30
@@ -103,6 +103,7 @@ solver_timeout = 60
 [storage]
 root_dir = "hoardcore_data"
 artifacts_dir = "artifacts"          # Finished research deliverables (reports, syntheses, audits)
+artifacts_by_day = true          # Organize deliverables into artifacts/YYYY-MM-DD/ subfolders
 save_binary = true               # Save original PDF/DOCX/EPUB files
 save_raw_html = false            # Save raw HTML for debugging
 
@@ -188,7 +189,7 @@ class ConfigManager:
             "network": {"default_strategy": "balanced", "enable_preflight": True},
             "auth": {"cookie_string": ""},
             "solver": {"enabled": False, "url": "http://localhost:8191/v1", "solver_timeout": 60},
-            "storage": {"root_dir": "hoardcore_data", "artifacts_dir": "artifacts", "save_binary": True, "save_raw_html": False},
+            "storage": {"root_dir": "hoardcore_data", "artifacts_dir": "artifacts", "artifacts_by_day": True, "save_binary": True, "save_raw_html": False},
             "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "extract_pdf_tables": True, "enable_pdf_ocr": True},
             "crawler": {"respect_robots": True, "sitemap_limit": 500, "parallel_workers": 5},
             "indexer": {"enable_fts": True, "search_limit": 20},
@@ -227,7 +228,7 @@ class EmbeddingsEngine:
     unit vector. Cheap, offline, deterministic, and requires no extra packages.
     This is lexical (vocabulary-overlap) similarity, which — fused with FTS5
     keyword search via Reciprocal Rank Fusion — is sufficient for an LLM tool
-    and keeps HCRAG lightweight.
+    and keeps HoardCore lightweight.
     """
 
     def __init__(self, config: ConfigManager):
@@ -1476,19 +1477,105 @@ class HoardCore:
         """Directory for finished research deliverables (reports, syntheses, audits)."""
         return self.vault.artifacts_dir
 
+    def _artifact_day_subdir(self) -> str:
+        """Day-scoped artifacts subdirectory, e.g. artifacts/2026-08-10/.
+
+        Used when storage.artifacts_by_day is enabled so finished deliverables
+        are grouped by the day they were written instead of piling up flat in
+        the artifacts root.
+        """
+        day = time.strftime("%Y-%m-%d")
+        path = os.path.join(self.artifacts_dir, day)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def resolve_artifact_out(self, out_path: str | None) -> str:
+        """Map an artifact target to its on-disk path honoring artifacts_by_day.
+
+        When storage.artifacts_by_day is true, any path that targets the
+        artifacts directory is re-scoped into the current-day subfolder; paths
+        elsewhere (e.g. /tmp/scratch.md) are left untouched so callers keep
+        full control of out-of-vault writes.
+        """
+        if not self.config.get('storage.artifacts_by_day', True):
+            return out_path
+        if out_path is None:
+            return os.path.join(self._artifact_day_subdir(), "grounding_context.md")
+        artifacts_root = os.path.abspath(self.artifacts_dir) + os.sep
+        if os.path.abspath(out_path).startswith(artifacts_root):
+            return os.path.join(self._artifact_day_subdir(), os.path.basename(out_path))
+        return out_path
+
     def write_artifact(self, filename: str, content: str) -> str:
         """Write a research deliverable into the artifacts directory.
 
         Returns the absolute path written. Raises if the filename would escape
-        the artifacts directory.
+        the artifacts directory. Honors storage.artifacts_by_day: files land in
+        an artifacts/YYYY-MM-DD/ subfolder.
         """
         if os.path.basename(filename) != filename:
             raise ValueError(f"artifact filename must be a bare name, got {filename!r}")
-        path = os.path.join(self.vault.artifacts_dir, filename)
-        with open(path, "w", encoding="utf-8") as f:
+        target = self.resolve_artifact_out(os.path.join(self.artifacts_dir, filename))
+        os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as f:
             f.write(content)
-        logger.info(f"Artifact written -> {path}")
-        return path
+        logger.info(f"Artifact written -> {target}")
+        return target
+
+    def organize_artifacts_by_day(self) -> list[str]:
+        """Move flat artifacts/ files into per-day subfolders by mtime.
+
+        One-time housekeeping for the artifacts-by-day feature: any deliverable
+        living directly in the artifacts root is re-homed to
+        artifacts/YYYY-MM-DD/ based on its file mtime. Only files (not
+        directories) at the artifacts root are touched, and any day-subfolder
+        names already present are skipped. Returns the list of new paths.
+
+        Run when storage.artifacts_by_day is true; no-op otherwise.
+        """
+        if not self.config.get('storage.artifacts_by_day', True):
+            return []
+        root = self.artifacts_dir
+        migrated: list[str] = []
+        for name in sorted(os.listdir(root)):
+            src = os.path.join(root, name)
+            if not os.path.isfile(src):
+                continue
+            day = time.strftime("%Y-%m-%d", time.localtime(os.path.getmtime(src)))
+            dest_dir = os.path.join(root, day)
+            dest = os.path.join(dest_dir, name)
+            if os.path.abspath(dest) == os.path.abspath(src):
+                continue
+            os.makedirs(dest_dir, exist_ok=True)
+            if os.path.exists(dest):
+                logger.warning(f"Migration: {dest} exists; skipping {src}.")
+                continue
+            os.replace(src, dest)
+            migrated.append(dest)
+            logger.info(f"Artifact organized -> {dest}")
+        return migrated
+
+    @staticmethod
+    def citation_list(sources: list[str] | dict[str, str]) -> str:
+        """Render a **Source Links / Citations** block for an artifact.
+
+        Accepts either a list of source URLs or a ``{label: url}`` mapping. The
+        block closes every artifact whose provenance tags use the ``[V#N]``
+        convention (each number N resolves to the Nth entry here), so
+        ``[V#3]`` -> ``[#3] <label> — <url>``.
+
+        Returns a ready-to-append markdown string (leading + trailing newline
+        included). Labels default to the bare URL when only a list is given.
+        """
+        if isinstance(sources, dict):
+            items: list[tuple[str, str]] = list(sources.items())
+        else:
+            items = [(u, u) for u in sources]
+        lines = ["\n## Source Links / Citations", ""]
+        for i, (label, url) in enumerate(items, 1):
+            lines.append(f"[#{i}] {label} — {url}")
+        lines.append("")
+        return "\n".join(lines)
 
     async def research(self, question: str, out_path: str | None = None,
                        discover: int = 5, recall: int = 6,
@@ -1517,10 +1604,8 @@ class HoardCore:
             print("  -> no chunks retrieved")
             return None
 
-        if out_path is None:
-            out_path = os.path.join(self.artifacts_dir, "grounding_context.md")
-        else:
-            os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+        out_path = self.resolve_artifact_out(out_path)
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
 
         print("\n[3/EMIT] writing grounding context", flush=True)
         with open(out_path, "w", encoding="utf-8") as f:
@@ -1535,6 +1620,8 @@ class HoardCore:
             f.write(f"## Distinct sources ingested: {len(seen)}\n")
             for s in sorted(seen):
                 f.write(f" - {s}\n")
+
+        f.write(self.citation_list(sorted(seen)))
 
         abs_path = os.path.abspath(out_path)
         print(f"\n=== DONE. {len(chunks)} chunks, {len(seen)} sources -> {abs_path}")
@@ -1841,7 +1928,7 @@ async def main():
         print("  python hoardcore.py _ --action ingest --urls 'u1,u2,u3'  ")
         print("  python hoardcore.py _ --action discover --query 'negros renewable energy' --limit 5")
         print("  python hoardcore.py _ --action research --query 'how does bokashi compost' --discover 5 --recall 6")
-        print("  python hoardcore.py _ --action research --query 'negros economy' --out artifacts/report.md")
+        print("  python hoardcore.py _ --action research --query 'negros economy' --out artifacts/report.md  # day-sorted to artifacts/YYYY-MM-DD/")
         sys.exit(1)
 
     url = sys.argv[1]
@@ -1900,7 +1987,10 @@ async def main():
             i += 1
 
     scraper = HoardCore()
-    print(f"\n🚀 HoardCore-RAG v{__version__} (HCRAG): Action={action}, URL={url}, Strategy={strategy or 'default'}")
+    print(f"\n🚀 HoardCore v{__version__} (HCH): Action={action}, URL={url}, Strategy={strategy or 'default'}")
+    organized = scraper.organize_artifacts_by_day()
+    if organized:
+        print(f"   📂 Organized {len(organized)} artifact(s) into day folders")
     print(f"   📁 Vault: {scraper.vault.root_dir}/vault.db | 🏛 Artifacts: {scraper.artifacts_dir}/")
 
     if action == "research":
