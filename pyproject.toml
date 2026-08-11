@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hoardcore"
-version = "0.3.0"
-description = "Key-free, fully-local agent harness for retrieval and deep research (SQLite FTS5 + hybrid retrieval, web discovery, Cloudflare-aware fetching)."
+version = "0.3.1"
+description = "Agent harness for retrieval and deep research (SQLite FTS5 + hybrid retrieval, web discovery, Cloudflare-aware fetching)."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "HoardCore contributors" }]
-keywords = ["agent", "llm", "sqlite", "fts5", "retrieval", "research", "scraping", "offline", "knowledge-base", "harness"]
+keywords = ["agent", "llm", "sqlite", "fts5", "retrieval", "research", "scraping", "knowledge-base", "harness"]
 classifiers = [
     "Intended Audience :: Developers",
     "Topic :: Software Development :: Libraries",

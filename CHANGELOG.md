@@ -3,6 +3,24 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-08-11
+
+### Fixed
+- **`research` lost the Source Links / Citations block (and could raise).** The
+  citation block was written via `f.write(...)` *after* the `with open(...)`
+  block had closed the file, so every grounding-context file was missing its
+  source-links section and the tail of `research` could raise
+  `ValueError: I/O operation on closed file`. Moved the write inside the block.
+  Added a regression test (`test_research_emits_citations_block`).
+
+### Changed
+- **Dropped the "offline / key-free / no API key / no torch" branding.** HoardCore
+  is a web-touching harness (DuckDuckGo/Mojeek discovery, Cloudflare-aware
+  fetch) and may be driven against cloud APIs, so the marketing language claimed
+  more than the tool does. Updated `README.md`, `skill.md`, `AGENTS.md`,
+  `Makefile`, `pyproject.toml`, and `hoardcore.py` docstrings/comments. Kept the
+  technically-true "retrieval needs no ML model / no embeddings model" facts.
+
 ## [0.3.0] - 2026-08-10
 
 ### Rebrand: HoardCore-RAG (HCRAG) → HoardCore (HCH)
