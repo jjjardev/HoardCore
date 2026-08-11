@@ -1,6 +1,6 @@
 ---
 name: hoardcore
-description: "HoardCore (HCH) — a key-free, fully-local agent harness for retrieval and deep research that scrapes, crawls, and searches the web into a persistent SQLite vault, with hybrid FTS5 + vector retrieval and Cloudflare-aware fetching. Written for the OpenCode AI harness (the only harness tested). Use when the user asks you to research, scrape, crawl, summarize, or search text-based content from the web or local files, or to build a persistent knowledge base. Research is DeepResearch by default: every investigation runs the bounded Hardcore Research Loop (DISCOVER -> INGEST -> RECALL -> EMIT with [V]/[E]/[H] provenance); optional depth presets ('deep', 'exhaustive') or an 'x N' pass cap control how deep it goes."
+description: "HoardCore (HCH) — an agent harness for retrieval and deep research that scrapes, crawls, and searches the web into a persistent SQLite vault, with hybrid FTS5 + vector retrieval and Cloudflare-aware fetching. Written for the OpenCode AI harness (the only harness tested). Use when the user asks you to research, scrape, crawl, summarize, or search text-based content from the web or local files, or to build a persistent knowledge base. Research is DeepResearch by default: every investigation runs the bounded Hardcore Research Loop (DISCOVER -> INGEST -> RECALL -> EMIT with [V]/[E]/[H] provenance); optional depth presets ('deep', 'exhaustive') or an 'x N' pass cap control how deep it goes."
 ---
 
 # HoardCore (HCH) Skill
@@ -86,7 +86,7 @@ DeepResearch is adversarial and thorough, but **never open-ended**. The budget c
 1.  **Scrape**: Fetch a single URL (HTML, PDF, DOCX, EPUB) and index its text.
 2.  **Crawl**: Discover and ingest an entire website via its sitemap.
 3.  **Search**: Query the local SQLite vault for previously ingested content.
-4.  **Discover**: Live web-search a topic (DuckDuckGo/Mojeek, no API key) and ingest the top results.
+4.  **Discover**: Live web-search a topic (DuckDuckGo/Mojeek) and ingest the top results.
 5.  **Emit**: Write research deliverables (reports, syntheses, audits, grounding context) into the `artifacts/` directory.
 
 ## Artifacts

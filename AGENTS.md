@@ -1,6 +1,6 @@
 # Repo Instructions (loaded by OpenCode at every session start)
 
-You are working inside **HoardCore (HCH)**, a key-free, fully-local agent harness
+You are working inside **HoardCore (HCH)**, an agent harness
 for retrieval and deep research (SQLite FTS5 + hybrid retrieval, web discovery,
 Cloudflare-aware fetching). HoardCore is driven **by you, the agent**, via its CLI.
 

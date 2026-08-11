@@ -19,7 +19,7 @@ install:
 	venv/bin/python -m pip install aiohttp curl_cffi trafilatura readability-lxml tomli PyMuPDF python-docx ebooklib lxml
 	@echo "For OCR of scanned PDFs, install the optional fallback next:"
 	@echo "  venv/bin/python -m pip install rapidocr_onnxruntime"
-	@echo "✅ Lightweight install complete (venv, no torch)."
+	@echo "✅ Lightweight install complete (venv)."
 
 run:
 	@echo "🚀 Testing HoardCore on a sample URL..."
