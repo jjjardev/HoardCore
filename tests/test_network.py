@@ -1,6 +1,7 @@
 """Tests for the network fetch chain and discovery providers (no real I/O)."""
 
 import asyncio
+import os
 
 import pytest
 
@@ -149,3 +150,34 @@ def test_scrape_returns_cached_chunks_on_cache_hit(tmp_path, monkeypatch):
     assert chunks
     assert "cached body" in chunks[0].text
     assert chunks[0].metadata["source_url"] == url
+
+
+def test_research_emits_citations_block(tmp_path, monkeypatch):
+    """Regression: the grounding-context file must close with the Source
+    Links / Citations block. It was previously written after the file was
+    closed (`f.write` outside the `with open` block), so `research` raised
+    ValueError and the citations were lost from every grounding file."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+
+    scraper = hc.HoardCore()
+
+    async def fake_discover(query, max_results, strategy, force_refresh):
+        return []
+
+    scraper._discover_and_ingest = fake_discover
+    url = "https://example.test/source-a"
+    scraper.vault.index_document(
+        url,
+        [hc.Chunk(text="relevant content about solar negros energy", metadata={"source": url})],
+        {},
+    )
+
+    out = os.path.join(str(tmp_path), "grounding.md")
+    path = asyncio.run(scraper.research("solar negros", out_path=out, discover=2, recall=4))
+    assert path is not None
+    assert os.path.exists(path)
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    assert "## Source Links / Citations" in content
+    assert f"[#1] {url} — {url}" in content

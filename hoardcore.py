@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HoardCore v0.3.0 (HCH) - Agent Harness for Retrieval & Deep Research.
+HoardCore v0.3.1 (HCH) - Agent Harness for Retrieval & Deep Research.
 Ingests HTML, PDF, DOCX, EPUB, and TXT into a persistent, searchable SQLite Vault.
 Hybrid retrieval fuses FTS5 keyword search with vector search (RRF), and a
 web-discovery action feeds the crawler from a live search query.
@@ -12,7 +12,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 import asyncio
 import hashlib
@@ -81,7 +81,7 @@ class Chunk:
 # =============================================================================
 
 DEFAULT_CONFIG = """
-# HoardCore (HCH) v0.3.0 Configuration
+# HoardCore (HCH) v0.3.1 Configuration
 
 [general]
 timeout_seconds = 30
@@ -131,7 +131,7 @@ top_k = 40                 # candidate pool from vector search
 
 [discovery]
 enabled = true
-provider = "duckduckgo_html"   # free, no key; uses the existing fetch/FlareSolverr chain (Mojeek auto-fallback)
+provider = "duckduckgo_html"   # free HTML endpoint; uses the existing fetch/FlareSolverr chain (Mojeek auto-fallback)
 max_results = 10
 top_rank = 6                   # ingest only the top-N ranked results
 max_retries = 2                # per-provider transient-failure retries
@@ -225,7 +225,7 @@ class EmbeddingsEngine:
     """Turns chunk text into fixed-dimension vectors for hybrid retrieval.
 
     Uses dependency-free sparse hashing of word + char n-gram features into a
-    unit vector. Cheap, offline, deterministic, and requires no extra packages.
+    unit vector. Cheap, deterministic, and requires no extra packages.
     This is lexical (vocabulary-overlap) similarity, which — fused with FTS5
     keyword search via Reciprocal Rank Fusion — is sufficient for an LLM tool
     and keeps HoardCore lightweight.
@@ -1345,7 +1345,7 @@ class SearchResult:
 
 
 class WebSearchProvider:
-    """Discovers URLs from a live web query, without an API key.
+    """Discovers URLs from a live web query.
 
     Tries providers in order (DuckDuckGo HTML -> Mojeek HTML), each driven
     through the SAME resilient fetch chain as the crawler (aiohttp ->
@@ -1620,8 +1620,7 @@ class HoardCore:
             f.write(f"## Distinct sources ingested: {len(seen)}\n")
             for s in sorted(seen):
                 f.write(f" - {s}\n")
-
-        f.write(self.citation_list(sorted(seen)))
+            f.write(self.citation_list(sorted(seen)))
 
         abs_path = os.path.abspath(out_path)
         print(f"\n=== DONE. {len(chunks)} chunks, {len(seen)} sources -> {abs_path}")
@@ -1883,7 +1882,7 @@ class HoardCore:
                                    strategy: str, force_refresh: bool) -> list[dict[str, Any]]:
         """Run a live web search, then ingest the top-ranked URLs.
 
-        Uses the free DuckDuckGo HTML provider (no API key) through the existing
+        Uses the free DuckDuckGo HTML provider through the existing
         fetch chain, so FlareSolverr is applied automatically when a search
         result is anti-bot protected. Returns the ingested chunks.
         """
