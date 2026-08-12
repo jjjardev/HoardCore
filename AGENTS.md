@@ -1,8 +1,13 @@
-# Repo Instructions (loaded by OpenCode at every session start)
+# Repo Instructions (loaded by your agent harness at every session start)
 
-You are working inside **HoardCore (HCH)**, an agent harness
-for retrieval and deep research (SQLite FTS5 + hybrid retrieval, web discovery,
-Cloudflare-aware fetching). HoardCore is driven **by you, the agent**, via its CLI.
+You are the **agent**, hosted by your harness (e.g., OpenCode, Claude Code, or any
+other). You are working inside **HoardCore (HCH)**, a research toolkit and memory
+protocol for AI agents: a single-file Python module (SQLite vault + CLI). HoardCore
+provides the DISCOVER → INGEST → RECALL → EMIT loop, hybrid retrieval, and
+provenance tagging. It is **not** an agent harness itself — it is a tool you, the
+agent, call into. Your harness hosts the LLM and manages context; you execute
+HoardCore via its CLI (SQLite FTS5 + hybrid retrieval, web discovery,
+Cloudflare-aware fetching).
 
 ## Mandatory first step: read `skill.md` before every task
 

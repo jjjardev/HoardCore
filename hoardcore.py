@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HoardCore v0.3.1 (HCH) - Agent Harness for Retrieval & Deep Research.
+HoardCore v0.4.0 (HCH) - Research toolkit for AI agents: retrieval & deep research.
 Ingests HTML, PDF, DOCX, EPUB, and TXT into a persistent, searchable SQLite Vault.
 Hybrid retrieval fuses FTS5 keyword search with vector search (RRF), and a
 web-discovery action feeds the crawler from a live search query.
@@ -12,7 +12,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 import asyncio
 import hashlib
@@ -81,7 +81,7 @@ class Chunk:
 # =============================================================================
 
 DEFAULT_CONFIG = """
-# HoardCore (HCH) v0.3.1 Configuration
+# HoardCore (HCH) v0.4.0 Configuration
 
 [general]
 timeout_seconds = 30

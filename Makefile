@@ -1,4 +1,4 @@
-# Makefile for HoardCore (HCH) - Agent Harness for Retrieval & Deep Research
+# Makefile for HoardCore (HCH) - Research Toolkit for AI Agents
 # Usage:
 #   make install   - Install all dependencies (including heavy PDF/DOCX parsers)
 #   make run       - Run a quick test scrape

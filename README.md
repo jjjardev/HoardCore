@@ -1,10 +1,10 @@
 # HoardCore
 
-Agent Harness for Retrieval & Deep Research — give your agent a memory it can prove.
+Research toolkit for AI agents — give your agent a memory it can prove.
 
 Terminal tool that turns the web and local files into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo/Mojeek web discovery, Cloudflare-aware fetching, hybrid FTS5 + lexical-vector retrieval, and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance.
 
-![Version](https://img.shields.io/badge/version-0.3.1-blue)
+![Version](https://img.shields.io/badge/version-0.4.0-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -16,7 +16,7 @@ Terminal tool that turns the web and local files into a permanent, local SQLite 
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-- [Agent Harness Integration](#agent-harness-integration)
+- [Agent Integration](#agent-integration)
 - [Feature Tour](#feature-tour)
   - [Ingest Mode](#ingest-mode-scrape--crawl)
   - [Hybrid Retrieval](#hybrid-retrieval)
@@ -35,7 +35,9 @@ Terminal tool that turns the web and local files into a permanent, local SQLite 
 
 ## About
 
-HoardCore is a single-file agent harness for retrieval and deep research. It hoards knowledge: it turns the web and local files into a permanent, local, searchable SQLite vault, then backs your agent's research with explicit discovery budgets, hybrid retrieval, and citeable provenance. Retrieval needs no ML model — it is a hybrid of SQLite FTS5 keyword search and dependency-free lexical hashing vectors fused via Reciprocal Rank Fusion (RRF).
+HoardCore is a research toolkit for AI agents — a single-file Python module (SQLite vault + CLI) for retrieval and deep research. It hoards knowledge: it turns the web and local files into a permanent, local, searchable SQLite vault, then backs your agent's research with explicit discovery budgets, hybrid retrieval, and citeable provenance. Retrieval needs no ML model — it is a hybrid of SQLite FTS5 keyword search and dependency-free lexical hashing vectors fused via Reciprocal Rank Fusion (RRF).
+
+**HoardCore is not an agent harness.** It provides the DISCOVER → INGEST → RECALL → EMIT loop, hybrid retrieval, and provenance tagging — but it does not host an LLM or manage context. That is the job of your **agent harness** (e.g., OpenCode, Claude Code, or any other): the harness hosts the agent, the agent reads `skill.md`, and the agent executes HoardCore commands via its CLI.
 
 The relationship to the agent is the point. Chat-based "deep research" is a ride — you get in, it drives, you hope it took the right route. HoardCore is a **vehicle with the hood off**: you set the discovery budget (`--discover N`), the recall depth (`--recall N`), the anti-bot escalation (`--strategy`), the output schema, and the epistemic standard (`[V]/[E]/[H]` on every claim). Consumer AI is a portal you enter; HoardCore is a protocol your agent follows.
 
@@ -137,22 +139,22 @@ The vault persists between runs. Later searches are instant and require no netwo
 
 ---
 
-## Agent Harness Integration
+## Agent Integration
 
-**This tool is designed to be driven by an AI agent, and the only harness it has been tested against is [OpenCode](https://opencode.ai).** HoardCore's role is to give the agent a persistent, verifiable memory: the agent calls it to hoard the web and local files, then queries the vault instead of trusting its own (decaying or invented) recall.
+**HoardCore is a research toolkit and memory protocol that any AI agent or harness can call into. It is not itself a harness.** The harness (e.g., [OpenCode](https://opencode.ai), Claude Code, or any other) hosts the LLM and manages context; the agent that runs inside it reads `skill.md` and drives HoardCore via its CLI. HoardCore's role is to give the agent a persistent, verifiable memory: the agent calls it to hoard the web and local files, then queries the vault instead of trusting its own (decaying or invented) recall.
 
-**HoardCore is a protocol, not a portal.** Chat products are portals you enter and whose epistemic standards you accept. HoardCore specifies *how* your agent hunts (`discover` → `ingest`), recalls (`FTS5 + RRF`), verifies (`[V]/[E]/[H]` + adversarial audit), and emits (`artifacts/` with grounding context). You can plug any LLM into this protocol; the harness doesn't care who drives it, only that the driver follows the protocol.
+**HoardCore is a protocol, not a portal.** Chat products are portals you enter and whose epistemic standards you accept. HoardCore specifies *how* your agent hunts (`discover` → `ingest`), recalls (`FTS5 + RRF`), verifies (`[V]/[E]/[H]` + adversarial audit), and emits (`artifacts/` with grounding context). You can plug any LLM and any harness into this protocol; HoardCore doesn't care which harness hosts the agent — it only requires that the agent follows the protocol.
 
-| HoardCore does (on your machine) | The agent does (any model) |
+| HoardCore provides (on your machine) | The agent does (any model, any harness) |
 |---|---|
 | Fetch web + local files (HTML/PDF/DOCX/EPUB/OCR) | Reads the user's request and `skill.md` |
 | Store everything in a persistent SQLite vault | Drives the `hoardcore` CLI (discover / ingest / search / research) |
 | Hybrid-retrieve the most relevant chunks (FTS5 + vectors, RRF) | Reads the grounding context and cross-checks claims |
 | Stay single-file, with zero model dependency | Writes the finished, `[V]/[E]/[H]`-tagged report |
 
-### The harness controls the chat products hide
+### First-class controls (not buried in prompt engineering)
 
-Because HoardCore is a harness (driven by an agent via `skill.md`), these parameters are **exposed as first-class controls**, not buried in prompt engineering:
+Because an agent drives HoardCore via `skill.md` and the CLI, these parameters are **exposed as first-class controls**, not buried in prompt engineering:
 
 | Parameter | What It Controls | Why It Matters |
 |---|---|---|
@@ -160,7 +162,7 @@ Because HoardCore is a harness (driven by an agent via `skill.md`), these parame
 | `--recall N` | How many chunks to retrieve per synthesis pass | More chunks = deeper context; fewer = sharper focus |
 | `--strategy {fast,balanced,aggressive}` | Anti-bot escalation chain | Government sites and job boards require FlareSolverr; lightweight blogs don't |
 | **Depth presets** (`research` / `deep` / `exhaustive` / `x N`) | Pass count × source quota | You decide when "enough" is enough, not the platform |
-| **Output schema** | Defined in the prompt / `skill.md` | A SWOT matrix, a legal brief, a lead list — the harness emits what you specify |
+| **Output schema** | Defined in the prompt / `skill.md` | A SWOT matrix, a legal brief, a lead list — the agent emits what you specify |
 | **Provenance tags** | `[V]/[E]/[H]` enforcement | You decide the epistemic standard |
 | **Termination conditions** | Saturation, source quota, diminishing returns, pass cap, user interrupt | The loop is bounded and auditable |
 
@@ -171,20 +173,20 @@ In a chat product you *plead* ("please be thorough, cite sources, check your wor
 | File | Audience | Purpose |
 |---|---|---|
 | `README.md` | Humans / maintainers | Install, config, architecture, CLI reference |
-| `AGENTS.md` | The AI agent (loaded first) | The **trigger**: a short file OpenCode auto-loads into the agent's context at every session start, mandating that the agent read `skill.md` before any task |
+| `AGENTS.md` | The AI agent (loaded first) | The **trigger**: a short file your harness auto-loads into the agent's context at every session start, mandating that the agent read `skill.md` before any task |
 | `skill.md` | The AI agent | The **manual**: what the agent reads to learn **how** to use the tool |
 
 `skill.md` is written as an agent skill (YAML frontmatter + instructions). It teaches the agent when to trigger, which actions map to which user request, the `[V]/[E]/[H]` provenance discipline, and the adversarial-audit step before finalizing an artifact.
 
 ### Where the agent reads `skill.md` first
 
-The order is enforced by the harness, not by habit:
+The order is enforced by the harness's session-start loading, not by habit:
 
-1. **Session start** — OpenCode (and other harnesses that honor `AGENTS.md`) loads the repo-root `AGENTS.md` into the agent's context automatically. It contains one hard rule: *"Before any task, you MUST read `skill.md` in full."*
+1. **Session start** — your harness (e.g., OpenCode, Claude Code) loads the repo-root `AGENTS.md` into the agent's context automatically. It contains one hard rule: *"Before any task, you MUST read `skill.md` in full."*
 2. **First task** — the agent obeys that rule and reads `skill.md` before touching the web, the vault, or `artifacts/`. Everything the agent then does (scrape / crawl / search / discover / research) is driven by `skill.md`'s action mapping.
 3. **Ongoing** — `skill.md` stays the reference: if a task needs an action the agent is unsure of, it re-consults `skill.md`, never its own memory.
 
-So the chain is: **OpenCode auto-loads `AGENTS.md` → `AGENTS.md` forces `skill.md` → `skill.md` drives the CLI.** If your harness does not auto-read `AGENTS.md`, treat that file as the instruction to point the agent at first.
+So the chain is: **harness auto-loads `AGENTS.md` → `AGENTS.md` forces `skill.md` → `skill.md` drives the agent's use of the HoardCore CLI.** If your harness does not auto-read `AGENTS.md`, treat that file as the instruction to point the agent at first.
 
 ### DeepResearch: the Hardcore Research Loop
 
@@ -206,7 +208,7 @@ So the chain is: **OpenCode auto-loads `AGENTS.md` → `AGENTS.md` forces `skill
 
 A raw-count override exists for strictness: `research x 10 <topic>` hard-caps the loop at exactly 10 passes. The stop conditions are answer saturation (two re-queries with no new `[V]` claim), the distinct-source quota, diminishing returns (identical re-ranking), the pass cap, or a user interrupt. **Conversational deepening** — after a stop the user can simply say **"go deeper"** to re-enter one more pass (retaining all prior evidence, interruptible, capped by the session's pass budget) or **"that's enough"** to finalize — so nobody has to predict the right count up front. On stop the agent runs the audit, emits the artifact (labeled `[INCOMPLETE — N passes]` if a budget guard or interrupt cut it short), and returns a **3-bullet Executive Summary**.
 
-### Workflow examples in an agent harness
+### Workflow examples (driving HoardCore from an agent)
 
 The examples below assume you run an agent inside the `HoardCore` project directory and are chatting with it. In each, the agent reads `skill.md` first, then drives the `hoardcore` CLI.
 
@@ -464,9 +466,9 @@ HoardCore/
     hoardcore.toml         Generated config on first run (git-ignored)
     Makefile               install / run / discover / test / clean
     pyproject.toml         Packaging, deps + extras, console script
-    AGENTS.md              Agent trigger doc — auto-loaded by OpenCode at
+    AGENTS.md              Agent trigger doc — auto-loaded by your harness at
                            session start; mandates reading skill.md first
-    skill.md               Uses-guide / agent skill (OpenCode harness doc)
+    skill.md               Uses-guide / agent skill (the agent operating manual)
     CHANGELOG.md           Release history (SemVer)
     artifacts/               Runtime deliverables (git-ignored, not in repo)
     tests/

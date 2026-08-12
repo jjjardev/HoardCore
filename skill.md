@@ -1,13 +1,13 @@
 ---
 name: hoardcore
-description: "HoardCore (HCH) — an agent harness for retrieval and deep research that scrapes, crawls, and searches the web into a persistent SQLite vault, with hybrid FTS5 + vector retrieval and Cloudflare-aware fetching. Written for the OpenCode AI harness (the only harness tested). Use when the user asks you to research, scrape, crawl, summarize, or search text-based content from the web or local files, or to build a persistent knowledge base. Research is DeepResearch by default: every investigation runs the bounded Hardcore Research Loop (DISCOVER -> INGEST -> RECALL -> EMIT with [V]/[E]/[H] provenance); optional depth presets ('deep', 'exhaustive') or an 'x N' pass cap control how deep it goes."
+description: "HoardCore (HCH) — a research toolkit and memory protocol for AI agents: a single-file Python module (SQLite vault + CLI) that scrapes, crawls, and searches the web into a persistent SQLite vault, with hybrid FTS5 + vector retrieval and Cloudflare-aware fetching. Use when the user asks you to research, scrape, crawl, summarize, or search text-based content from the web or local files, or to build a persistent knowledge base. Research is DeepResearch by default: every investigation runs the bounded Hardcore Research Loop (DISCOVER -> INGEST -> RECALL -> EMIT with [V]/[E]/[H] provenance); optional depth presets ('deep', 'exhaustive') or an 'x N' pass cap control how deep it goes."
 ---
 
 # HoardCore (HCH) Skill
 
-> **This is the agent operating manual.** Human maintainers should read `README.md` (install, config, architecture). This file tells the AI *how* to use HoardCore, and it is written for and tested against the **OpenCode** harness. If you are not running inside OpenCode, follow the same instructions — they are command-line based and harness-agnostic.
+> **This is the agent operating manual.** Human maintainers should read `README.md` (install, config, architecture). This file tells the AI *how* to use HoardCore. The agent that reads it runs inside a harness (e.g., OpenCode, Claude Code, or any other) that hosts the LLM and manages context; HoardCore itself is a research toolkit and memory protocol the agent calls via its CLI. The instructions are command-line based and harness-agnostic.
 
-You are an expert in using HoardCore, an agent harness for retrieval and deep research.
+You are an expert in using HoardCore, a research toolkit for AI agents (single-file Python module + SQLite vault + CLI).
 
 ## Core Philosophy
 
