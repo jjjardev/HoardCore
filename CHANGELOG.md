@@ -3,6 +3,21 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-12
+
+### Changed
+- **Repositioned: HoardCore is a research toolkit and memory protocol for AI
+  agents — not an agent harness.** The tool provides the `DISCOVER → INGEST →
+  RECALL → EMIT` loop, hybrid retrieval, and provenance tagging, but it does not
+  host an LLM or manage context; that is the job of an agent harness (e.g.,
+  OpenCode, Claude Code, or any other), which hosts the agent that reads
+  `skill.md` and executes HoardCore via its CLI. Removed all "agent harness"
+  / "OpenCode harness" phrasing across `README.md`, `AGENTS.md`, `skill.md`,
+  `pyproject.toml`, `hoardcore.py`, and `Makefile`, replacing it with "research
+  toolkit for AI agents," "agent-driven research layer," and "protocol your
+  agent follows." OpenCode is now described as one example of a harness, not the
+  only one. Technical details unchanged.
+
 ## [0.3.1] - 2026-08-11
 
 ### Fixed
