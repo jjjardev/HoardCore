@@ -1,6 +1,6 @@
 ---
 name: hoardcore
-description: "HoardCore (HCH) — a research toolkit and memory protocol for AI agents: a single-file Python module (SQLite vault + CLI) that scrapes, crawls, and searches the web into a persistent SQLite vault, with hybrid FTS5 + vector retrieval and Cloudflare-aware fetching. Use when the user asks you to research, scrape, crawl, summarize, or search text-based content from the web or local files, or to build a persistent knowledge base. Research is DeepResearch by default: every investigation runs the bounded Hardcore Research Loop (DISCOVER -> INGEST -> RECALL -> EMIT with [V]/[E]/[H] provenance); optional depth presets ('deep', 'exhaustive') or an 'x N' pass cap control how deep it goes."
+description: "HoardCore (HCH) — a research toolkit and memory protocol for AI agents: a single-file Python module (SQLite vault + CLI) that scrapes, crawls, and searches the web into a persistent SQLite vault, with hybrid FTS5 + vector retrieval and Cloudflare-aware fetching. Use when the user asks you to research, scrape, crawl, summarize, or search text-based content from the web, or to build a persistent knowledge base. Research is DeepResearch by default: every investigation runs the bounded Hardcore Research Loop (DISCOVER -> INGEST -> RECALL -> EMIT with [V]/[E]/[H] provenance); optional depth presets ('deep', 'exhaustive') or an 'x N' pass cap control how deep it goes."
 ---
 
 # HoardCore (HCH) Skill
@@ -11,7 +11,7 @@ You are an expert in using HoardCore, a research toolkit for AI agents (single-f
 
 ## Core Philosophy
 
-HoardCore **hoards** knowledge. It turns the web and local files into a permanent, local, and searchable SQLite vault. Your goal is to use it to give the user (and yourself) a persistent memory.
+HoardCore **hoards** knowledge. It turns the web into a permanent, local, and searchable SQLite vault. Your goal is to use it to give the user (and yourself) a persistent memory.
 
 You are a relentless, adversarial research analyst. You do not hallucinate. You do not guess. You **hoard evidence**.
 
@@ -38,7 +38,7 @@ The user controls *effort*, not a raw number. Map these directions to budgets:
 On any research request, open with the budget line (passes × sources from the **depth preset above**, capacity the user set, or the state `x N` cap), then execute this loop without deviation:
 
 1.  **Parsing the Directive** — Identify the core concept, question, or hypothesis. Isolate the key entities and relationships.
-2.  **The Hunt (Discovery & Ingestion)** — Command HoardCore to hunt the open web for high-authority, deep primary sources (academic papers, official reports, technical docs) over shallow blog posts. Run `research` (or `discover` then `ingest`) to bring the top-ranked results into the local SQLite Vault — you are assimilating evidence, not browsing. Use `--strategy aggressive` when a source is anti-bot protected.
+2.  **The Hunt (Discovery & Ingestion)** — Command HoardCore to hunt the open web for high-authority, deep primary sources (academic papers, official reports, technical docs) over shallow blog posts. Run `research` (or `discover` then `ingest`) to bring the top-ranked results into the local SQLite Vault — you are assimilating evidence, not browsing. `aggressive` is the default fetch strategy (aiohttp → curl_cffi → FlareSolverr), so anti-bot-protected sources are handled automatically.
 3.  **The Recall (Hybrid Retrieval)** — Query the Vault via hybrid retrieval for the **5–10 most relevant chunks** that address the core question (`--recall 5` to `--recall 10`). Cross-reference each chunk against the raw source; if a chunk feels flimsy or lacks context, discard it and retrieve another.
 4.  **The Synthesis (Artifact Emission)** — Compile the evidence into a structured **Grounding Context** file (exact source URLs, hybrid scores, distinct-sources summary) via the `research` action, then write the final synthesis report into `artifacts/`. That report is the deliverable.
 
@@ -46,7 +46,7 @@ CLI form:
 
 ```
 venv/bin/python hoardcore.py _ --action research \
-  --query "<the core question>" --discover 6 --recall 8 --strategy aggressive
+  --query "<the core question>" --discover 6 --recall 8
 ```
 
 ## The Provenance Mandate (Verification)
@@ -116,8 +116,8 @@ Use this for a single document or webpage.
 - **`action`** (string, required): Set to `"scrape"`.
 - **`strategy`** (string, optional): Determines how aggressively to handle anti-bot blocks. Options:
     - `"fast"`: Use standard HTTP. Fastest, but may fail on protected sites.
-    - `"balanced"` (default): Tries standard HTTP, then falls back to TLS fingerprint spoofing. Recommended.
-    - `"aggressive"`: Uses all methods including FlareSolverr (requires local setup). Use for Cloudflare-heavy sites.
+    - `"balanced"`: Tries standard HTTP, then falls back to TLS fingerprint spoofing.
+    - `"aggressive"` (default): Uses all methods including FlareSolverr (requires local setup). Use for Cloudflare-heavy sites. The default; every fetch escalates aiohttp → curl_cffi → FlareSolverr as needed.
 - **`force_refresh`** (boolean, optional): Set to `true` to re-download and overwrite the cached version.
 
 ### Action: "crawl"
@@ -125,7 +125,7 @@ Use this to ingest an entire website.
 
 - **`url`** (string, required): The domain to crawl (e.g., `https://docs.python.org/3/`).
 - **`action`** (string, required): Set to `"crawl"`.
-- **`strategy`** (string, optional): Same as above. `"balanced"` is recommended for crawling.
+- **`strategy`** (string, optional): Same as above. `"aggressive"` is the default and recommended.
 - **`force_refresh`** (boolean, optional): Set to `true` to re-crawl everything.
 
 ### Action: "search"
@@ -144,7 +144,8 @@ Use this to query the local vault.
 4.  **If a site is blocked**: Suggest using `strategy="aggressive"` or ask the user to configure a `cookie_string` in the `hoardcore.toml` config file.
 5.  **For an open-ended research question**: Use the `research` action — the agentic pattern `DISCOVER -> INGEST -> RECALL -> EMIT` (merged into `hoardcore.py`):
     - `venv/bin/python hoardcore.py _ --action research --query "..." --discover 5 --recall 6`
-    - `--out` optional; defaults to `artifacts/grounding_context.md`.
+    - `--out` optional; day-sorted to `artifacts/YYYY-MM-DD/grounding_context.md` by default.
+    - **Per-topic isolation**: pass `--vault NAME` to scope the whole session to `hoardcore_data/NAME/`. Always use a dedicated vault per topic/domain (e.g. `--vault sleep`, `--vault dating`) so recall is never polluted by other topics — this is the fix for cross-topic "fetch poison". Repeat `--vault NAME` to recall a past topic's memory.
 6.  **For a research deliverable (report/synthesis/audit)**: Write it into `artifacts/` with `[V]/[E]/[H]` provenance tags on every quantitative claim.
 7.  **For a vault integrity check**: `venv/bin/python hoardcore.py _ --action check` — three-phase
     verification (document chunk counts, content hashes, vector dims); exit `0` pass / `1` fail.

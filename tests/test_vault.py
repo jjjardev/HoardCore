@@ -4,6 +4,7 @@
 import pytest
 
 import hoardcore as hc
+from tests.conftest import TempConfig
 
 
 def test_index_and_fts_search(vault, make_chunk):
@@ -268,3 +269,44 @@ def test_verify_vault_catches_corruption(vault, make_chunk):
         cur.execute("UPDATE chunks_ca SET text = 'tampered text' WHERE chunk_hash = ?",
                     (row[0],))
     assert vault.verify_vault() is False
+
+
+def test_verify_claim_tolerates_newline_split_text(vault, make_chunk):
+    """A claim whose verbatim text spans a line break in the stored chunk
+    must be VERIFIED (whitespace/newline normalization), not PARTIAL."""
+    text = ("Sleep deprivation is associated with impaired cognitive function "
+            "and\nreduced attention span in healthy adults.")
+    vault.index_document("https://sleep.test/1", [make_chunk(text)], {})
+    hc_inst = object.__new__(hc.HoardCore)
+    hc_inst.vault = vault
+    result = hc_inst.verify_claim("Sleep deprivation is associated with impaired cognitive function and reduced attention span")
+    assert result == "verified"
+
+
+def test_verify_claim_unverified_when_absent(vault, make_chunk):
+    """A claim with no keyword support in the vault stays unverified."""
+    vault.index_document("https://sleep.test/1",
+                         [make_chunk("sleep architecture rem deep slow wave")], {})
+    hc_inst = object.__new__(hc.HoardCore)
+    hc_inst.vault = vault
+    result = hc_inst.verify_claim("giraffes sleep standing up for exactly 47 minutes")
+    assert result == "unverified"
+
+
+def test_vault_isolation_between_vaults(tmp_path, make_chunk):
+    """Per-vault naming isolates recall: content in vault A is invisible to vault B."""
+    base = str(tmp_path)
+
+    vault_a = hc.VaultManager(TempConfig(base), "sleep")
+    vault_b = hc.VaultManager(TempConfig(base), "dating")
+
+    vault_a.index_document("https://sleep.test/1",
+                           [make_chunk("sleep duration optimal 7 to 9 hours", url="https://sleep.test/1")], {})
+    vault_b.index_document("https://dating.test/1",
+                           [make_chunk("attraction escalates with eye contact", url="https://dating.test/1")], {})
+
+    assert len(vault_a.search_vault("sleep", hybrid=False)) == 1
+    assert len(vault_a.search_vault("attraction", hybrid=False)) == 0
+    assert len(vault_b.search_vault("attraction", hybrid=False)) == 1
+    assert len(vault_b.search_vault("sleep", hybrid=False)) == 0
+    assert vault_a.db_path != vault_b.db_path

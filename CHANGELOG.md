@@ -3,6 +3,30 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-13
+
+### Added
+- **Per-topic vaults (`--vault NAME`).** A new CLI flag scopes the whole
+  session to `hoardcore_data/NAME/`, isolating recall per topic/domain so
+  cross-topic "fetch poison" is impossible. Vault name is sanitized against
+  path traversal. Default (no flag) keeps the flat `hoardcore_data/vault.db`.
+
+### Changed
+- **`network.default_strategy` now defaults to `aggressive`.** Every fetch
+  escalates the full aiohttp → curl_cffi → FlareSolverr chain, fixing web
+  discovery failing on anti-bot search pages (DuckDuckGo) under the old
+  `balanced` default.
+- **`verify_claim` verbatim check is whitespace/newline tolerant.** A claim
+  whose exact text spans a line break in the stored chunk now returns
+  `verified` instead of a false `partial` (SQL pre-filter widens whitespace,
+  exact confirmation in Python).
+
+### Fixed
+- `documents.parser_used` no longer always reads `"unknown"`; it now falls back
+  to the real parser name stored in metadata.
+- Parallel ingestion now writes `content_hash` consistently with the sequential
+  path (needed for vault integrity checks).
+
 ## [0.6.0] - 2026-08-13
 
 ### Added
@@ -103,8 +127,8 @@ All notable changes to this project are documented here. This project adheres to
 - Renamed from **HoardCore-RAG** to **HoardCore** — an *Agent Harness for
   Retrieval & Deep Research*, not a RAG library. The HCRAG acronym is retired;
   the harness is now branded **HoardCore / HCH** everywhere.
-- Branding updated across `README.md` (fully rewritten in the pahebatcher
-  template format, Design Decisions section removed), `skill.md`, `AGENTS.md`,
+- Branding updated across `README.md` (fully rewritten in a template format,
+  Design Decisions section removed), `skill.md`, `AGENTS.md`,
   `Makefile`, `hoardcore.toml`, `pyproject.toml` (package `name = "hoardcore"`,
   v0.3.0), the CLI banner, and the module docstring.
 - Added `CHANGELOG` release discipline: **v0.3.0** marks the rebrand and is

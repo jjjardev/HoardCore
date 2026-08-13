@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HoardCore v0.6.0 (HCH) - Research toolkit for AI agents: retrieval & deep research.
+HoardCore v0.7.0 (HCH) - Research toolkit for AI agents: retrieval & deep research.
 Ingests HTML, PDF, DOCX, EPUB, and TXT into a persistent, searchable SQLite Vault.
 Hybrid retrieval fuses FTS5 keyword search with vector search (RRF), and a
 web-discovery action feeds the crawler from a live search query.
@@ -12,7 +12,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 import asyncio
 import hashlib
@@ -83,7 +83,7 @@ class Chunk:
 # =============================================================================
 
 DEFAULT_CONFIG = """
-# HoardCore (HCH) v0.4.0 Configuration
+# HoardCore (HCH) v0.7.0 Configuration
 
 [general]
 timeout_seconds = 30
@@ -91,7 +91,7 @@ max_retries = 2
 user_agent = "HoardCore-Bot/5.0 (LLM Agent)"
 
 [network]
-default_strategy = "balanced"   # fast, balanced, aggressive
+default_strategy = "aggressive"   # fast, balanced, aggressive
 enable_preflight = true
 
 [auth]
@@ -191,7 +191,7 @@ class ConfigManager:
     def _defaults(self) -> dict[str, Any]:
         return {
             "general": {"timeout_seconds": 30, "max_retries": 2, "user_agent": "HoardCore/5.0"},
-            "network": {"default_strategy": "balanced", "enable_preflight": True},
+            "network": {"default_strategy": "aggressive", "enable_preflight": True},
             "auth": {"cookie_string": ""},
             "solver": {"enabled": False, "url": "http://localhost:8191/v1", "solver_timeout": 60},
             "storage": {"root_dir": "hoardcore_data", "artifacts_dir": "artifacts", "artifacts_by_day": True, "save_binary": True, "save_raw_html": False},
@@ -414,9 +414,22 @@ class ConnectionPool:
 class VaultManager:
     """Handles SQLite FTS indexing and filesystem storage."""
 
-    def __init__(self, config: ConfigManager):
+    def __init__(self, config: ConfigManager, vault_name: str | None = None):
         self.config = config
-        self.root_dir = config.get('storage.root_dir', 'hoardcore_data')
+        self.vault_name = vault_name
+        root_dir = config.get('storage.root_dir', 'hoardcore_data')
+        if vault_name:
+            # Guard against path traversal: a vault name must be a single
+            # path-safe token (no separators, '..', or leading dots).
+            safe = re.sub(r'[^A-Za-z0-9._-]+', '-', vault_name).strip('.-')
+            if not safe or safe != vault_name:
+                logger.warning(
+                    f"Sanitized vault name {vault_name!r} -> {safe!r}"
+                )
+                vault_name = safe
+            self.vault_name = vault_name
+            root_dir = os.path.join(root_dir, vault_name)
+        self.root_dir = root_dir
         os.makedirs(self.root_dir, exist_ok=True)
         self.artifacts_dir = config.get('storage.artifacts_dir', 'artifacts')
         os.makedirs(self.artifacts_dir, exist_ok=True)
@@ -673,7 +686,7 @@ class VaultManager:
                 meta.get('file_name', ''),
                 meta.get('content_type', ''),
                 time.time(),
-                meta.get('parser_used', 'unknown'),
+                meta.get('parser_used') or meta.get('parser', 'unknown'),
                 meta.get('quality_score', 0.0),
                 len(chunks),
                 json.dumps(meta),
@@ -927,6 +940,10 @@ class VaultManager:
         # Single writer thread commits the whole batch (dedup + vectors).
         with self._db() as (_conn, cursor):
             domain = urlparse(url).netloc
+            content_hash = hashlib.blake2b(
+                "\n".join(c.text for c in chunks).encode("utf-8"),
+                digest_size=32,
+            ).hexdigest()
             cursor.execute(
                 "SELECT COALESCE(MAX(version), 0) FROM documents WHERE url = ?",
                 (url,),
@@ -936,14 +953,14 @@ class VaultManager:
                 INSERT INTO documents (
                     url, domain, file_name, content_type, fetched_at,
                     parser_used, quality_score, total_chunks, metadata_json,
-                    version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    version, content_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 url, domain, meta.get('file_name', ''),
                 meta.get('content_type', ''), time.time(),
-                meta.get('parser_used', 'unknown'),
+                meta.get('parser_used') or meta.get('parser', 'unknown'),
                 meta.get('quality_score', 0.0), len(chunks),
-                json.dumps(meta), version,
+                json.dumps(meta), version, content_hash,
             ))
             for idx, chunk in enumerate(chunks):
                 text = chunk.text
@@ -1925,9 +1942,10 @@ class WebSearchProvider:
 class HoardCore:
     """Main entry point for scraping, crawling, and searching."""
 
-    def __init__(self):
+    def __init__(self, vault_name: str | None = None):
         self.config = ConfigManager()
-        self.vault = VaultManager(self.config)
+        self.vault = VaultManager(self.config, vault_name)
+        self.vault_name = self.vault.vault_name
         self.fetcher = NetworkFetcher(self.config)
         self.parser = DocumentParser()
         self.chunker = SemanticChunker(self.config)
@@ -2057,7 +2075,7 @@ class HoardCore:
             FlareSolverr path for anti-bot-protected sources).
         """
         if strategy is None:
-            strategy = self.config.get("network.default_strategy", "balanced")
+            strategy = self.config.get("network.default_strategy", "aggressive")
 
         print(f"\n[1/DISCOVER] searching web for: {question!r} (top {discover})", flush=True)
         await self._discover_and_ingest(question, discover, strategy, force_refresh=False)
@@ -2108,18 +2126,29 @@ class HoardCore:
             return "unverified"
 
         # 1) Verbatim check against ALL stored chunk text (ground truth),
-        #    not just the top retrieval hits. Normalize whitespace.
+        #    not just the top retrieval hits. Normalize whitespace on BOTH
+        #    sides: stored chunks may split a phrase across line breaks
+        #    (e.g. "is \ndefined"), so a raw LIKE against a single-space
+        #    needle would miss verbatim text. Instead, use the LIKE only as
+        #    a cheap candidate pre-filter (with whitespace runs widened to %
+        #    so newlines/multi-space pass) and confirm the exact normalized
+        #    needle in Python.
         needle = re.sub(r"\s+", " ", claim.strip()).lower()
         # Long claims are broken into phrases; a distinctive fragment match counts.
         fragment = needle[:60]
+        # Escape LIKE wildcards in the fragment itself before widening spaces.
+        like_fragment = fragment.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+        like_fragment = re.sub(r"\s+", "%", like_fragment)
+        candidates: list[str] = []
         with self.vault._db() as (_conn, cursor):
             cursor.execute(
-                "SELECT text FROM chunks_fts WHERE lower(text) LIKE ? LIMIT 5",
-                (f"%{fragment}%",)
+                "SELECT text FROM chunks_fts WHERE lower(text) LIKE ? ESCAPE '\\' LIMIT 100",
+                (f"%{like_fragment}%",)
             )
-            direct = cursor.fetchall()
-        if direct:
-            return "verified"
+            candidates = [row[0] for row in cursor.fetchall()]
+        for raw in candidates:
+            if needle in re.sub(r"\s+", " ", raw.lower()):
+                return "verified"
 
         # 2) FTS5 keyword overlap: build a proper AND-of-phrases MATCH for the
         #    claim and see how many hits it yields. FTS5's combined ranking is
@@ -2256,7 +2285,7 @@ class HoardCore:
 
         # Some failures leave a low-score body that is still real (PDF ratio is naturally low);
         # rely on structural signals above, not raw length ratio alone.
-        return False
+        return None
 
     async def _scrape_single(self, url: str, strategy: str, force_refresh: bool) -> list[Chunk]:
         """Scrape a single URL."""
@@ -2324,7 +2353,7 @@ class HoardCore:
             List of dicts with "text" and "metadata" for the LLM.
         """
         if strategy is None:
-            strategy = self.config.get('network.default_strategy', 'balanced')
+            strategy = self.config.get('network.default_strategy', 'aggressive')
 
         # Route actions
         if action == "search":
@@ -2443,6 +2472,7 @@ async def main():
         print("  python hoardcore.py _ --action discover --query 'negros renewable energy' --limit 5")
         print("  python hoardcore.py _ --action research --query 'how does bokashi compost' --discover 5 --recall 6")
         print("  python hoardcore.py _ --action research --query 'negros economy' --out artifacts/report.md  # day-sorted to artifacts/YYYY-MM-DD/")
+        print("  python hoardcore.py _ --action research --query 'sleep research' --vault sleep  # per-topic vault (recall stays clean)")
         print("  python hoardcore.py _ --action verify --claim 'the Epoch doubling time is 6 months' --recall 5")
         print("  python hoardcore.py _ --action check   # verify vault integrity")
         sys.exit(1)
@@ -2458,6 +2488,7 @@ async def main():
     recall = 6
     claim = None
     out_path: str | None = None
+    vault_name: str | None = None
 
     i = 2
     while i < len(sys.argv):
@@ -2502,11 +2533,14 @@ async def main():
             except ValueError:
                 max_results = 0
             i += 2
+        elif sys.argv[i] == "--vault" and i + 1 < len(sys.argv):
+            vault_name = sys.argv[i + 1]
+            i += 2
         else:
             print(f"  ⚠️  Unrecognized flag ignored: {sys.argv[i]!r}", file=sys.stderr)
             i += 1
 
-    scraper = HoardCore()
+    scraper = HoardCore(vault_name=vault_name)
     print(f"\n🚀 HoardCore v{__version__} (HCH): Action={action}, URL={url}, Strategy={strategy or 'default'}")
     organized = scraper.organize_artifacts_by_day()
     if organized:

@@ -2,9 +2,9 @@
 
 Research toolkit for AI agents — give your agent a memory it can prove.
 
-Terminal tool that turns the web and local files into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo/Mojeek web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
+Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo/Mojeek web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
 
-![Version](https://img.shields.io/badge/version-0.6.0-blue)
+![Version](https://img.shields.io/badge/version-0.7.0-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -36,7 +36,7 @@ Terminal tool that turns the web and local files into a permanent, local SQLite 
 
 ## About
 
-HoardCore is a research toolkit for AI agents — a single-file Python module (SQLite vault + CLI) for retrieval and deep research. It hoards knowledge: it turns the web and local files into a permanent, local, searchable SQLite vault, then backs your agent's research with explicit discovery budgets, hybrid retrieval, and citeable provenance. Retrieval is **dense by default** — an ONNX-quantized sentence-transformer (via `fastembed` on `onnxruntime`, no PyTorch) fused with SQLite FTS5 keyword search via Reciprocal Rank Fusion (RRF). A lightweight sparse-hash fallback kicks in automatically only where the dense model is unavailable.
+HoardCore is a research toolkit for AI agents — a single-file Python module (SQLite vault + CLI) for retrieval and deep research. It hoards knowledge: it turns the web into a permanent, local, searchable SQLite vault, then backs your agent's research with explicit discovery budgets, hybrid retrieval, and citeable provenance. Retrieval is **dense by default** — an ONNX-quantized sentence-transformer (via `fastembed` on `onnxruntime`, no PyTorch) fused with SQLite FTS5 keyword search via Reciprocal Rank Fusion (RRF). A lightweight sparse-hash fallback kicks in automatically only where the dense model is unavailable.
 
 **HoardCore is not an agent harness.** It provides the DISCOVER → INGEST → RECALL → EMIT loop, hybrid retrieval, and provenance tagging — but it does not host an LLM or manage context. That is the job of your **agent harness** (e.g., OpenCode, Claude Code, or any other): the harness hosts the agent, the agent reads `skill.md`, and the agent executes HoardCore commands via its CLI.
 
@@ -47,7 +47,7 @@ Key characteristics:
 - **Single-file core.** The entire engine is one module, `hoardcore.py`, runnable as a CLI or imported as a library.
 - **Real semantic retrieval, dense by default.** An ONNX-quantized sentence-transformer (`BAAI/bge-small-en-v1.5`, 384-dim) runs on `onnxruntime` — no PyTorch, no GPU. Hybrid retrieval fuses FTS5 keyword search with dense vector similarity so both exact terms and *meaning* surface. A lightweight sparse hash (`mode = "sparse"`) is available as a fallback for environments without `fastembed`, and dense mode degrades to it automatically if the dependency is missing.
 - **Lightweight and self-hosted.** One file, local-first, everything on your machine. Optional FlareSolverr (Docker) enables Cloudflare-heavy sites via the `aggressive` strategy; lazy binary imports mean HTML-only usage never pulls in PDF/DOCX/EPUB libraries.
-- **Resilient fetch chain.** `fast` → aiohttp, `balanced` → aiohttp then curl_cffi TLS-impersonation, `aggressive` → adds FlareSolverr. Discovery adds bounded retry with exponential backoff and automatic provider fallback.
+- **Resilient fetch chain.** `fast` → aiohttp, `balanced` → aiohttp then curl_cffi TLS-impersonation, `aggressive` (default) → adds FlareSolverr. Discovery adds bounded retry with exponential backoff and automatic provider fallback.
 - **Hybrid retrieval.** Merges keyword (BM25-style FTS5) and vector-similarity ranks via RRF, so both exact terms and near-literal matches surface. Empty or punctuation-only queries return safely instead of crashing. Hits carry **confidence bands** (`high`/`medium`/`low`) surfaced in chunk metadata and grounding output.
 - **Research workflow.** A single `research` action runs `DISCOVER → INGEST → RECALL → EMIT`, writing a grounding-context file into the `artifacts/` directory for direct injection into an LLM.
 - **Programmatic provenance audit.** A `verify` action re-checks a claim against the vault's stored text (verbatim, partial, or unverified) with CI-wireable exit codes, so the `[V]` tag is machine-checkable, not just prompt-enforced.
@@ -153,13 +153,13 @@ The vault persists between runs. Later searches are instant and require no netwo
 
 ## Agent Integration
 
-**HoardCore is a research toolkit and memory protocol that any AI agent or harness can call into. It is not itself a harness.** The harness (e.g., [OpenCode](https://opencode.ai), Claude Code, or any other) hosts the LLM and manages context; the agent that runs inside it reads `skill.md` and drives HoardCore via its CLI. HoardCore's role is to give the agent a persistent, verifiable memory: the agent calls it to hoard the web and local files, then queries the vault instead of trusting its own (decaying or invented) recall.
+**HoardCore is a research toolkit and memory protocol that any AI agent or harness can call into. It is not itself a harness.** The harness (e.g., [OpenCode](https://opencode.ai), Claude Code, or any other) hosts the LLM and manages context; the agent that runs inside it reads `skill.md` and drives HoardCore via its CLI. HoardCore's role is to give the agent a persistent, verifiable memory: the agent calls it to hoard the web, then queries the vault instead of trusting its own (decaying or invented) recall.
 
 **HoardCore is a protocol, not a portal.** Chat products are portals you enter and whose epistemic standards you accept. HoardCore specifies *how* your agent hunts (`discover` → `ingest`), recalls (`FTS5 + RRF`), verifies (`[V]/[E]/[H]` + adversarial audit), and emits (`artifacts/` with grounding context). You can plug any LLM and any harness into this protocol; HoardCore doesn't care which harness hosts the agent — it only requires that the agent follows the protocol.
 
 | HoardCore provides (on your machine) | The agent does (any model, any harness) |
 |---|---|
-| Fetch web + local files (HTML/PDF/DOCX/EPUB/OCR) | Reads the user's request and `skill.md` |
+| Fetch web content (HTML/PDF/DOCX/EPUB/OCR) | Reads the user's request and `skill.md` |
 | Store everything in a persistent SQLite vault | Drives the `hoardcore` CLI (discover / ingest / search / research) |
 | Hybrid-retrieve the most relevant chunks (FTS5 + vectors, RRF) | Reads the grounding context and cross-checks claims |
 | Stay single-file, with dense ONNX retrieval built in (no PyTorch/GPU) | Writes the finished, `[V]/[E]/[H]`-tagged report |
@@ -173,6 +173,7 @@ Because an agent drives HoardCore via `skill.md` and the CLI, these parameters a
 | `--discover N` | How many sources to hunt before ingesting | More sources = broader coverage; fewer = faster turnaround |
 | `--recall N` | How many chunks to retrieve per synthesis pass | More chunks = deeper context; fewer = sharper focus |
 | `--strategy {fast,balanced,aggressive}` | Anti-bot escalation chain | Government sites and job boards require FlareSolverr; lightweight blogs don't |
+| `--vault NAME` | Scope the whole session to a per-topic vault (`hoardcore_data/NAME/`) | Keeps recall clean: research memory is isolated per topic/domain instead of polluting one shared pool |
 | **Depth presets** (`research` / `deep` / `exhaustive` / `x N`) | Pass count × source quota | You decide when "enough" is enough, not the platform |
 | **Output schema** | Defined in the prompt / `skill.md` | A SWOT matrix, a legal brief, a lead list — the agent emits what you specify |
 | **Provenance tags** | `[V]/[E]/[H]` enforcement | You decide the epistemic standard |
@@ -401,14 +402,15 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 | Flag | Description |
 |---|---|
 | `--action ACTION` | One of `scrape`, `crawl`, `search`, `ingest`, `discover`, `research`, `verify`, `check`. |
-| `--strategy S` | `fast`, `balanced` (default from config), or `aggressive`. |
+| `--strategy S` | `fast`, `balanced`, or `aggressive` (default from config). |
 | `--query Q` | Required for `search`, `discover`, `research`. |
 | `--limit N` | Web results to ingest for `discover`. |
 | `--urls U1,U2,U3` | Explicit URL list for `ingest`. |
 | `--discover N` | Sources to discover first in `research` (default 5). |
 | `--recall N` | Chunks to retrieve in `research` (default 6). |
-| `--out PATH` | Output file for `research` (default `artifacts/grounding_context.md`). |
+| `--out PATH` | Output file for `research` (default day-sorted `artifacts/YYYY-MM-DD/grounding_context.md`). |
 | `--claim C` | Claim text to verify for the `verify` action. |
+| `--vault NAME` | Scope the whole session to a per-topic vault (`hoardcore_data/NAME/`). |
 | `--force` | Ignore the cache and re-fetch / re-index. |
 
 Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `check`) does not need a URL.
@@ -549,7 +551,7 @@ make clean              # wipe vault, caches, and config
 
 ```bash
 venv/bin/python -m pip install -e ".[test]"
-venv/bin/python -m pytest tests/ -v     # 47 tests
+venv/bin/python -m pytest tests/ -v     # 53 tests
 ```
 
 ### Code standards

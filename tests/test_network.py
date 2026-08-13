@@ -53,6 +53,41 @@ def test_chain_raises_when_all_fail(tmp_path):
     assert str(ei.value) == "FETCH_FAILED"
 
 
+def test_default_strategy_is_aggressive():
+    """network.default_strategy must default to aggressive so every fetch
+    escalates through the full aiohttp -> curl_cffi -> FlareSolverr chain."""
+    cfg = hc.ConfigManager()
+    assert cfg.get("network.default_strategy", "") == "aggressive"
+
+
+def test_hoardcore_defaults_fetch_to_aggressive(tmp_path, monkeypatch):
+    """HoardCore.fetch with no strategy uses network.default_strategy."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+
+    scraper = hc.HoardCore()
+    captured = {}
+
+    async def fake_scrape(url, strategy, force_refresh):
+        captured["strategy"] = strategy
+        return []
+
+    scraper._scrape_single = fake_scrape
+    asyncio.run(scraper.fetch("https://example.test/x", action="scrape"))
+    assert captured["strategy"] == cfg.get("network.default_strategy")
+
+
+def test_hoardcore_scopes_vault_to_subdir(tmp_path, monkeypatch):
+    """HoardCore(vault_name='sleep') must point the vault at root_dir/sleep."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+
+    scraper = hc.HoardCore(vault_name="sleep")
+    assert scraper.vault.root_dir == os.path.join(str(tmp_path), "sleep")
+    assert os.path.isdir(scraper.vault.root_dir)
+    assert scraper.vault.db_path == os.path.join(str(tmp_path), "sleep", "vault.db")
+
+
 # --- parser unit tests ---
 
 def test_parse_duckduckgo_maps_uddg_links():
