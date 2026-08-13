@@ -1,4 +1,4 @@
-# Makefile for HoardCore (HCH) - Research Toolkit for AI Agents
+# Makefile for HoardCore - Research Toolkit for AI Agents
 # Usage:
 #   make install   - Install all dependencies (including heavy PDF/DOCX parsers)
 #   make run       - Run a quick test scrape
@@ -30,8 +30,12 @@ discover:
 	venv/bin/python hoardcore.py "_" --action discover --query "nothing here -- pass a query like 'negros renewable energy'"
 
 test:
-	@echo "🧪 Running HCH test suite (pytest)..."
+	@echo "🧪 Running HoardCore test suite (pytest)..."
 	venv/bin/python -m pytest tests/ -q
+
+bench:
+	@echo "📐 Running vector-search benchmark (float32 vs int8 x page size)..."
+	venv/bin/python tools/bench_vector.py
 
 clean:
 	@echo "🧹 Cleaning up HoardCore data..."

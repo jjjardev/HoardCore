@@ -1,9 +1,9 @@
 ---
 name: hoardcore
-description: "HoardCore (HCH) — a research toolkit and memory protocol for AI agents: a single-file Python module (SQLite vault + CLI) that scrapes, crawls, and searches the web into a persistent SQLite vault, with hybrid FTS5 + vector retrieval and Cloudflare-aware fetching. Use when the user asks you to research, scrape, crawl, summarize, or search text-based content from the web, or to build a persistent knowledge base. Research is DeepResearch by default: every investigation runs the bounded Hardcore Research Loop (DISCOVER -> INGEST -> RECALL -> EMIT with [V]/[E]/[H] provenance); optional depth presets ('deep', 'exhaustive') or an 'x N' pass cap control how deep it goes."
+description: "HoardCore — a research toolkit and memory protocol for AI agents: a single-file Python module (SQLite vault + CLI) that scrapes, crawls, and searches the web into a persistent SQLite vault, with hybrid FTS5 + vector retrieval and Cloudflare-aware fetching. Use when the user asks you to research, scrape, crawl, summarize, or search text-based content from the web, or to build a persistent knowledge base. Research is DeepResearch by default: every investigation runs the bounded Hardcore Research Loop (DISCOVER -> INGEST -> RECALL -> EMIT with [V]/[E]/[H] provenance); optional depth presets ('deep', 'exhaustive') or an 'x N' pass cap control how deep it goes."
 ---
 
-# HoardCore (HCH) Skill
+# HoardCore Skill
 
 > **This is the agent operating manual.** Human maintainers should read `README.md` (install, config, architecture). This file tells the AI *how* to use HoardCore. The agent that reads it runs inside a harness (e.g., OpenCode, Claude Code, or any other) that hosts the LLM and manages context; HoardCore itself is a research toolkit and memory protocol the agent calls via its CLI. The instructions are command-line based and harness-agnostic.
 
@@ -96,7 +96,7 @@ DeepResearch is adversarial and thorough, but **never open-ended**. The budget c
 - **Provenance tagging**: Every quantitative claim in an artifact should be tagged `[V]` (verified against full primary text in the current vault), `[E]` (extracted/captured earlier, not in current vault), or `[H]` (hypothesis). Never claim a number the current vault cannot support.
 - **Traceable links**: Every `[V]` (and `[E]` where a source URL is known) tag must carry a numbered citation, e.g. `…₱80–120k/mo [V#3]`. Each artifact must close with a **Source Links / Citations** section mapping each number to its full URL: `[#3] Lead Laravel+React (onlinejobs.ph) — https://…`. Generate the block with `hoardcore.citation_list(urls)` from the grounding-context source list, or write it by hand following that exact format.
 - **CLI helper**: `hoardcore.write_artifact(filename, content)` writes a deliverable safely into the artifacts directory (day-sorted when enabled), `hoardcore.organize_artifacts_by_day()` migrates any legacy flat files into day folders by mtime, and `hoardcore.citation_list(urls)` renders the **Source Links / Citations** block. The `research` action (below) emits grounding context there by default.
-- **Example artifacts** (local, git-ignored — see `artifacts/` in a session where the vault has run): `HCH_Research_Master_Artifact.md`, `Negros_Occidental_Economic_Advantages_Report.md`, `synthesis_negros_renewable_island.md`, `synthesis_attack_audit.md`.
+- **Example artifacts** (local, git-ignored — see `artifacts/` in a session where the vault has run): `HoardCore_Research_Master_Artifact.md`, `Negros_Occidental_Economic_Advantages_Report.md`, `synthesis_negros_renewable_island.md`, `synthesis_attack_audit.md`.
 
 ## When to Use This Skill
 
@@ -135,6 +135,10 @@ Use this to query the local vault.
 - **`action`** (string, required): Set to `"search"`.
 - **`query`** (string, required): The search term (e.g., `"asyncio event loop"`).
 - **`force_refresh`** (boolean, optional): Not applicable for search.
+- **`mode`** (optional): `fast` → FTS-only keyword results; `hybrid` → force
+  vector+RRF fusion. Default (no flag) follows `embeddings.hybrid_search` /
+  `fts_fast_path` config. Use `--mode fast` when you want exact keyword recall
+  and speed; `--mode hybrid` when you want semantic recall guaranteed.
 
 ## Workflow Guidance
 
@@ -150,6 +154,9 @@ Use this to query the local vault.
 7.  **For a vault integrity check**: `venv/bin/python hoardcore.py _ --action check` — three-phase
     verification (document chunk counts, content hashes, vector dims); exit `0` pass / `1` fail.
     Run it before trusting `[V]` claims built on a long-lived vault.
+    - **Page-size migration**: new vaults use 16 KB SQLite pages (`storage.page_size`);
+      existing ones keep their old size until `--action check --migrate` rebuilds them
+      via `VACUUM INTO` (data preserved, idempotent). Run the migrate once on legacy vaults.
 8.  **Adversarial audit discipline**: Before finalizing an artifact, audit it — verify each quantitative claim against the current vault (re-run hybrid retrieval / SQL for the number). Tag anything unverifiable as `[E]` or remove it. Only claims traceable to full primary text in the current vault get `[V]`.
 
 ## Output Format

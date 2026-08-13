@@ -1,4 +1,4 @@
-"""Shared fixtures for HCH tests: isolate the vault in a temp dir."""
+"""Shared fixtures for HoardCore tests: isolate the vault in a temp dir."""
 
 import sys
 from pathlib import Path

@@ -1,7 +1,7 @@
 # Repo Instructions (loaded by your agent harness at every session start)
 
 You are the **agent**, hosted by your harness (e.g., OpenCode, Claude Code, or any
-other). You are working inside **HoardCore (HCH)**, a research toolkit and memory
+other). You are working inside **HoardCore**, a research toolkit and memory
 protocol for AI agents: a single-file Python module (SQLite vault + CLI). HoardCore
 provides the DISCOVER → INGEST → RECALL → EMIT loop, hybrid retrieval, and
 provenance tagging. It is **not** an agent harness itself — it is a tool you, the

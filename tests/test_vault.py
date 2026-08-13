@@ -1,6 +1,8 @@
 """Tests for the vault: indexing, hybrid retrieval (RRF), backfill, db hygiene."""
 
 
+import time
+
 import pytest
 
 import hoardcore as hc
@@ -310,3 +312,155 @@ def test_vault_isolation_between_vaults(tmp_path, make_chunk):
     assert len(vault_b.search_vault("attraction", hybrid=False)) == 1
     assert len(vault_b.search_vault("sleep", hybrid=False)) == 0
     assert vault_a.db_path != vault_b.db_path
+
+
+def test_new_vault_uses_16384_page_size(vault):
+    """P0.1: fresh vaults are created with 16 KB pages (float32 inline, no overflow)."""
+    with vault._db() as (_conn, cur):
+        page_size = cur.execute("PRAGMA page_size").fetchone()[0]
+    assert page_size == 16384
+
+
+def test_migrate_page_size_rewrites_vault(tmp_path, make_chunk):
+    """P0.2: VACUUM INTO migration rewrites an existing vault at a new page size."""
+    base = str(tmp_path)
+    vault = hc.VaultManager(TempConfig(base))
+    vault.index_document("https://solar.test/1",
+                         [make_chunk("solar farm megawatt capacity")], {})
+    # Rewrite at 8192 bytes.
+    assert vault.migrate_page_size(8192) is True
+    with vault._db() as (_conn, cur):
+        assert cur.execute("PRAGMA page_size").fetchone()[0] == 8192
+    # Data survived the rewrite.
+    assert len(vault.search_vault("solar", hybrid=False)) == 1
+    # Idempotent: already at target -> no-op.
+    assert vault.migrate_page_size(8192) is False
+
+
+def test_migrate_page_size_retries_after_stale_tmp(tmp_path, make_chunk):
+    """A stale .ps<target> temp file must not block a retry (P0.2).
+
+    VACUUM INTO refuses to overwrite an existing file; a previous failed
+    attempt leaves one behind. The rewrite must clear it and still succeed.
+    """
+    import os
+
+    base = str(tmp_path)
+    vault = hc.VaultManager(TempConfig(base))
+    vault.index_document("https://solar.test/1",
+                         [make_chunk("solar farm megawatt capacity")], {})
+    stale = vault.db_path + ".ps8192"
+    with open(stale, "w", encoding="utf-8") as f:
+        f.write("stale tmp from a failed attempt")
+    assert vault.migrate_page_size(8192) is True
+    assert not os.path.exists(stale)
+    with vault._db() as (_conn, cur):
+        assert cur.execute("PRAGMA page_size").fetchone()[0] == 8192
+    assert len(vault.search_vault("solar", hybrid=False)) == 1
+
+
+def test_migrate_page_size_noop_at_target(vault):
+    """P0.2: migrating to the current size is a no-op returning False."""
+    assert vault.migrate_page_size(16384) is False
+
+
+def test_embeddings_int8_quantization():
+    """P0.3: int8 quantize halves storage (1 byte/dim) while cosine still ranks.
+
+    Restores ConfigManager singleton state so sibling tests (which assert
+    float32 byte widths) stay order-independent.
+    """
+    from hoardcore import ConfigManager, EmbeddingsEngine
+    cfg = ConfigManager()
+    saved = dict(cfg._config["embeddings"])
+    try:
+        cfg._config["embeddings"]["mode"] = "sparse"
+        cfg._config["embeddings"]["dim"] = 256
+        eng = EmbeddingsEngine(cfg)
+        assert eng.bytes_per_dim == 4  # sparse stays float32
+
+        cfg._config["embeddings"]["mode"] = "dense"
+        cfg._config["embeddings"]["quantize"] = "int8"
+        eng8 = EmbeddingsEngine(cfg)
+        assert eng8.bytes_per_dim == 1
+        # Sparse-mode engine so no fastembed dependency: use hash vectors + manual quantize.
+        vec_f32 = eng.vectorize("renewable energy solar power negros")
+        vec_q = EmbeddingsEngine._quantize_int8(vec_f32)
+        assert len(vec_q) == eng.dim * 1  # 1 byte per dim
+        assert vec_q != vec_f32
+
+        # int8 cosine still orders a matching pair above a non-matching one.
+        same = EmbeddingsEngine.cosine(
+            vec_q,
+            EmbeddingsEngine._quantize_int8(eng.vectorize("solar farm megawatts renewable")),
+            eng.dim)
+        diff = EmbeddingsEngine.cosine(
+            vec_q,
+            EmbeddingsEngine._quantize_int8(eng.vectorize("chocolate cake recipe")),
+            eng.dim)
+        assert same > 0.3
+        assert diff < 0.15
+    finally:
+        cfg._config["embeddings"] = saved
+
+
+def test_fts_fast_path_skips_vector_when_fts_fills_limit(vault, make_chunk):
+    """P1.1: when FTS5 alone fills the limit, results are tagged fts_fast."""
+    docs = [
+        ("https://solar.test/1", "solar farm inverters panels megawatt capacity"),
+        ("https://solar.test/2", "solar farm site chosen for megawatt output"),
+        ("https://solar.test/3", "solar farm construction megawatt timeline"),
+        ("https://sugar.test/4", "sugar cane harvest tonnes per hectare"),
+    ]
+    for url, text in docs:
+        vault.index_document(url, [make_chunk(text, url=url)], {})
+    # 'solar farm megawatt' AND-matches the three solar docs; limit 3 >= FTS count.
+    res = vault.search_vault("solar farm megawatt", limit=3, hybrid=True)
+    assert len(res) == 3
+    assert all(c.metadata.get("retrieval") == "fts_fast" for c in res)
+    # recipe/sugar never leak in.
+    assert not any("recipe" in c.text or "sugar" in c.text for c in res)
+
+
+def test_fts_fast_path_disabled_uses_hybrid(vault, make_chunk):
+    """P1.1: with fts_fast_path off, hybrid RRF runs (retrieval='hybrid')."""
+    vault.config._overrides["embeddings.fts_fast_path"] = False
+    docs = [
+        ("https://solar.test/1", "solar farm inverters panels megawatt capacity"),
+        ("https://solar.test/2", "solar farm site chosen for megawatt output"),
+        ("https://solar.test/3", "solar farm construction megawatt timeline"),
+    ]
+    for url, text in docs:
+        vault.index_document(url, [make_chunk(text, url=url)], {})
+    res = vault.search_vault("solar farm megawatt", limit=3, hybrid=True)
+    assert len(res) == 3
+    assert all(c.metadata.get("retrieval") == "hybrid" for c in res)
+    assert all(c.metadata.get("hybrid_score") is not None for c in res)
+
+
+def test_recency_half_life_ranks_fresh_docs_first(vault, make_chunk):
+    """P1.2: recency weighting promotes freshly-ingested docs over stale ones."""
+    vault.config._overrides["embeddings.recency_half_life_days"] = 7
+    vault.config._overrides["embeddings.fts_fast_path"] = False
+    now = time.time()
+    stale_url = "https://news.test/stale"
+    fresh_url = "https://news.test/fresh"
+    vault.index_document(stale_url, [make_chunk("solar farm megawatt capacity", url=stale_url)], {})
+    vault.index_document(fresh_url, [make_chunk("solar farm megawatt capacity", url=fresh_url)], {})
+    # Back-date the stale doc by ~2 months (>> 7-day half-life).
+    with vault._db() as (_conn, cur):
+        cur.execute("UPDATE documents SET fetched_at = ? WHERE url = ?",
+                    (now - 60 * 86400, stale_url))
+    res = vault.search_vault("solar farm megawatt", limit=2, hybrid=True)
+    # Fresh doc must outrank the stale one despite identical text.
+    assert res[0].metadata["source_url"] == fresh_url
+
+
+def test_mode_fast_and_hybrid_cli_route(vault, make_chunk):
+    """P2.1: mode='fast' forces FTS-only, mode='hybrid' forces vector+RRF."""
+    vault.index_document("https://solar.test/1",
+                         [make_chunk("solar farm megawatt capacity")], {})
+    fast = vault.search_vault("solar", limit=5, hybrid=False)
+    assert len(fast) == 1
+    hyb = vault.search_vault("solar", limit=5, hybrid=True)
+    assert len(hyb) == 1

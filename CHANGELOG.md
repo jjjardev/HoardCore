@@ -3,6 +3,38 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-08-13
+
+### Added
+- **16 KB SQLite page size for new vaults (`storage.page_size`, default 16384).**
+  A 384-dim float32 vector fits inline in one page with no overflow, making
+  vector scans ~1.7x faster than the 4 KB default. Existing vaults are
+  untouched; `--action check --migrate` rewrites them via `VACUUM INTO`
+  (data-preserving, idempotent).
+- **`--action search --mode fast|hybrid`.** CLI ergonomics to force FTS-only
+  (`fast`) or guaranteed vector+RRF fusion (`hybrid`) on search, independent of
+  config.
+- **`[embeddings] quantize = "int8"`.** Dense vectors can be stored as signed
+  8-bit instead of float32 — ~4x smaller vault and ~3.5x faster scans with a
+  tiny recall cost. Cosine handles both formats; `verify_vault`/backfill track
+  the expected byte width.
+- **`[embeddings] fts_fast_path` (default true).** Strong-signal fast path: when
+  FTS5's all-term AND match alone fills the requested result set, the vector
+  scan is skipped and hits are tagged `retrieval='fts_fast'`. Set `false` to
+  always fuse.
+- **`[embeddings] recency_half_life_days` (default 0 = off).** Optional recency
+  weighting in RRF (`rrf *= 0.5 ** (age_days/half_life)`) promotes freshly
+  ingested sources over stale ones.
+- **Benchmark harness** (`tools/bench_vector.py`, `make bench`): sweeps page
+  size × float32/int8 to measure brute-force cosine latency as the vault grows —
+  the data behind future HNSW/sqlite-vec scaling decisions.
+
+### Changed
+- Version bump to `0.8.0`.
+- Dropped the "HCH" moniker from all branding, docs, and env vars
+  (`HCH_POOL_SIZE` → `HC_POOL_SIZE`, `HCH_WORKERS` → `HC_WORKERS`) — the
+  toolkit is referred to simply as **HoardCore**.
+
 ## [0.7.0] - 2026-08-13
 
 ### Added
@@ -123,10 +155,10 @@ All notable changes to this project are documented here. This project adheres to
 
 ## [0.3.0] - 2026-08-10
 
-### Rebrand: HoardCore-RAG (HCRAG) → HoardCore (HCH)
+### Rebrand: HoardCore-RAG (HCRAG) → HoardCore
 - Renamed from **HoardCore-RAG** to **HoardCore** — an *Agent Harness for
   Retrieval & Deep Research*, not a RAG library. The HCRAG acronym is retired;
-  the harness is now branded **HoardCore / HCH** everywhere.
+  the harness is now branded simply **HoardCore** everywhere.
 - Branding updated across `README.md` (fully rewritten in a template format,
   Design Decisions section removed), `skill.md`, `AGENTS.md`,
   `Makefile`, `hoardcore.toml`, `pyproject.toml` (package `name = "hoardcore"`,

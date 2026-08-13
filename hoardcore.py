@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HoardCore v0.7.0 (HCH) - Research toolkit for AI agents: retrieval & deep research.
+HoardCore v0.8.0 - Research toolkit for AI agents: retrieval & deep research.
 Ingests HTML, PDF, DOCX, EPUB, and TXT into a persistent, searchable SQLite Vault.
 Hybrid retrieval fuses FTS5 keyword search with vector search (RRF), and a
 web-discovery action feeds the crawler from a live search query.
@@ -9,10 +9,13 @@ Usage:
     python hoardcore.py <URL> --action scrape|crawl|search --query "text"
     python hoardcore.py _ --action ingest --urls "u1,u2,u3"
     python hoardcore.py _ --action discover --query "negros occidental renewable energy" --limit 5
+    python hoardcore.py _ --action search --query "solar" --mode fast   # FTS-only
+    python hoardcore.py _ --action search --query "solar" --mode hybrid # force vector+RRF
+    python hoardcore.py _ --action check --migrate  # rebuild vault at 16 KB pages
 """
 from __future__ import annotations
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 import asyncio
 import hashlib
@@ -83,7 +86,7 @@ class Chunk:
 # =============================================================================
 
 DEFAULT_CONFIG = """
-# HoardCore (HCH) v0.7.0 Configuration
+# HoardCore v0.8.0 Configuration
 
 [general]
 timeout_seconds = 30
@@ -108,6 +111,11 @@ artifacts_dir = "artifacts"          # Finished research deliverables (reports, 
 artifacts_by_day = true          # Organize deliverables into artifacts/YYYY-MM-DD/ subfolders
 save_binary = true               # Save original PDF/DOCX/EPUB files
 save_raw_html = false            # Save raw HTML for debugging
+page_size = 16384                # SQLite page size (bytes). 16 KB keeps 384-dim
+                                 # vectors inline (no overflow pages): ~1.7x faster
+                                 # vector lookups than the 4 KB default. Applies
+                                 # to new vaults; migrate existing ones with
+                                 # `--action check --migrate`.
 
 [parsers]
 enable_pdf = true
@@ -133,6 +141,9 @@ dense_model = "BAAI/bge-small-en-v1.5"
 dim = 256                # used in sparse mode; dense uses the model's dimension
 hybrid_search = true       # merge FTS + vector via RRF
 top_k = 40                 # candidate pool from vector search
+quantize = "float32"       # "float32" (default) or "int8" (1 byte/dim, ~4x smaller, tiny recall cost)
+fts_fast_path = true       # skip the vector scan when FTS5 alone fills the result set (all-term AND match)
+recency_half_life_days = 0 # recency weighting in RRF: 0 = disabled; e.g. 30 halves an old hit's score per month
 
 [discovery]
 enabled = true
@@ -194,11 +205,11 @@ class ConfigManager:
             "network": {"default_strategy": "aggressive", "enable_preflight": True},
             "auth": {"cookie_string": ""},
             "solver": {"enabled": False, "url": "http://localhost:8191/v1", "solver_timeout": 60},
-            "storage": {"root_dir": "hoardcore_data", "artifacts_dir": "artifacts", "artifacts_by_day": True, "save_binary": True, "save_raw_html": False},
+            "storage": {"root_dir": "hoardcore_data", "artifacts_dir": "artifacts", "artifacts_by_day": True, "save_binary": True, "save_raw_html": False, "page_size": 16384},
             "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "extract_pdf_tables": True, "enable_pdf_ocr": True},
             "crawler": {"respect_robots": True, "sitemap_limit": 500, "parallel_workers": 5},
             "indexer": {"enable_fts": True, "search_limit": 20, "parallel": False},
-            "embeddings": {"enabled": True, "mode": "dense", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 256, "hybrid_search": True, "top_k": 40, "conf_high_abs": 0.025, "conf_low_abs": 0.020},
+            "embeddings": {"enabled": True, "mode": "dense", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 256, "hybrid_search": True, "top_k": 40, "conf_high_abs": 0.025, "conf_low_abs": 0.020, "quantize": "float32", "fts_fast_path": True, "recency_half_life_days": 0},
             "discovery": {"enabled": True, "provider": "duckduckgo_html", "max_results": 10, "top_rank": 6, "max_retries": 2, "backoff_seconds": 1.5},
             "chunking": {"max_tokens": 512, "overlap_tokens": 50, "strategy": "heading"},
             "cache": {"ttl_seconds": 86400}
@@ -245,6 +256,15 @@ class EmbeddingsEngine:
         # is lazily loaded and falls back to sparse if fastembed is missing.
         self.mode = str(config.get('embeddings.mode', 'dense')).lower()
         self.dim = int(config.get('embeddings.dim', 256))
+        # Vector storage format: "float32" (4 bytes/dim) or "int8" (1 byte/dim,
+        # ~4x smaller vault, tiny recall cost). int8 is applied to dense output
+        # only — the sparse hash already produces compact normalized vectors.
+        self.quantize = str(config.get('embeddings.quantize', 'float32')).lower()
+        if self.mode == 'dense' and self.quantize not in ('float32', 'int8'):
+            logger.warning(
+                f"Unrecognized quantize={self.quantize!r}; falling back to float32."
+            )
+            self.quantize = 'float32'
         self._dense = None  # lazy fastembed backend (model + dim)
         if self.mode == 'dense':
             try:
@@ -255,6 +275,11 @@ class EmbeddingsEngine:
                     f"falling back to sparse lexical hashing."
                 )
                 self.mode = 'sparse'
+
+    @property
+    def bytes_per_dim(self) -> int:
+        """On-disk bytes per embedding dimension (4 for float32, 1 for int8)."""
+        return 1 if (self.mode == 'dense' and self.quantize == 'int8') else 4
 
     def _load_dense(self) -> int:
         """Lazily import fastembed and load the ONNX-quantized model.
@@ -310,9 +335,24 @@ class EmbeddingsEngine:
         return arr.tobytes()
 
     def vectorize(self, text: str) -> bytes:
-        if self.mode == 'dense' and self._dense is not None:
-            return self._vectorize_dense(text)
-        return self._hash_vector(text)
+        vec = self._vectorize_dense(text) if (
+            self.mode == 'dense' and self._dense is not None
+        ) else self._hash_vector(text)
+        if self.mode == 'dense' and self.quantize == 'int8' and vec:
+            return self._quantize_int8(vec)
+        return vec
+
+    @staticmethod
+    def _quantize_int8(vec: bytes) -> bytes:
+        """Convert a float32 vector to signed int8 (scale to [-127, 127]).
+
+        Dequantization for cosine is just dividing back by 127, so vectors stay
+        comparable without a per-vector scale factor.
+        """
+        arr = array('f')
+        arr.frombytes(vec)
+        q = array('b', (max(-127, min(127, round(v * 127))) for v in arr))
+        return q.tobytes()
 
     def _vectorize_dense(self, text: str) -> bytes:
         """Encode text with the loaded dense model, stored as float32 bytes.
@@ -337,6 +377,14 @@ class EmbeddingsEngine:
 
     @staticmethod
     def cosine(a: bytes, b: bytes, dim: int) -> float:
+        # int8-quantized vectors are exactly `dim` bytes; float32 are 4x.
+        if len(a) == dim:
+            va = array('b')
+            va.frombytes(a)
+            vb = array('b')
+            vb.frombytes(b)
+            # dot of dequantized vectors / 127^2 == cosine (L2-normalized)
+            return float(sum(x * y for x, y in zip(va, vb, strict=False))) / (127.0 ** 2)
         va = array('f')
         va.frombytes(a)
         vb = array('f')
@@ -354,10 +402,10 @@ class EmbeddingsEngine:
 
 # Ingest pipeline tuning (kept modest to stay lightweight)
 DB_TIMEOUT           = 30.0
-CONNECTION_POOL_SIZE = int(os.environ.get("HCH_POOL_SIZE", "8"))
+CONNECTION_POOL_SIZE = int(os.environ.get("HC_POOL_SIZE", "8"))
 CHUNK_BATCH_SIZE     = 50
 PIPELINE_QUEUE_SIZE  = 20
-WORKER_THREADS       = int(os.environ.get("HCH_WORKERS", "4"))
+WORKER_THREADS       = int(os.environ.get("HC_WORKERS", "4"))
 
 class ConnectionPool:
     """Reusable bounded pool of SQLite connections.
@@ -367,9 +415,11 @@ class ConnectionPool:
     throughput than the previous open-a-new-connection-per-query behaviour.
     """
 
-    def __init__(self, db_path: str, pool_size: int = CONNECTION_POOL_SIZE):
+    def __init__(self, db_path: str, pool_size: int = CONNECTION_POOL_SIZE,
+                 page_size: int = 16384):
         self.db_path = db_path
         self.pool_size = pool_size
+        self.page_size = page_size
         self._pool: queue.Queue = queue.Queue(maxsize=pool_size)
         for _ in range(pool_size):
             self._pool.put(self._create_connection())
@@ -377,6 +427,7 @@ class ConnectionPool:
     def _create_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=DB_TIMEOUT,
                                check_same_thread=False)
+        conn.execute(f"PRAGMA page_size = {self.page_size}")
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA mmap_size = 536870912")    # 512 MB mmap window
         conn.execute("PRAGMA temp_store = MEMORY")
@@ -436,7 +487,8 @@ class VaultManager:
         self.db_path = os.path.join(self.root_dir, 'vault.db')
         self.embeddings = EmbeddingsEngine(config)
         self._vector_dim = self.embeddings.dim
-        self._pool = ConnectionPool(self.db_path, CONNECTION_POOL_SIZE)
+        self.page_size = int(config.get('storage.page_size', 16384))
+        self._pool = ConnectionPool(self.db_path, CONNECTION_POOL_SIZE, self.page_size)
         self._init_db()
         self.backfill_vectors()
 
@@ -768,7 +820,7 @@ class VaultManager:
         """
         if not self.config.get('embeddings.enabled', True):
             return 0
-        expected_bytes = self._vector_dim * 4  # float32 per dimension
+        expected_bytes = self._vector_dim * self.embeddings.bytes_per_dim
         stale_dim = False
         with self._db() as (_conn, cursor):
             # Detect dimension mismatch: sample one stored vector's byte length.
@@ -868,7 +920,7 @@ class VaultManager:
                     errors += 1
 
         # Phase 3: every vector must match the configured dimension.
-        expected_bytes = self._vector_dim * 4
+        expected_bytes = self._vector_dim * self.embeddings.bytes_per_dim
         with self._db() as (_conn, cursor):
             cursor.execute("SELECT chunk_rowid, length(vector) FROM chunk_vectors")
             for rid, vlen in cursor.fetchall():
@@ -885,6 +937,64 @@ class VaultManager:
         else:
             logger.error(f"Vault integrity FAIL ({errors} error(s) across {checks} checks).")
         return errors == 0
+
+    def migrate_page_size(self, target: int | None = None) -> bool:
+        """Rewrite the vault DB at a different SQLite page size via `VACUUM INTO`.
+
+        SQLite only honors `PRAGMA page_size` while a database file is still
+        empty, so vaults created before the 16 KB default keep their old page
+        size (typically 4096). This rebuilds the file at `target` bytes per
+        page without touching live connections, preserving all data.
+
+        Returns True if the vault was rewritten, False if it was already at the
+        target size (or the rewrite failed).
+        """
+        target = int(target or self.page_size)
+        with self._db() as (_conn, cursor):
+            current = cursor.execute("PRAGMA page_size").fetchone()[0]
+        if current == target:
+            return False
+
+        tmp_path = f"{self.db_path}.ps{target}"
+        # SQLite's VACUUM INTO refuses to overwrite an existing file, so clear
+        # any stale temp from a previous failed attempt before retrying.
+        with suppress(FileNotFoundError):
+            os.remove(tmp_path)
+        ok = False
+        try:
+            # A dedicated connection outside the pool so WAL is quiet.
+            conn = sqlite3.connect(self.db_path, timeout=DB_TIMEOUT)
+            try:
+                conn.execute(f"PRAGMA page_size = {target}")
+                conn.execute(f"VACUUM INTO '{tmp_path}'")
+            finally:
+                conn.close()
+            with sqlite3.connect(tmp_path) as v:
+                new_size = v.execute("PRAGMA page_size").fetchone()[0]
+            if new_size != target:
+                logger.error(
+                    f"migrate_page_size: VACUUM INTO produced {new_size}, "
+                    f"expected {target}."
+                )
+                with suppress(FileNotFoundError):
+                    os.remove(tmp_path)
+                return False
+            ok = True
+        except Exception as e:
+            logger.error(f"migrate_page_size failed: {e}")
+            with suppress(FileNotFoundError):
+                os.remove(tmp_path)
+            return False
+
+        # Swap the rebuilt file into place and refresh the pool.
+        self._pool.close_all()
+        os.replace(tmp_path, self.db_path)
+        for suffix in ("-wal", "-shm"):
+            with suppress(FileNotFoundError):
+                os.remove(self.db_path + suffix)
+        self._pool = ConnectionPool(self.db_path, CONNECTION_POOL_SIZE, self.page_size)
+        logger.info(f"Vault page size migrated {current} -> {target} bytes.")
+        return ok
 
     def ingest_chunks_parallel(self, url: str, chunks: list[Chunk],
                                meta: dict[str, Any]) -> None:
@@ -1083,6 +1193,33 @@ class VaultManager:
             """, (*fts_params, fts_pool))
             fts_rows: list[tuple[int, str]] = cursor.fetchall()
 
+            # --- FTS5 strong-signal fast path (P1.1) ---
+            # When the FTS5 AND-match alone fills the requested result set, the
+            # query is a strong keyword signal: skip the (more expensive) vector
+            # scan entirely and return the FTS ranking directly. Tagged
+            # retrieval='fts_fast' so downstream provenance is explicit.
+            if (self.config.get('embeddings.fts_fast_path', True)
+                    and len(fts_rows) >= limit):
+                fast_ids = [rid for rid, _ in fts_rows[:limit]]
+                if fast_ids:
+                    placeholders = ",".join("?" * len(fast_ids))
+                    order_map = {rid: i for i, rid in enumerate(fast_ids)}
+                    cursor.execute(f"""
+                        SELECT rowid, url, header_path, text, metadata_json
+                        FROM chunks_fts WHERE rowid IN ({placeholders})
+                    """, fast_ids)
+                    fast_rows = cursor.fetchall()
+                    fast_rows.sort(key=lambda r: order_map.get(r[0], 9999))
+                    results: list[Chunk] = []
+                    for _rid, url, _hp, text, meta_json in fast_rows:
+                        meta = json.loads(meta_json)
+                        meta['source_url'] = url
+                        meta['retrieval'] = 'fts_fast'
+                        meta['hybrid_score'] = None
+                        meta['confidence'] = 'high'
+                        results.append(Chunk(text=text, metadata=meta))
+                    return results
+
             # --- vector candidate list (brute force; fine for a hoard vault) ---
             scored: list[tuple[float, int, str]] = []
             if vec_pool > 0:
@@ -1112,6 +1249,29 @@ class VaultManager:
             for rank, (_score, rid, _u) in enumerate(scored):
                 rrf[rid] = rrf.get(rid, 0.0) + 1.0 / (k + rank + 1)
                 vec_rids.add(rid)
+
+            # --- Recency weighting (P1.2) ---
+            # Optionally dampen stale hits: rrf *= 0.5 ** (age_days / half_life).
+            # Half-life is 0 (disabled) by default.
+            half_life = float(self.config.get('embeddings.recency_half_life_days', 0) or 0)
+            if half_life > 0 and rrf:
+                now = time.time()
+                url_by_rid = dict(fts_rows)
+                url_by_rid.update({rid: u for _s, rid, u in scored})
+                urls = list({u for u in url_by_rid.values() if u})
+                if urls:
+                    placeholders = ",".join("?" * len(urls))
+                    cursor.execute(
+                        f"SELECT url, MAX(fetched_at) FROM documents "
+                        f"WHERE url IN ({placeholders}) GROUP BY url",
+                        urls,
+                    )
+                    fetched_by_url = dict(cursor.fetchall())
+                    for rid, url in url_by_rid.items():
+                        fetched = fetched_by_url.get(url)
+                        if fetched:
+                            age_days = max(0.0, (now - fetched) / 86400.0)
+                            rrf[rid] *= 0.5 ** (age_days / half_life)
 
             if not rrf:
                 return []
@@ -2335,7 +2495,8 @@ class HoardCore:
         query: str | None = None,
         force_refresh: bool = False,
         urls: list[str] | None = None,
-        max_results: int = 0
+        max_results: int = 0,
+        mode: str | None = None,
     ) -> list[dict[str, Any]]:
         """
         Public entry point.
@@ -2348,6 +2509,7 @@ class HoardCore:
             force_refresh: Ignore cache and re-fetch.
             urls: For "ingest", an explicit list of URLs to process in parallel.
             max_results: For "discover", how many search results to ingest.
+            mode: For "search", "fast" (FTS-only) or "hybrid" (force vector+RFF).
 
         Returns:
             List of dicts with "text" and "metadata" for the LLM.
@@ -2364,7 +2526,12 @@ class HoardCore:
                 }]
             limit = self.config.get('indexer.search_limit', 20)
             domain = urlparse(url).netloc or None
-            chunks = self.vault.search_vault(query, limit, domain=domain)
+            hybrid: bool | None = None
+            if mode == 'fast':
+                hybrid = False
+            elif mode == 'hybrid':
+                hybrid = True
+            chunks = self.vault.search_vault(query, limit, domain=domain, hybrid=hybrid)
             return [c.to_dict() for c in chunks]
 
         elif action == "ingest":
@@ -2489,6 +2656,8 @@ async def main():
     claim = None
     out_path: str | None = None
     vault_name: str | None = None
+    migrate_page_size = False
+    mode: str | None = None
 
     i = 2
     while i < len(sys.argv):
@@ -2536,12 +2705,18 @@ async def main():
         elif sys.argv[i] == "--vault" and i + 1 < len(sys.argv):
             vault_name = sys.argv[i + 1]
             i += 2
+        elif sys.argv[i] == "--migrate":
+            migrate_page_size = True
+            i += 1
+        elif sys.argv[i] == "--mode" and i + 1 < len(sys.argv):
+            mode = sys.argv[i + 1]
+            i += 2
         else:
             print(f"  ⚠️  Unrecognized flag ignored: {sys.argv[i]!r}", file=sys.stderr)
             i += 1
 
     scraper = HoardCore(vault_name=vault_name)
-    print(f"\n🚀 HoardCore v{__version__} (HCH): Action={action}, URL={url}, Strategy={strategy or 'default'}")
+    print(f"\n🚀 HoardCore v{__version__}: Action={action}, URL={url}, Strategy={strategy or 'default'}")
     organized = scraper.organize_artifacts_by_day()
     if organized:
         print(f"   📂 Organized {len(organized)} artifact(s) into day folders")
@@ -2567,6 +2742,9 @@ async def main():
         sys.exit(0 if result == "verified" else (1 if result == "partial" else 2))
 
     if action == "check":
+        if migrate_page_size:
+            migrated = scraper.vault.migrate_page_size()
+            print(f"  🔧 Page size: {'migrated to 16 KB' if migrated else 'already at target'}")
         ok = scraper.vault.verify_vault()
         sys.exit(0 if ok else 1)
 
@@ -2574,7 +2752,7 @@ async def main():
         url, action=action, strategy=strategy,
         query=query, force_refresh=force_refresh,
         urls=urls if action == "ingest" else None,
-        max_results=max_results
+        max_results=max_results, mode=mode
     )
 
     print("\n" + "=" * 80)

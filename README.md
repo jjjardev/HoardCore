@@ -4,7 +4,7 @@ Research toolkit for AI agents — give your agent a memory it can prove.
 
 Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo/Mojeek web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
 
-![Version](https://img.shields.io/badge/version-0.7.0-blue)
+![Version](https://img.shields.io/badge/version-0.8.0-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -139,6 +139,13 @@ python hoardcore.py _ --action verify --claim "the Epoch doubling time is 6 mont
 # Run a three-phase vault integrity check (0=pass, 1=fail)
 python hoardcore.py _ --action check
 echo "exit code: $?"
+
+# Rebuild an existing vault at the new 16 KB page size (legacy 4 KB vaults keep their old size otherwise)
+python hoardcore.py _ --action check --migrate
+
+# Search ergonomics: force FTS-only (fast) or force hybrid vector+RRF (hybrid)
+python hoardcore.py _ --action search --query "solar farm" --mode fast
+python hoardcore.py _ --action search --query "solar farm" --mode hybrid
 
 # Same, but write the grounding context to a specific file
 python hoardcore.py _ --action research --query "negros economy" --out artifacts/report.md
@@ -411,6 +418,8 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 | `--out PATH` | Output file for `research` (default day-sorted `artifacts/YYYY-MM-DD/grounding_context.md`). |
 | `--claim C` | Claim text to verify for the `verify` action. |
 | `--vault NAME` | Scope the whole session to a per-topic vault (`hoardcore_data/NAME/`). |
+| `--mode MODE` | For `search`: `fast` (FTS-only) or `hybrid` (force vector+RRF). Default follows config. |
+| `--migrate` | With `check`: rebuild the vault at the configured `storage.page_size` (16 KB default) via `VACUUM INTO`. |
 | `--force` | Ignore the cache and re-fetch / re-index. |
 
 Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `check`) does not need a URL.
@@ -441,11 +450,11 @@ Created automatically on first run. Key sections:
 | `[network]` | `default_strategy` (`fast`/`balanced`/`aggressive`), `enable_preflight` |
 | `[auth]` | `cookie_string` (e.g. `cf_clearance=...; session=...`) |
 | `[solver]` | `enabled`, `url`, `solver_timeout` |
-| `[storage]` | `root_dir`, `artifacts_dir`, `artifacts_by_day`, `save_binary`, `save_raw_html` |
+| `[storage]` | `root_dir`, `artifacts_dir`, `artifacts_by_day`, `save_binary`, `save_raw_html`, `page_size` (16 KB default) |
 | `[parsers]` | `enable_pdf`, `enable_docx`, `enable_epub`, `extract_pdf_tables` |
 | `[crawler]` | `respect_robots`, `sitemap_limit`, `parallel_workers` |
 | `[indexer]` | `enable_fts`, `search_limit`, `parallel` (threaded ingest, default off) |
-| `[embeddings]` | `enabled`, `mode` (`sparse`/`dense`), `dense_model`, `dim`, `hybrid_search`, `top_k`, `conf_high_abs`, `conf_low_abs` |
+| `[embeddings]` | `enabled`, `mode` (`sparse`/`dense`), `dense_model`, `dim`, `hybrid_search`, `top_k`, `quantize`, `fts_fast_path`, `recency_half_life_days`, `conf_high_abs`, `conf_low_abs` |
 | `[discovery]` | `provider`, `top_rank`, `max_retries`, `backoff_seconds` |
 | `[chunking]` | `max_tokens`, `overlap_tokens`, `strategy` |
 | `[cache]` | `ttl_seconds` |
@@ -496,7 +505,7 @@ Each candidate contributes `1 / (k + rank + 1)`; results are sorted by the sum a
 
 ### Resilience & DB Hygiene
 
-A fetch chain runs `aiohttp` then `curl_cffi` then `FlareSolverr` (aggressive). Discovery wraps fetches in bounded retries with exponential backoff and falls back DuckDuckGo → Mojeek. All SQLite access flows through `VaultManager._db()`, which acquires a connection from a reusable **`ConnectionPool`** (default 8 connections, env-overridable via `HCH_POOL_SIZE`):
+A fetch chain runs `aiohttp` then `curl_cffi` then `FlareSolverr` (aggressive). Discovery wraps fetches in bounded retries with exponential backoff and falls back DuckDuckGo → Mojeek. All SQLite access flows through `VaultManager._db()`, which acquires a connection from a reusable **`ConnectionPool`** (default 8 connections, env-overridable via `HC_POOL_SIZE`):
 
 ```
 with self._db() as (conn, cursor):
