@@ -13,13 +13,13 @@
 PYTHON ?= python3.11
 
 install:
-	@echo "🔧 Installing HoardCore core deps into a virtualenv..."
+	@echo "🔧 Installing HoardCore into a virtualenv..."
 	@test -d venv || $(PYTHON) -m venv venv
 	venv/bin/python -m pip install --upgrade pip
-	venv/bin/python -m pip install aiohttp curl_cffi trafilatura readability-lxml tomli PyMuPDF python-docx ebooklib lxml
+	venv/bin/python -m pip install aiohttp curl_cffi trafilatura readability-lxml tomli PyMuPDF python-docx ebooklib lxml fastembed
 	@echo "For OCR of scanned PDFs, install the optional fallback next:"
 	@echo "  venv/bin/python -m pip install rapidocr_onnxruntime"
-	@echo "✅ Lightweight install complete (venv)."
+	@echo "✅ Lightweight install complete. Dense retrieval (ONNX, no torch) is on by default."
 
 run:
 	@echo "🚀 Testing HoardCore on a sample URL..."

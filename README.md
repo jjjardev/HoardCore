@@ -2,9 +2,9 @@
 
 Research toolkit for AI agents — give your agent a memory it can prove.
 
-Terminal tool that turns the web and local files into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo/Mojeek web discovery, Cloudflare-aware fetching, hybrid FTS5 + lexical-vector retrieval, and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance.
+Terminal tool that turns the web and local files into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo/Mojeek web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
 
-![Version](https://img.shields.io/badge/version-0.4.0-blue)
+![Version](https://img.shields.io/badge/version-0.5.0-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -35,7 +35,7 @@ Terminal tool that turns the web and local files into a permanent, local SQLite 
 
 ## About
 
-HoardCore is a research toolkit for AI agents — a single-file Python module (SQLite vault + CLI) for retrieval and deep research. It hoards knowledge: it turns the web and local files into a permanent, local, searchable SQLite vault, then backs your agent's research with explicit discovery budgets, hybrid retrieval, and citeable provenance. Retrieval needs no ML model — it is a hybrid of SQLite FTS5 keyword search and dependency-free lexical hashing vectors fused via Reciprocal Rank Fusion (RRF).
+HoardCore is a research toolkit for AI agents — a single-file Python module (SQLite vault + CLI) for retrieval and deep research. It hoards knowledge: it turns the web and local files into a permanent, local, searchable SQLite vault, then backs your agent's research with explicit discovery budgets, hybrid retrieval, and citeable provenance. Retrieval is **dense by default** — an ONNX-quantized sentence-transformer (via `fastembed` on `onnxruntime`, no PyTorch) fused with SQLite FTS5 keyword search via Reciprocal Rank Fusion (RRF). A lightweight sparse-hash fallback kicks in automatically only where the dense model is unavailable.
 
 **HoardCore is not an agent harness.** It provides the DISCOVER → INGEST → RECALL → EMIT loop, hybrid retrieval, and provenance tagging — but it does not host an LLM or manage context. That is the job of your **agent harness** (e.g., OpenCode, Claude Code, or any other): the harness hosts the agent, the agent reads `skill.md`, and the agent executes HoardCore commands via its CLI.
 
@@ -44,11 +44,12 @@ The relationship to the agent is the point. Chat-based "deep research" is a ride
 Key characteristics:
 
 - **Single-file core.** The entire engine is one module, `hoardcore.py`, runnable as a CLI or imported as a library.
-- **No embeddings model.** Discovery runs through free HTML search endpoints (DuckDuckGo, with Mojeek fallback) on the same fetch chain as the crawler. Retrieval mixes FTS5 and hashed lexical vectors — cheap and deterministic.
-- **Lightweight and self-hosted.** Everything stays on your machine. Optional FlareSolverr (Docker) enables Cloudflare-heavy sites via the `aggressive` strategy; lazy binary imports mean HTML-only usage never pulls in PDF/DOCX/EPUB libraries.
+- **Real semantic retrieval, dense by default.** An ONNX-quantized sentence-transformer (`all-MiniLM-L6-v2`, 384-dim) runs on `onnxruntime` — no PyTorch, no GPU. Hybrid retrieval fuses FTS5 keyword search with dense vector similarity so both exact terms and *meaning* surface. A lightweight sparse hash (`mode = "sparse"`) is available as a fallback for environments without `fastembed`, and dense mode degrades to it automatically if the dependency is missing.
+- **Lightweight and self-hosted.** One file, local-first, everything on your machine. Optional FlareSolverr (Docker) enables Cloudflare-heavy sites via the `aggressive` strategy; lazy binary imports mean HTML-only usage never pulls in PDF/DOCX/EPUB libraries.
 - **Resilient fetch chain.** `fast` → aiohttp, `balanced` → aiohttp then curl_cffi TLS-impersonation, `aggressive` → adds FlareSolverr. Discovery adds bounded retry with exponential backoff and automatic provider fallback.
-- **Hybrid retrieval.** Merges keyword (BM25-style FTS5) and vector-similarity ranks via RRF, so both exact terms and near-literal matches surface. Empty or punctuation-only queries return safely instead of crashing.
+- **Hybrid retrieval.** Merges keyword (BM25-style FTS5) and vector-similarity ranks via RRF, so both exact terms and near-literal matches surface. Empty or punctuation-only queries return safely instead of crashing. Hits carry **confidence bands** (`high`/`medium`/`low`) surfaced in chunk metadata and grounding output.
 - **Research workflow.** A single `research` action runs `DISCOVER → INGEST → RECALL → EMIT`, writing a grounding-context file into the `artifacts/` directory for direct injection into an LLM.
+- **Programmatic provenance audit.** A `verify` action re-checks a claim against the vault's stored text (verbatim, partial, or unverified) with CI-wireable exit codes, so the `[V]` tag is machine-checkable, not just prompt-enforced.
 - **Artifacts discipline.** Finished deliverables live in `artifacts/` with `[V]/[E]/[H]` provenance tags and numbered source links; a safe `write_artifact()` helper includes path-traversal protection, and deliverables are day-sorted into `artifacts/YYYY-MM-DD/`.
 - **MIT licensed.** Free to use, modify, and redistribute.
 
@@ -59,6 +60,7 @@ Key characteristics:
 | Requirement | Purpose | Install |
 |---|---|---|
 | **Python 3.11+** | Runtime (uses `tomllib`) | `python3 --version` |
+| **fastembed + onnxruntime** | Dense retrieval (ONNX-quantized sentence-transformer; no PyTorch/GPU) | Installed via Makefile |
 | **curl_cffi** *(optional)* | TLS-fingerprint impersonation for harder anti-bot pages | Installed via Makefile |
 | **FlareSolverr** *(optional)* | Fetch Cloudflare-protected pages for the `aggressive` strategy | `docker run -d --name=flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr` |
 | **PyMuPDF / python-docx / ebooklib** *(optional)* | PDF, DOCX, EPUB parsing | Installed via Makefile |
@@ -100,13 +102,15 @@ venv/bin/python hoardcore.py https://example.com --action scrape
 
 The console script `hoardcore` (or `python -m hoardcore` / `python hoardcore.py`) all launch the same CLI. The vault is written to `hoardcore_data/vault.db` and deliverables to `artifacts/` (both configurable).
 
-**Optional — OCR for scanned PDFs** (not installed by default, per the zero-dependency ethos):
+**Optional — OCR for scanned PDFs**:
 
 ```bash
 make install && venv/bin/python -m pip install rapidocr_onnxruntime   # or: pip install .[ocr]
 ```
 
 Once installed, image-only/scanned PDF pages are OCR'd automatically (RapidOCR, local ONNX, no system deps); without it, those pages degrade gracefully. See [Ingest](#ingest-mode-scrape--crawl).
+
+**Retrieval modes.** Dense retrieval is **on by default** — `make install` includes `fastembed`, so hybrid search uses an ONNX-quantized sentence-transformer (default `all-MiniLM-L6-v2`, 384-dim, runs on `onnxruntime` — no PyTorch, no GPU) for meaning-based matching. If `fastembed` is unavailable in a given environment, dense mode **degrades gracefully to the lightweight sparse hash** — it never crashes. To force the sparse hash explicitly, set `mode = "sparse"` in the `[embeddings]` section of `hoardcore.toml`. Switching modes rebuilds the vector table automatically (resumable across interrupts). See [Hybrid Retrieval](#hybrid-retrieval) and [Configuration](#configuration-file-hoardcoretoml).
 
 ---
 
@@ -127,6 +131,10 @@ python hoardcore.py _ --action discover --query "negros renewable energy" --limi
 
 # Run the full agentic research workflow -> appends grounding context to artifacts/
 python hoardcore.py _ --action research --query "how does bokashi compost" --discover 5 --recall 6
+
+# Programmatically verify a claim against the vault (0=verified, 1=partial, 2=unverified)
+python hoardcore.py _ --action verify --claim "the Epoch doubling time is 6 months" --recall 5
+echo "exit code: $?"
 
 # Same, but write the grounding context to a specific file
 python hoardcore.py _ --action research --query "negros economy" --out artifacts/report.md
@@ -150,7 +158,7 @@ The vault persists between runs. Later searches are instant and require no netwo
 | Fetch web + local files (HTML/PDF/DOCX/EPUB/OCR) | Reads the user's request and `skill.md` |
 | Store everything in a persistent SQLite vault | Drives the `hoardcore` CLI (discover / ingest / search / research) |
 | Hybrid-retrieve the most relevant chunks (FTS5 + vectors, RRF) | Reads the grounding context and cross-checks claims |
-| Stay single-file, with zero model dependency | Writes the finished, `[V]/[E]/[H]`-tagged report |
+| Stay single-file, with dense ONNX retrieval built in (no PyTorch/GPU) | Writes the finished, `[V]/[E]/[H]`-tagged report |
 
 ### First-class controls (not buried in prompt engineering)
 
@@ -294,7 +302,7 @@ Each example ends with content that is **grounded and recallable later** — the
 
 ### Agent-friendly fact
 
-Because retrieval needs no ML model and the `hoardcore.toml` config is auto-generated, HoardCore runs inside most sandboxes and CI environments the moment its dependencies are installed — the agent can bootstrap a vault on first run with no setup ceremony.
+Because dense retrieval runs on `onnxruntime` (no PyTorch, no GPU) and the `hoardcore.toml` config is auto-generated, HoardCore is lightweight to install and runs inside most sandboxes and CI environments — the agent can bootstrap a vault on first run with no setup ceremony. Dense mode never blocks startup: if its dependency is absent it degrades to the sparse hash and keeps working.
 
 ---
 
@@ -316,9 +324,15 @@ The pipeline for each document:
 
 `search` fuses two candidate lists via Reciprocal Rank Fusion (RRF):
 - **FTS5** keyword ranking across chunk text (BM25-style).
-- **Lexical vector** similarity via dependency-free sparse hashing (FNV-1a feature hashing of word + 3-gram shingles into a 256-dim unit vector).
+- **Dense vector** similarity from an ONNX-quantized sentence-transformer (default).
 
-Because it's lexical, a query that doesn't literally match can still surface near-similar chunks (e.g., `sol*r` → `solar`). Empty, whitespace, and punctuation-only queries return `[]` instead of raising.
+**Dense mode (default):** chunks are embedded with a sentence-transformer (`all-MiniLM-L6-v2`, 384-dim) via `fastembed` on `onnxruntime` — no PyTorch, no GPU. This captures *semantic* similarity: a conceptual query surfaces on-topic sources even with no shared vocabulary.
+
+**Sparse mode (fallback):** set `[embeddings] mode = "sparse"`. Uses FNV-1a feature hashing of word + 3-gram shingles into a 256-dim unit vector for lexical overlap. It's the automatic fallback when the dense dependency is missing and the mode for environments that want zero model weight. A lexical query can still surface near-literal matches (e.g., `sol*r` → `solar`).
+
+**Confidence bands.** Every hybrid hit is tagged `high`, `medium`, or `low`. A hit is `high` if it matched *both* the keyword (FTS5) and vector lists, or if its absolute fused score is strong; otherwise it scales by absolute score (`conf_high_abs` / `conf_low_abs`). This discriminates weak, vector-only result sets from strong keyword+vector ones — unlike a ratio-to-top score, which stays high even for weak queries. The band is attached to chunk metadata and printed in grounding-context output (e.g. `score 0.0325 | high`). A low-confidence hit signals a weak match that should be **re-verified before being tagged `[V]`** — or demoted to `[E]`.
+
+Empty, whitespace, and punctuation-only queries return `[]` instead of raising.
 
 Queries are sanitized: operator characters (`" ( ) * ^ : -`) are stripped and tokens quoted, so free-text input cannot alter query semantics or raise FTS syntax errors.
 
@@ -334,7 +348,7 @@ Queries are sanitized: operator characters (`" ( ) * ^ : -`) are stripped and to
 [2/RECALL]   hybrid-retrieve the best chunks
 [3/EMIT]     write a grounding-context file
 ```
-The emitted file lists each retrieved chunk with its source URL and hybrid score, plus a distinct-sources summary and a **Source Links / Citations** block — ready to be injected verbatim as grounding context for an LLM.
+The emitted file lists each retrieved chunk with its source URL, hybrid score, and confidence band, plus a distinct-sources summary and a **Source Links / Citations** block — ready to be injected verbatim as grounding context for an LLM.
 
 ### Artifacts
 
@@ -364,14 +378,15 @@ hoardcore [URL] [options]
 | `ingest` | Index an explicit URL list given as a comma/space separated `--urls` string. |
 | `discover` | Web-search `--query`, ingest the top `--limit` results. |
 | `research` | Run `discover -> ingest -> recall -> emit`; writes to `--out` or `artifacts/grounding_context.md`. |
+| `verify` | Programmatic provenance audit: confirm `--claim` against vault text (see below). |
 
-Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`) does not need a URL.
+Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`) does not need a URL.
 
 ### Flags
 
 | Flag | Description |
 |---|---|
-| `--action ACTION` | One of `scrape`, `crawl`, `search`, `ingest`, `discover`, `research`. |
+| `--action ACTION` | One of `scrape`, `crawl`, `search`, `ingest`, `discover`, `research`, `verify`. |
 | `--strategy S` | `fast`, `balanced` (default from config), or `aggressive`. |
 | `--query Q` | Required for `search`, `discover`, `research`. |
 | `--limit N` | Web results to ingest for `discover`. |
@@ -379,7 +394,26 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 | `--discover N` | Sources to discover first in `research` (default 5). |
 | `--recall N` | Chunks to retrieve in `research` (default 6). |
 | `--out PATH` | Output file for `research` (default `artifacts/grounding_context.md`). |
+| `--claim C` | Claim text to verify for the `verify` action. |
 | `--force` | Ignore the cache and re-fetch / re-index. |
+
+Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`) does not need a URL.
+
+### `verify` — the programmatic audit
+
+Makes the `[V]` honor-system tag machine-checkable. It checks a claim against the vault's stored text and reports one of three states:
+
+```bash
+python hoardcore.py _ --action verify --claim "the Epoch doubling time is 6 months" --recall 5
+```
+
+| Result | Meaning | Exit code |
+|---|---|---|
+| `VERIFIED` | The claim (or a distinctive substring) appears verbatim in stored chunk text | `0` |
+| `PARTIAL` | Retrieval finds real keyword coverage, but no verbatim match | `1` |
+| `UNVERIFIED` | No vault support for the claim | `2` |
+
+Agents and CI can branch on the exit code: refuse to emit a `[V]` tag unless `verify` returns `0`.
 
 ### Configuration file (`hoardcore.toml`)
 
@@ -395,7 +429,7 @@ Created automatically on first run. Key sections:
 | `[parsers]` | `enable_pdf`, `enable_docx`, `enable_epub`, `extract_pdf_tables` |
 | `[crawler]` | `respect_robots`, `sitemap_limit`, `parallel_workers` |
 | `[indexer]` | `enable_fts`, `search_limit` |
-| `[embeddings]` | `enabled`, `dim`, `hybrid_search`, `top_k` |
+| `[embeddings]` | `enabled`, `mode` (`sparse`/`dense`), `dense_model`, `dim`, `hybrid_search`, `top_k`, `conf_high_abs`, `conf_low_abs` |
 | `[discovery]` | `provider`, `top_rank`, `max_retries`, `backoff_seconds` |
 | `[chunking]` | `max_tokens`, `overlap_tokens`, `strategy` |
 | `[cache]` | `ttl_seconds` |
@@ -437,9 +471,11 @@ Created automatically on first run. Key sections:
 
 `_search_hybrid()` computes two candidate lists (`k=60` RRF constant):
 - **FTS**: `SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank`.
-- **Vector**: brute-force cosine over `chunk_vectors` (fine for a hoard vault), top-`top_k`.
+- **Vector**: brute-force cosine over `chunk_vectors` (fine for a hoard vault), top-`top_k`. In dense mode this is an ONNX-quantized sentence-transformer embedding (384-dim); in sparse mode it is the FNV-1a lexical hash.
 
-Each candidate contributes `1 / (k + rank + 1)`; results are sorted by the sum and the top-N returned. The brute-force vector scan is O(N) per query — ideal for thousands of chunks, not millions.
+Each candidate contributes `1 / (k + rank + 1)`; results are sorted by the sum and the top-N returned. Hits carry a **confidence band** (`high`/`medium`/`low`) derived from each score's ratio to the top score. The brute-force vector scan is O(N) per query — ideal for thousands of chunks, not millions.
+
+**Dimension migration.** `backfill_vectors` recomputes rows whose dimension no longer matches the configured mode (e.g. switching sparse 256-dim ↔ dense 384-dim) *in place*, so a mode switch is resumable across interrupts — no destructive delete-all.
 
 ### Resilience & DB Hygiene
 
@@ -473,7 +509,8 @@ HoardCore/
     artifacts/               Runtime deliverables (git-ignored, not in repo)
     tests/
         conftest.py            TempConfig + vault / chunk fixtures
-        test_vault.py          indexing, RRF, backfill, empty-query safety, _fts_query
+        test_vault.py          indexing, RRF, backfill + dimension migration, empty-query safety,
+                               _fts_query, confidence bands, verify_claim, dense-mode fallback
         test_network.py        fetch chain fallback, provider parsing/fallback,
                                research strategy forwarding
         test_junk.py           boilerplate/empty/real-content detection
@@ -497,7 +534,7 @@ make clean              # wipe vault, caches, and config
 
 ```bash
 venv/bin/python -m pip install -e ".[test]"
-venv/bin/python -m pytest tests/ -v     # 37 tests
+venv/bin/python -m pytest tests/ -v     # 42 tests
 ```
 
 ### Code standards

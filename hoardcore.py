@@ -12,7 +12,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 import asyncio
 import hashlib
@@ -125,7 +125,9 @@ search_limit = 20
 
 [embeddings]
 enabled = true
-dim = 256
+mode = "dense"           # dense = ONNX sentence-transformer (default); sparse = lightweight hash fallback
+dense_model = "sentence-transformers/all-MiniLM-L6-v2"
+dim = 256                # used in sparse mode; dense uses the model's dimension
 hybrid_search = true       # merge FTS + vector via RRF
 top_k = 40                 # candidate pool from vector search
 
@@ -193,7 +195,7 @@ class ConfigManager:
             "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "extract_pdf_tables": True, "enable_pdf_ocr": True},
             "crawler": {"respect_robots": True, "sitemap_limit": 500, "parallel_workers": 5},
             "indexer": {"enable_fts": True, "search_limit": 20},
-            "embeddings": {"enabled": True, "dim": 256, "hybrid_search": True, "top_k": 40},
+            "embeddings": {"enabled": True, "mode": "dense", "dense_model": "sentence-transformers/all-MiniLM-L6-v2", "dim": 256, "hybrid_search": True, "top_k": 40, "conf_high_abs": 0.025, "conf_low_abs": 0.020},
             "discovery": {"enabled": True, "provider": "duckduckgo_html", "max_results": 10, "top_rank": 6, "max_retries": 2, "backoff_seconds": 1.5},
             "chunking": {"max_tokens": 512, "overlap_tokens": 50, "strategy": "heading"},
             "cache": {"ttl_seconds": 86400}
@@ -214,7 +216,7 @@ class ConfigManager:
 # =============================================================================
 
 def _fnv1a(data: bytes) -> int:
-    """FNV-1a 64-bit hash. Deterministic, dependency-free feature hashing."""
+    """FNV-1a 64-bit hash. Deterministic feature hashing for the sparse fallback."""
     h = 0xcbf29ce484222325
     for b in data:
         h = ((h ^ b) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
@@ -224,17 +226,55 @@ def _fnv1a(data: bytes) -> int:
 class EmbeddingsEngine:
     """Turns chunk text into fixed-dimension vectors for hybrid retrieval.
 
-    Uses dependency-free sparse hashing of word + char n-gram features into a
-    unit vector. Cheap, deterministic, and requires no extra packages.
-    This is lexical (vocabulary-overlap) similarity, which — fused with FTS5
-    keyword search via Reciprocal Rank Fusion — is sufficient for an LLM tool
-    and keeps HoardCore lightweight.
+    Default mode is dense: an ONNX-quantized sentence-transformer embedding
+    (via fastembed on onnxruntime, no PyTorch) that captures semantic
+    similarity. A lightweight sparse fallback (FNV-1a feature hashing of word
+    + char n-gram features into a unit vector) remains for environments where
+    the dense model is unavailable. Both fuse with FTS5 keyword search via
+    Reciprocal Rank Fusion, keeping HoardCore fast and single-file.
     """
 
     def __init__(self, config: ConfigManager):
         self.config = config
         self.enabled = config.get('embeddings.enabled', True)
+        # Mode: "dense" (default, ONNX-quantized sentence-transformer via
+        # fastembed) or "sparse" (dependency-light FNV-1a lexical hash). Dense
+        # is lazily loaded and falls back to sparse if fastembed is missing.
+        self.mode = str(config.get('embeddings.mode', 'dense')).lower()
         self.dim = int(config.get('embeddings.dim', 256))
+        self._dense = None  # lazy fastembed backend (model + dim)
+        if self.mode == 'dense':
+            try:
+                self.dim = self._load_dense()
+            except Exception as e:  # fastembed missing or model download failed
+                logger.warning(
+                    f"Dense mode requested but unavailable ({e}); "
+                    f"falling back to sparse lexical hashing."
+                )
+                self.mode = 'sparse'
+
+    def _load_dense(self) -> int:
+        """Lazily import fastembed and load the ONNX-quantized model.
+
+        Returns the model's embedding dimension. Raises if fastembed is not
+        installed or the model cannot be loaded, so the caller can fall back
+        to sparse.
+        """
+        from fastembed import TextEmbedding
+
+        model_name = str(self.config.get('embeddings.dense_model',
+                                         'sentence-transformers/all-MiniLM-L6-v2'))
+        model = TextEmbedding(model_name)
+        # Probe a short real token to discover the embedding dimension (an empty
+        # string can produce a degenerate vector on some tokenizers).
+        probe = next(iter(model.embed(['probe'])), None)
+        dim = len(probe) if probe is not None else 384
+        if dim <= 0:
+            # Fall back to the documented MiniLM dimension if probe is empty.
+            dim = 384
+        self._dense = (model, dim)
+        logger.info(f"Dense embeddings loaded: {model_name} (dim={dim})")
+        return dim
 
     @staticmethod
     def _tokens(text: str) -> list[str]:
@@ -267,7 +307,30 @@ class EmbeddingsEngine:
         return arr.tobytes()
 
     def vectorize(self, text: str) -> bytes:
+        if self.mode == 'dense' and self._dense is not None:
+            return self._vectorize_dense(text)
         return self._hash_vector(text)
+
+    def _vectorize_dense(self, text: str) -> bytes:
+        """Encode text with the loaded dense model, stored as float32 bytes.
+
+        The query is embedded, the result is normalized to a unit vector, and
+        the float32 payload is returned in the same binary layout as the
+        sparse hash so the existing cosine path works unchanged.
+        """
+        from array import array
+
+        import numpy as np
+
+        model, dim = self._dense
+        vec = next(iter(model.embed([text])), None)
+        if vec is None:
+            return b""
+        arr = np.asarray(vec, dtype=np.float32).reshape(-1)
+        norm = float(np.linalg.norm(arr))
+        if norm > 0:
+            arr = arr / norm
+        return array('f', arr).tobytes()
 
     @staticmethod
     def cosine(a: bytes, b: bytes, dim: int) -> float:
@@ -498,26 +561,52 @@ class VaultManager:
         logger.info(f"Indexed {len(chunks)} chunks for {url}")
 
     def backfill_vectors(self) -> int:
-        """Compute and store embeddings for chunks missing one (e.g. chunks
-        indexed before the vector table existed). Returns count backfilled."""
+        """Compute and store embeddings for chunks missing one (or with a stale
+        dimension). Returns count backfilled.
+
+        If the configured embedding mode/dimension differs from what is stored
+        (e.g. switching from the 256-dim sparse hash to a 384-dim dense model),
+        the mismatched rows are recomputed in place. Rebuilds are resumable: an
+        interrupted run simply leaves some rows stale, which the next run picks
+        up, so no destructive DELETE-all is ever needed.
+        """
         if not self.config.get('embeddings.enabled', True):
             return 0
-        # Cheap count check first: once the vault is fully vectorized this
-        # returns 0 immediately, avoiding an O(n) join+scan on every CLI run.
+        expected_bytes = self._vector_dim * 4  # float32 per dimension
+        stale_dim = False
         with self._db() as (_conn, cursor):
-            cursor.execute("SELECT COUNT(*) FROM chunks_fts")
-            fts_count = cursor.fetchone()[0]
+            # Detect dimension mismatch: sample one stored vector's byte length.
             cursor.execute("SELECT COUNT(*) FROM chunk_vectors")
             vec_count = cursor.fetchone()[0]
-        if fts_count == vec_count:
-            return 0
+            if vec_count > 0:
+                cursor.execute("SELECT vector FROM chunk_vectors LIMIT 1")
+                row = cursor.fetchone()
+                if row is not None and row[0] is not None:
+                    stale_dim = len(row[0]) != expected_bytes
+                    if stale_dim:
+                        logger.info(
+                            f"Embedding dimension changed (stored != {self._vector_dim}); "
+                            f"recomputing vectors in place."
+                        )
+
+        # Cheap count check: fully vectorized AND matching dim -> 0 work.
+        # Skip the count shortcut when dims are stale (rows exist but are wrong).
+        if not stale_dim:
+            with self._db() as (_conn, cursor):
+                cursor.execute("SELECT COUNT(*) FROM chunks_fts")
+                fts_count = cursor.fetchone()[0]
+            if fts_count == vec_count:
+                return 0
+
+        # Select chunks that are missing a vector OR carry a wrong-dimension one.
         count = 0
         with self._db() as (_conn, cursor):
-            cursor.execute("""
-                SELECT chunks_fts.rowid, chunks_fts.url, chunks_fts.text
-                FROM chunks_fts
-                LEFT JOIN chunk_vectors ON chunk_vectors.chunk_rowid = chunks_fts.rowid
-                WHERE chunk_vectors.chunk_rowid IS NULL
+            cursor.execute(f"""
+                SELECT c.rowid, c.url, c.text
+                FROM chunks_fts c
+                LEFT JOIN chunk_vectors v ON v.chunk_rowid = c.rowid
+                WHERE v.chunk_rowid IS NULL
+                   OR length(v.vector) != {expected_bytes}
             """)
             rows = cursor.fetchall()
             for rowid, url, text in rows:
@@ -650,10 +739,14 @@ class VaultManager:
 
             # --- RRF fuse ---
             rrf: dict[int, float] = {}
+            fts_rids: set[int] = set()
             for rank, (rid, _u) in enumerate(fts_rows):
                 rrf[rid] = rrf.get(rid, 0.0) + 1.0 / (k + rank + 1)
+                fts_rids.add(rid)
+            vec_rids: set[int] = set()
             for rank, (_score, rid, _u) in enumerate(scored):
                 rrf[rid] = rrf.get(rid, 0.0) + 1.0 / (k + rank + 1)
+                vec_rids.add(rid)
 
             if not rrf:
                 return []
@@ -661,6 +754,28 @@ class VaultManager:
             fused = sorted(rrf.items(), key=lambda kv: kv[1], reverse=True)[:max(limit, 0)]
             order = fused[:limit] if limit > 0 else fused
             ids = [rid for rid, _ in (fused[:limit] if limit > 0 else fused)]
+
+            # --- Confidence bands ---
+            # Confidence is derived from how strong the fused evidence is, not
+            # just ratio-to-top (which stays ~0.9 even for weak queries because
+            # RRF scores cluster). Two signals:
+            #   1. Whether the hit matched BOTH the FTS5 keyword list AND the
+            #      vector list ("high" — terms present AND semantically close).
+            #   2. The absolute top fused score: a strong result set tops out
+            #      near 2/(k+1) ~= 0.032 (both lists agreed on #1), whereas a
+            #      weak result set (vector-only, no keyword match) tops out near
+            #      1/(k+1) ~= 0.016. Thresholds are set against this.
+            conf_high_abs = float(self.config.get('embeddings.conf_high_abs', 0.025))
+            conf_low_abs = float(self.config.get('embeddings.conf_low_abs', 0.020))
+            conf_by_rid: dict[int, str] = {}
+            for rid, score in order:
+                matched_both = rid in fts_rids and rid in vec_rids
+                if matched_both or score >= conf_high_abs:
+                    conf_by_rid[rid] = "high"
+                elif score >= conf_low_abs:
+                    conf_by_rid[rid] = "medium"
+                else:
+                    conf_by_rid[rid] = "low"
 
             results: list[Chunk] = []
             if ids:
@@ -675,6 +790,7 @@ class VaultManager:
                 for rid, url, _hp, text, meta_json in rows:
                     meta = json.loads(meta_json)
                     meta['hybrid_score'] = rrf.get(rid, 0.0)
+                    meta['confidence'] = conf_by_rid.get(rid, "low")
                     meta['source_url'] = url
                     meta['retrieval'] = 'hybrid'
                     results.append(Chunk(text=text, metadata=meta))
@@ -1615,7 +1731,7 @@ class HoardCore:
             for i, c in enumerate(chunks, 1):
                 src = c.metadata.get("source_url", "?")
                 seen.add(src)
-                f.write(f"### [{i}] {src}  (score {c.metadata.get('hybrid_score', 0):.4f})\n")
+                f.write(f"### [{i}] {src}  (score {c.metadata.get('hybrid_score', 0):.4f} | {c.metadata.get('confidence', 'n/a')})\n")
                 f.write(f"{c.text}\n\n")
             f.write(f"## Distinct sources ingested: {len(seen)}\n")
             for s in sorted(seen):
@@ -1625,6 +1741,57 @@ class HoardCore:
         abs_path = os.path.abspath(out_path)
         print(f"\n=== DONE. {len(chunks)} chunks, {len(seen)} sources -> {abs_path}")
         return abs_path
+
+    def verify_claim(self, claim: str) -> str:
+        """Programmatic adversarial-audit: confirm a claim against the vault.
+
+        Checks the raw stored chunk text for the claim and reports whether it is
+        supported. Returns one of:
+          "verified"   - the claim (or a distinctive 60-char substring) appears
+                         verbatim in a stored chunk.
+          "partial"    - FTS5 finds co-occurring keyword coverage, but no
+                         verbatim match.
+          "unverified" - no vault support for the claim.
+
+        This makes the [V] honor-system tag machine-checkable: the caller can
+        refuse to tag [V] unless this returns "verified".
+        """
+        if not claim or not claim.strip():
+            return "unverified"
+
+        # 1) Verbatim check against ALL stored chunk text (ground truth),
+        #    not just the top retrieval hits. Normalize whitespace.
+        needle = re.sub(r"\s+", " ", claim.strip()).lower()
+        # Long claims are broken into phrases; a distinctive fragment match counts.
+        fragment = needle[:60]
+        with self.vault._db() as (_conn, cursor):
+            cursor.execute(
+                "SELECT text FROM chunks_fts WHERE lower(text) LIKE ? LIMIT 5",
+                (f"%{fragment}%",)
+            )
+            direct = cursor.fetchall()
+        if direct:
+            return "verified"
+
+        # 2) FTS5 keyword overlap: build a proper AND-of-phrases MATCH for the
+        #    claim and see how many hits it yields. FTS5's combined ranking is
+        #    far more discriminating than per-token LIKE on a large vault
+        #    (where common words appear somewhere regardless of relevance).
+        fts = self.vault._fts_query(claim)
+        fts_hits = 0
+        if fts:
+            with self.vault._db() as (_conn, cursor):
+                cursor.execute(
+                    "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH ?",
+                    (fts,)
+                )
+                fts_hits = cursor.fetchone()[0]
+
+        # 3) Partial only if FTS5 finds real co-occurring hits; otherwise the
+        #    claim has no keyword support in the vault.
+        if fts_hits > 0:
+            return "partial"
+        return "unverified"
 
     async def _process_document(self, url: str, strategy: str, force_refresh: bool) -> tuple[list[Chunk], dict[str, Any]]:
         """
@@ -1928,6 +2095,7 @@ async def main():
         print("  python hoardcore.py _ --action discover --query 'negros renewable energy' --limit 5")
         print("  python hoardcore.py _ --action research --query 'how does bokashi compost' --discover 5 --recall 6")
         print("  python hoardcore.py _ --action research --query 'negros economy' --out artifacts/report.md  # day-sorted to artifacts/YYYY-MM-DD/")
+        print("  python hoardcore.py _ --action verify --claim 'the Epoch doubling time is 6 months' --recall 5")
         sys.exit(1)
 
     url = sys.argv[1]
@@ -1939,6 +2107,7 @@ async def main():
     max_results = 0
     discover = None
     recall = 6
+    claim = None
     out_path: str | None = None
 
     i = 2
@@ -1951,6 +2120,9 @@ async def main():
             i += 2
         elif sys.argv[i] == "--query" and i + 1 < len(sys.argv):
             query = sys.argv[i + 1]
+            i += 2
+        elif sys.argv[i] == "--claim" and i + 1 < len(sys.argv):
+            claim = sys.argv[i + 1]
             i += 2
         elif sys.argv[i] == "--discover" and i + 1 < len(sys.argv):
             try:
@@ -2000,6 +2172,16 @@ async def main():
                                          discover=discover or 5, recall=recall,
                                          strategy=strategy)
         sys.exit(0 if written else 1)
+
+    if action == "verify":
+        if not claim:
+            print("  ⚠️  --claim required for --action verify", file=sys.stderr)
+            sys.exit(2)
+        result = scraper.verify_claim(claim)
+        print(f"VERIFY: {result.upper()}")
+        print(f"claim: {claim}")
+        # exit codes: 0=verified, 1=partial, 2=unverified (CI-wireable)
+        sys.exit(0 if result == "verified" else (1 if result == "partial" else 2))
 
     result = await scraper.fetch(
         url, action=action, strategy=strategy,

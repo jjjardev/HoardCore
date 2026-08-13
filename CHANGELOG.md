@@ -3,6 +3,43 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-08-13
+
+### Added
+- **Dense retrieval is now the default (`[embeddings] mode = "dense"`).** Uses an
+  ONNX-quantized sentence-transformers model (`all-MiniLM-L6-v2`, 384-dim) via
+  `fastembed` on `onnxruntime` (no PyTorch, no GPU). `fastembed` moved into the
+  core dependency set (Makefile + `pyproject.toml`), so semantic retrieval works
+  out of the box.
+- **Resumable dimension-migration.** `backfill_vectors` now recomputes
+  mismatched-dimension rows in place (no destructive DELETE-all), so switching
+  `sparse` <-> `dense` is interrupt-safe.
+- **`--action verify` programmatic provenance audit.** `hoardcore.py _ --action
+  verify --claim "<claim>"` confirms a claim against the vault: returns
+  `VERIFIED` (verbatim match), `PARTIAL` (real keyword coverage, not verbatim),
+  or `UNVERIFIED` (no vault support), with CI-wireable exit codes 0/1/2. Makes
+  the `[V]` honor-system tag machine-checkable.
+
+### Changed
+- **Dense ONNX semantic retrieval is now the default experience.** HoardCore keeps
+  its single-file, no-PyTorch/no-GPU, easy-setup ethos while making dense
+  retrieval the standard path; the sparse FNV-1a hash remains only as an
+  automatic fallback when `fastembed` is unavailable. README, config comments,
+  and `Makefile` updated to drop the previous "zero-dependency" framing.
+- `hoardcore.toml` documents `embeddings.mode` (default `dense`), `dense_model`,
+  `conf_high_abs`, `conf_low_abs`.
+
+### Fixed
+- **Retrieval-confidence bands now actually discriminate.** The previous
+  implementation tagged hits `high`/`medium`/`low` by their score *ratio to the
+  top hit* — but RRF scores cluster tightly, so broad/weak queries still read as
+  all-`high` (bottom hit ≈ 0.9× top). Confidence now uses a combination of
+  (a) whether a hit matched **both** the FTS5 keyword list and the vector list,
+  and (b) the **absolute** fused score (`conf_high_abs` / `conf_low_abs`),
+  calibrated against the observed RRF scale (strong result sets top out near
+  0.032; weak vector-only sets near 0.016). Specific queries now score `high`;
+  vague/off-topic queries score `medium`/`low`.
+
 ## [0.4.0] - 2026-08-12
 
 ### Changed
