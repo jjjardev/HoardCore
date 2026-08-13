@@ -3,6 +3,30 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-13
+
+### Added
+- **Embedding model upgraded to `BAAI/bge-small-en-v1.5`** (384-dim, ~62 MTEB,
+  0.067 GB ONNX) — a stronger default than the previous `all-MiniLM-L6-v2`.
+- **Content-addressed chunk storage.** Chunks are hashed with BLAKE2b-256 into a
+  `chunks_ca` canonical table; identical chunk text across documents is stored
+  once and embedded only once (`chunk_vectors_ca` cache), enabling cross-document
+  deduplication.
+- **WORM (write-once-read-many) document semantics.** Re-ingesting the same URL
+  appends a new `version` row (`UNIQUE(url, version)`) instead of overwriting the
+  previous one — the vault is now append-only. Existing vaults are auto-migrated.
+- **SQLite connection pool** (`ConnectionPool`, 8 connections) with WAL + memory
+  mmap + page-cache tuning, replacing the open-a-new-connection-per-query path.
+- **`--action check`** — a three-phase vault integrity check (document chunk
+  counts, content-hash verification, vector-dimension verification), CI-wireable
+  via exit code.
+- **Optional parallel ingestion** (`[indexer] parallel = true`) — a threaded
+  reader→embed→write pipeline for large batches, gated off by default.
+
+### Changed
+- Vector storage now deduplicates across documents via the content-addressable
+  hash, so re-ingesting similar pages no longer grows storage linearly.
+
 ## [0.5.0] - 2026-08-13
 
 ### Added

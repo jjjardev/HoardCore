@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HoardCore v0.4.0 (HCH) - Research toolkit for AI agents: retrieval & deep research.
+HoardCore v0.6.0 (HCH) - Research toolkit for AI agents: retrieval & deep research.
 Ingests HTML, PDF, DOCX, EPUB, and TXT into a persistent, searchable SQLite Vault.
 Hybrid retrieval fuses FTS5 keyword search with vector search (RRF), and a
 web-discovery action feeds the crawler from a live search query.
@@ -12,7 +12,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 import asyncio
 import hashlib
@@ -20,15 +20,17 @@ import io
 import json
 import logging
 import os
+import queue
 import re
 import sqlite3
 import sys
+import threading
 import time
 import tomllib
 import zipfile
 from array import array
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -122,11 +124,12 @@ parallel_workers = 5
 [indexer]
 enable_fts = true
 search_limit = 20
+# parallel = false        # threaded ingest for large batches (off by default)
 
 [embeddings]
 enabled = true
 mode = "dense"           # dense = ONNX sentence-transformer (default); sparse = lightweight hash fallback
-dense_model = "sentence-transformers/all-MiniLM-L6-v2"
+dense_model = "BAAI/bge-small-en-v1.5"
 dim = 256                # used in sparse mode; dense uses the model's dimension
 hybrid_search = true       # merge FTS + vector via RRF
 top_k = 40                 # candidate pool from vector search
@@ -194,8 +197,8 @@ class ConfigManager:
             "storage": {"root_dir": "hoardcore_data", "artifacts_dir": "artifacts", "artifacts_by_day": True, "save_binary": True, "save_raw_html": False},
             "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "extract_pdf_tables": True, "enable_pdf_ocr": True},
             "crawler": {"respect_robots": True, "sitemap_limit": 500, "parallel_workers": 5},
-            "indexer": {"enable_fts": True, "search_limit": 20},
-            "embeddings": {"enabled": True, "mode": "dense", "dense_model": "sentence-transformers/all-MiniLM-L6-v2", "dim": 256, "hybrid_search": True, "top_k": 40, "conf_high_abs": 0.025, "conf_low_abs": 0.020},
+            "indexer": {"enable_fts": True, "search_limit": 20, "parallel": False},
+            "embeddings": {"enabled": True, "mode": "dense", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 256, "hybrid_search": True, "top_k": 40, "conf_high_abs": 0.025, "conf_low_abs": 0.020},
             "discovery": {"enabled": True, "provider": "duckduckgo_html", "max_results": 10, "top_rank": 6, "max_retries": 2, "backoff_seconds": 1.5},
             "chunking": {"max_tokens": 512, "overlap_tokens": 50, "strategy": "heading"},
             "cache": {"ttl_seconds": 86400}
@@ -263,7 +266,7 @@ class EmbeddingsEngine:
         from fastembed import TextEmbedding
 
         model_name = str(self.config.get('embeddings.dense_model',
-                                         'sentence-transformers/all-MiniLM-L6-v2'))
+                                         'BAAI/bge-small-en-v1.5'))
         model = TextEmbedding(model_name)
         # Probe a short real token to discover the embedding dimension (an empty
         # string can produce a degenerate vector on some tokenizers).
@@ -349,6 +352,65 @@ class EmbeddingsEngine:
 # 3. PERSISTENT STORAGE & VAULT (SQLite + Filesystem)
 # =============================================================================
 
+# Ingest pipeline tuning (kept modest to stay lightweight)
+DB_TIMEOUT           = 30.0
+CONNECTION_POOL_SIZE = int(os.environ.get("HCH_POOL_SIZE", "8"))
+CHUNK_BATCH_SIZE     = 50
+PIPELINE_QUEUE_SIZE  = 20
+WORKER_THREADS       = int(os.environ.get("HCH_WORKERS", "4"))
+
+class ConnectionPool:
+    """Reusable bounded pool of SQLite connections.
+
+    Each connection is configured for WAL mode, a memory-mapped I/O window, an
+    in-memory temp store, and a page cache for better concurrent read/write
+    throughput than the previous open-a-new-connection-per-query behaviour.
+    """
+
+    def __init__(self, db_path: str, pool_size: int = CONNECTION_POOL_SIZE):
+        self.db_path = db_path
+        self.pool_size = pool_size
+        self._pool: queue.Queue = queue.Queue(maxsize=pool_size)
+        for _ in range(pool_size):
+            self._pool.put(self._create_connection())
+
+    def _create_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=DB_TIMEOUT,
+                               check_same_thread=False)
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA mmap_size = 536870912")    # 512 MB mmap window
+        conn.execute("PRAGMA temp_store = MEMORY")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA cache_size = -64000")      # 64 MB page cache
+        conn.execute("PRAGMA busy_timeout = 5000")
+        return conn
+
+    def get(self, timeout: float = 30.0) -> sqlite3.Connection:
+        """Acquire a connection, creating an overflow one if the pool is busy."""
+        try:
+            conn = self._pool.get(timeout=timeout)
+            try:
+                conn.execute("SELECT 1")
+                return conn
+            except sqlite3.Error:
+                return self._create_connection()
+        except queue.Empty:
+            return self._create_connection()
+
+    def put(self, conn: sqlite3.Connection) -> None:
+        """Return a connection to the pool, or close it if the pool is full."""
+        try:
+            self._pool.put_nowait(conn)
+        except queue.Full:
+            with suppress(Exception):
+                conn.close()
+
+    def close_all(self) -> None:
+        """Close every connection currently sitting in the pool."""
+        while not self._pool.empty():
+            with suppress(Exception):
+                self._pool.get_nowait().close()
+
 class VaultManager:
     """Handles SQLite FTS indexing and filesystem storage."""
 
@@ -361,6 +423,7 @@ class VaultManager:
         self.db_path = os.path.join(self.root_dir, 'vault.db')
         self.embeddings = EmbeddingsEngine(config)
         self._vector_dim = self.embeddings.dim
+        self._pool = ConnectionPool(self.db_path, CONNECTION_POOL_SIZE)
         self._init_db()
         self.backfill_vectors()
 
@@ -368,11 +431,11 @@ class VaultManager:
     def _db(self) -> Iterator[tuple[sqlite3.Connection, sqlite3.Cursor]]:
         """Yield a committed-on-success, surfaced-on-exception DB cursor.
 
-        Guarantees the connection is always closed and transactions are never
+        Uses the connection pool (WAL + mmap + page cache). Guarantees the
+        connection is always returned to the pool and transactions are never
         left dangling, even if a query raises mid-method.
         """
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.execute("PRAGMA busy_timeout=5000;")
+        conn = self._pool.get()
         try:
             cursor = conn.cursor()
             yield conn, cursor
@@ -381,7 +444,7 @@ class VaultManager:
             conn.rollback()
             raise
         finally:
-            conn.close()
+            self._pool.put(conn)
 
     def _init_db(self) -> None:
         """Initialize SQLite with FTS5 virtual table."""
@@ -390,11 +453,52 @@ class VaultManager:
             cursor.execute("PRAGMA journal_mode=WAL;")
             cursor.execute("PRAGMA synchronous=NORMAL;")
 
+            # --- v0.6.0 schema migration ----------------------------------
+            # Older vaults (pre-0.6.0) had documents without `version` /
+            # `content_hash` and a UNIQUE(url) constraint. Rebuild the table in
+            # place, preserving existing rows (each becomes version 1).
+            cursor.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='documents'"
+            )
+            row = cursor.fetchone()
+            if row and "version" not in (row[0] or ""):
+                logger.info("Migrating documents table to v0.6.0 schema (WORM versions).")
+                cursor.execute("ALTER TABLE documents RENAME TO documents_old")
+                cursor.execute("""
+                    CREATE TABLE documents (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        url TEXT,
+                        domain TEXT,
+                        file_name TEXT,
+                        content_type TEXT,
+                        fetched_at REAL,
+                        parser_used TEXT,
+                        quality_score REAL,
+                        total_chunks INTEGER,
+                        metadata_json TEXT,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        content_hash TEXT,
+                        UNIQUE(url, version)
+                    )
+                """)
+                cursor.execute("""
+                    INSERT INTO documents (
+                        id, url, domain, file_name, content_type, fetched_at,
+                        parser_used, quality_score, total_chunks, metadata_json,
+                        version
+                    )
+                    SELECT id, url, domain, file_name, content_type, fetched_at,
+                           parser_used, quality_score, total_chunks, metadata_json,
+                           1
+                    FROM documents_old
+                """)
+                cursor.execute("DROP TABLE documents_old")
+
             # Main table for metadata
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS documents (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    url TEXT UNIQUE,
+                    url TEXT,
                     domain TEXT,
                     file_name TEXT,
                     content_type TEXT,
@@ -402,7 +506,24 @@ class VaultManager:
                     parser_used TEXT,
                     quality_score REAL,
                     total_chunks INTEGER,
-                    metadata_json TEXT
+                    metadata_json TEXT,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    content_hash TEXT,
+                    UNIQUE(url, version)
+                )
+            """)
+
+            # Content-addressable chunk index for cross-document deduplication.
+            # chunk_hash is the BLAKE2b-256 of the raw chunk text. The vector
+            # table is keyed by this hash so identical chunks share one vector.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS chunks_ca (
+                    chunk_hash TEXT PRIMARY KEY,
+                    text TEXT NOT NULL,
+                    url TEXT,
+                    header_path TEXT,
+                    metadata_json TEXT,
+                    first_seen REAL
                 )
             """)
 
@@ -436,6 +557,15 @@ class VaultManager:
                 )
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_chunk_vec_url ON chunk_vectors(url)")
+
+            # Content-addressable vector cache: identical chunks share one
+            # embedding, so cross-document duplicate text is embedded once.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS chunk_vectors_ca (
+                    chunk_hash TEXT PRIMARY KEY,
+                    vector BLOB
+                )
+            """)
 
     def _get_domain_folder(self, url: str) -> str:
         parsed = urlparse(url)
@@ -505,24 +635,38 @@ class VaultManager:
         logger.info(f"Saved extracted text to {ext_dir}")
 
     def index_document(self, url: str, chunks: list[Chunk], meta: dict[str, Any]) -> None:
-        """Insert/update document and chunks in SQLite FTS."""
+        """Insert/update document and chunks in SQLite FTS.
+
+        WORM semantics: re-ingesting the same URL creates a new *version* row
+        rather than overwriting the previous one, so the vault is append-only.
+        Chunks are content-addressed (BLAKE2b-256); identical chunk text across
+        documents shares a single canonical entry and is embedded only once.
+        """
         if not self.config.get('indexer.enable_fts', True):
             return
 
         embed_ok = self.config.get('embeddings.enabled', True)
-        with self._db() as (_conn, cursor):
-            # Delete old entries for this URL
-            cursor.execute("DELETE FROM documents WHERE url = ?", (url,))
-            cursor.execute("DELETE FROM chunks_fts WHERE url = ?", (url,))
-            cursor.execute("DELETE FROM chunk_vectors WHERE url = ?", (url,))
+        domain = urlparse(url).netloc
+        content_hash = hashlib.blake2b(
+            "\n".join(c.text for c in chunks).encode("utf-8"),
+            digest_size=32,
+        ).hexdigest()
 
-            # Insert document metadata
-            domain = urlparse(url).netloc
+        with self._db() as (_conn, cursor):
+            # WORM: determine the next version for this URL (never overwrite).
+            cursor.execute(
+                "SELECT COALESCE(MAX(version), 0) FROM documents WHERE url = ?",
+                (url,),
+            )
+            version = cursor.fetchone()[0] + 1
+
+            # Insert document metadata (append-only; UNIQUE(url, version)).
             cursor.execute("""
                 INSERT INTO documents (
                     url, domain, file_name, content_type, fetched_at,
-                    parser_used, quality_score, total_chunks, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    parser_used, quality_score, total_chunks, metadata_json,
+                    version, content_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 url,
                 domain,
@@ -532,33 +676,72 @@ class VaultManager:
                 meta.get('parser_used', 'unknown'),
                 meta.get('quality_score', 0.0),
                 len(chunks),
-                json.dumps(meta)
+                json.dumps(meta),
+                version,
+                content_hash,
             ))
 
-            # Insert chunks into FTS
+            # Insert chunks into FTS + content-addressable dedup. The CA-vector
+            # lookup runs on the SAME connection (no nested pool acquires).
             for chunk in chunks:
+                text = chunk.text
+                header = chunk.metadata.get('header_path', 'Root')
+                c_hash = hashlib.blake2b(text.encode("utf-8"),
+                                         digest_size=32).hexdigest()
+
+                # Canonical dedup entry (INSERT OR IGNORE = first-write wins).
+                cursor.execute("""
+                    INSERT OR IGNORE INTO chunks_ca (
+                        chunk_hash, text, url, header_path, metadata_json, first_seen
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                """, (c_hash, text, url, header, json.dumps(chunk.metadata), time.time()))
+
                 cursor.execute("""
                     INSERT INTO chunks_fts (url, header_path, text, metadata_json)
                     VALUES (?, ?, ?, ?)
-                """, (
-                    url,
-                    chunk.metadata.get('header_path', 'Root'),
-                    chunk.text,
-                    json.dumps(chunk.metadata)
-                ))
-                if embed_ok:
-                    rowid = cursor.lastrowid
-                    try:
-                        vec = self.embeddings.vectorize(chunk.text)
-                    except Exception as e:  # embedding failures must not block indexing
-                        logger.warning(f"Embedding failed for {url}: {e}")
-                        continue
-                    cursor.execute(
-                        "INSERT OR REPLACE INTO chunk_vectors (chunk_rowid, url, vector) VALUES (?, ?, ?)",
-                        (rowid, url, vec)
-                    )
+                """, (url, header, text, json.dumps(chunk.metadata)))
+                rowid = cursor.lastrowid
 
-        logger.info(f"Indexed {len(chunks)} chunks for {url}")
+                if embed_ok:
+                    # Dedup-aware embedding: reuse a cached vector for an
+                    # identical chunk instead of recomputing it.
+                    vec = self._embed_chunk(cursor, c_hash, text)
+                    if vec is not None:
+                        cursor.execute(
+                            "INSERT OR REPLACE INTO chunk_vectors (chunk_rowid, url, vector) "
+                            "VALUES (?, ?, ?)",
+                            (rowid, url, vec),
+                        )
+
+        logger.info(f"Indexed {len(chunks)} chunks for {url} (v{version})")
+
+    def _embed_chunk(self, cursor: sqlite3.Cursor, c_hash: str, text: str) -> bytes | None:
+        """Return a vector for *text*, reusing a cached one for an identical
+        chunk hash. Runs on the caller's connection (no nested pool acquire).
+        Returns None if embedding fails (non-fatal)."""
+        try:
+            cursor.execute(
+                "SELECT vector FROM chunk_vectors_ca WHERE chunk_hash = ?",
+                (c_hash,),
+            )
+            row = cursor.fetchone()
+            if row is not None and row[0] is not None:
+                return row[0]
+        except Exception:
+            pass
+        try:
+            vec = self.embeddings.vectorize(text)
+        except Exception as e:  # embedding failures must not block indexing
+            logger.warning(f"Embedding failed: {e}")
+            return None
+        if vec:
+            with suppress(Exception):
+                cursor.execute(
+                    "INSERT OR IGNORE INTO chunk_vectors_ca (chunk_hash, vector) "
+                    "VALUES (?, ?)",
+                    (c_hash, vec),
+                )
+        return vec
 
     def backfill_vectors(self) -> int:
         """Compute and store embeddings for chunks missing one (or with a stale
@@ -623,6 +806,171 @@ class VaultManager:
         if count:
             logger.info(f"Backfilled {count} chunk embeddings.")
         return count
+
+    def verify_vault(self) -> bool:
+        """Run a three-phase integrity check over the vault.
+
+        Phase 1 — verify every document's chunk count and content hash.
+        Phase 2 — verify content-addressable chunks are internally consistent.
+        Phase 3 — verify every stored vector's dimension matches the engine.
+
+        Returns True if no errors were found.
+        """
+        errors = 0
+        checks = 0
+
+        # Phase 1: for each URL, the total FTS chunk count must equal the sum of
+        # the declared chunk counts across all of that URL's document versions
+        # (WORM means one URL may span several version rows).
+        with self._db() as (_conn, cursor):
+            cursor.execute(
+                "SELECT url, SUM(total_chunks) FROM documents GROUP BY url"
+            )
+            for url, declared_total in cursor.fetchall():
+                cursor.execute(
+                    "SELECT COUNT(*) FROM chunks_fts WHERE url = ?", (url,)
+                )
+                fts_count = cursor.fetchone()[0]
+                checks += 1
+                if fts_count != declared_total:
+                    logger.error(
+                        "MISMATCH: %s declares %d chunks (all versions) but FTS has %d",
+                        url, declared_total, fts_count,
+                    )
+                    errors += 1
+
+        # Phase 2: content-addressable chunks must have non-empty text.
+        with self._db() as (_conn, cursor):
+            cursor.execute("SELECT chunk_hash, text FROM chunks_ca")
+            for c_hash, text in cursor.fetchall():
+                checks += 1
+                recomputed = hashlib.blake2b(
+                    (text or "").encode("utf-8"), digest_size=32
+                ).hexdigest()
+                if recomputed != c_hash:
+                    logger.error(
+                        "CORRUPTION: chunk %s… text hash does not match",
+                        c_hash[:16],
+                    )
+                    errors += 1
+
+        # Phase 3: every vector must match the configured dimension.
+        expected_bytes = self._vector_dim * 4
+        with self._db() as (_conn, cursor):
+            cursor.execute("SELECT chunk_rowid, length(vector) FROM chunk_vectors")
+            for rid, vlen in cursor.fetchall():
+                checks += 1
+                if vlen != expected_bytes:
+                    logger.error(
+                        "BAD DIM: vector for chunk %d is %d bytes (expected %d)",
+                        rid, vlen, expected_bytes,
+                    )
+                    errors += 1
+
+        if errors == 0:
+            logger.info(f"Vault integrity PASS ({checks} checks).")
+        else:
+            logger.error(f"Vault integrity FAIL ({errors} error(s) across {checks} checks).")
+        return errors == 0
+
+    def ingest_chunks_parallel(self, url: str, chunks: list[Chunk],
+                               meta: dict[str, Any]) -> None:
+        """Ingest chunks through a parallel reader→embed→write pipeline.
+
+        Kept optional (guarded by config 'indexer.parallel'): for typical
+        research vaults the sequential path is fast enough, and this avoids
+        thread overhead on small batches. When enabled, embedding work is
+        spread across WORKER_THREADS threads while the DB writer stays single.
+        """
+        if not self.config.get('indexer.enable_fts', True):
+            return
+        if not self.config.get('indexer.parallel', False) or len(chunks) < 8:
+            return self.index_document(url, chunks, meta)
+
+        embed_ok = self.config.get('embeddings.enabled', True)
+        work_q: queue.Queue = queue.Queue(maxsize=PIPELINE_QUEUE_SIZE)
+        result_q: queue.Queue = queue.Queue(maxsize=PIPELINE_QUEUE_SIZE)
+        error_holder: list[Exception] = []
+        results: list[tuple[int, str, bytes | None]] = [None] * len(chunks)  # type: ignore[list-item]
+
+        def _embed_worker() -> None:
+            while True:
+                try:
+                    idx, text = work_q.get(timeout=1.0)
+                except queue.Empty:
+                    return
+                try:
+                    vec = self.embeddings.vectorize(text) if embed_ok else None
+                except Exception as e:
+                    error_holder.append(e)
+                    vec = None
+                result_q.put((idx, vec))
+                work_q.task_done()
+
+        # Feed the reader queue.
+        for idx, chunk in enumerate(chunks):
+            work_q.put((idx, chunk.text))
+        threads = [threading.Thread(target=_embed_worker, daemon=True)
+                   for _ in range(WORKER_THREADS)]
+        for t in threads:
+            t.start()
+        work_q.join()
+        for _ in threads:
+            result_q.put((-1, None))  # sentinels
+
+        while True:
+            idx, vec = result_q.get()
+            if idx == -1:
+                break
+            results[idx] = vec  # type: ignore[assignment]
+
+        # Single writer thread commits the whole batch (dedup + vectors).
+        with self._db() as (_conn, cursor):
+            domain = urlparse(url).netloc
+            cursor.execute(
+                "SELECT COALESCE(MAX(version), 0) FROM documents WHERE url = ?",
+                (url,),
+            )
+            version = cursor.fetchone()[0] + 1
+            cursor.execute("""
+                INSERT INTO documents (
+                    url, domain, file_name, content_type, fetched_at,
+                    parser_used, quality_score, total_chunks, metadata_json,
+                    version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                url, domain, meta.get('file_name', ''),
+                meta.get('content_type', ''), time.time(),
+                meta.get('parser_used', 'unknown'),
+                meta.get('quality_score', 0.0), len(chunks),
+                json.dumps(meta), version,
+            ))
+            for idx, chunk in enumerate(chunks):
+                text = chunk.text
+                c_hash = hashlib.blake2b(text.encode("utf-8"),
+                                         digest_size=32).hexdigest()
+                cursor.execute("""
+                    INSERT OR IGNORE INTO chunks_ca (
+                        chunk_hash, text, url, header_path, metadata_json, first_seen
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                """, (c_hash, text, url, chunk.metadata.get('header_path', 'Root'),
+                      json.dumps(chunk.metadata), time.time()))
+                cursor.execute("""
+                    INSERT INTO chunks_fts (url, header_path, text, metadata_json)
+                    VALUES (?, ?, ?, ?)
+                """, (url, chunk.metadata.get('header_path', 'Root'), text,
+                      json.dumps(chunk.metadata)))
+                rowid = cursor.lastrowid
+                vec = results[idx]
+                if vec:
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO chunk_vectors (chunk_rowid, url, vector) "
+                        "VALUES (?, ?, ?)",
+                        (rowid, url, vec),
+                    )
+        if error_holder:
+            logger.warning(f"{len(error_holder)} embedding errors during parallel ingest.")
+        logger.info(f"Indexed {len(chunks)} chunks for {url} (v{version}, parallel)")
 
     @staticmethod
     def _fts_query(query: str) -> str | None:
@@ -1875,8 +2223,8 @@ class HoardCore:
         # Save extracted text to disk
         self.vault.save_extracted_text(url, markdown, chunks, parser_meta)
 
-        # Index in SQLite FTS
-        self.vault.index_document(url, chunks, parser_meta)
+        # Route through the parallel pipeline when enabled (large batches only).
+        self.vault.ingest_chunks_parallel(url, chunks, parser_meta)
 
         return chunks, parser_meta
 
@@ -2096,6 +2444,7 @@ async def main():
         print("  python hoardcore.py _ --action research --query 'how does bokashi compost' --discover 5 --recall 6")
         print("  python hoardcore.py _ --action research --query 'negros economy' --out artifacts/report.md  # day-sorted to artifacts/YYYY-MM-DD/")
         print("  python hoardcore.py _ --action verify --claim 'the Epoch doubling time is 6 months' --recall 5")
+        print("  python hoardcore.py _ --action check   # verify vault integrity")
         sys.exit(1)
 
     url = sys.argv[1]
@@ -2182,6 +2531,10 @@ async def main():
         print(f"claim: {claim}")
         # exit codes: 0=verified, 1=partial, 2=unverified (CI-wireable)
         sys.exit(0 if result == "verified" else (1 if result == "partial" else 2))
+
+    if action == "check":
+        ok = scraper.vault.verify_vault()
+        sys.exit(0 if ok else 1)
 
     result = await scraper.fetch(
         url, action=action, strategy=strategy,

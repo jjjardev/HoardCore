@@ -146,7 +146,10 @@ Use this to query the local vault.
     - `venv/bin/python hoardcore.py _ --action research --query "..." --discover 5 --recall 6`
     - `--out` optional; defaults to `artifacts/grounding_context.md`.
 6.  **For a research deliverable (report/synthesis/audit)**: Write it into `artifacts/` with `[V]/[E]/[H]` provenance tags on every quantitative claim.
-7.  **Adversarial audit discipline**: Before finalizing an artifact, audit it — verify each quantitative claim against the current vault (re-run hybrid retrieval / SQL for the number). Tag anything unverifiable as `[E]` or remove it. Only claims traceable to full primary text in the current vault get `[V]`.
+7.  **For a vault integrity check**: `venv/bin/python hoardcore.py _ --action check` — three-phase
+    verification (document chunk counts, content hashes, vector dims); exit `0` pass / `1` fail.
+    Run it before trusting `[V]` claims built on a long-lived vault.
+8.  **Adversarial audit discipline**: Before finalizing an artifact, audit it — verify each quantitative claim against the current vault (re-run hybrid retrieval / SQL for the number). Tag anything unverifiable as `[E]` or remove it. Only claims traceable to full primary text in the current vault get `[V]`.
 
 ## Output Format
 

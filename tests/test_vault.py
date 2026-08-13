@@ -19,12 +19,20 @@ def test_index_and_fts_search(vault, make_chunk):
     assert hits[0].metadata["source_url"] == "https://example.test/p1"
 
 
-def test_index_updates_delete_old(vault, make_chunk):
+def test_index_updates_create_versions_worm(vault, make_chunk):
+    """WORM semantics: re-ingesting a URL appends a new version, never overwrites."""
     vault.index_document("https://example.test/u", [make_chunk("first version")], {})
     vault.index_document("https://example.test/u", [make_chunk("second version"), make_chunk("extra")], {})
+    # New content is searchable.
     assert len(vault.search_vault("second", hybrid=False)) == 1
     assert len(vault.search_vault("extra", hybrid=False)) == 1
-    assert len(vault.search_vault("first", hybrid=False)) == 0
+    # Old content is NOT deleted — it remains in an earlier version.
+    assert len(vault.search_vault("first", hybrid=False)) == 1
+    # Two document versions exist for the URL (append-only).
+    with vault._db() as (_conn, cursor):
+        cursor.execute("SELECT version FROM documents WHERE url = ?", ("https://example.test/u",))
+        versions = [r[0] for r in cursor.fetchall()]
+    assert sorted(versions) == [1, 2]
 
 
 def test_db_contextmanager_leaks_nothing(vault, make_chunk):
@@ -108,7 +116,13 @@ def test_hybrid_search_ranks_relevant_first(vault, make_chunk):
 
 def test_embeddings_lexical_similarity():
     from hoardcore import ConfigManager
-    eng = hc.EmbeddingsEngine(ConfigManager())
+    # Pin sparse mode: this test exercises the dependency-free lexical hash,
+    # whose cosine is a strict vocabulary-overlap measure (dense models give
+    # non-trivial similarity even for unrelated text).
+    cfg = ConfigManager()
+    cfg._config["embeddings"]["mode"] = "sparse"
+    cfg._config["embeddings"]["dim"] = 256
+    eng = hc.EmbeddingsEngine(cfg)
     same = hc.EmbeddingsEngine.cosine(
         eng.vectorize("renewable energy solar power negros"),
         eng.vectorize("solar farm megawatts renewable"), eng.dim)
@@ -118,6 +132,19 @@ def test_embeddings_lexical_similarity():
     assert same > 0.4
     assert diff < 0.15
     assert eng.enabled
+    assert eng.mode == "sparse"
+
+
+def test_dense_model_default_is_bge(tmp_path):
+    """The default dense model is BAAI/bge-small-en-v1.5 (384-dim)."""
+    from hoardcore import ConfigManager, EmbeddingsEngine
+    # Build a fresh engine with a clean config default (avoid shared-state
+    # mutation from other tests that pin sparse).
+    cfg = ConfigManager()
+    cfg._config["embeddings"]["mode"] = "dense"
+    eng = EmbeddingsEngine(cfg)
+    assert eng.mode == "dense"
+    assert eng.dim == 384
 
 
 def test_dense_mode_falls_back_to_sparse_when_unavailable(tmp_path):
@@ -211,3 +238,33 @@ def test_backfill_rebuilds_stale_dimension_in_place(vault, make_chunk):
     with vault._db() as (_conn, cur):
         vec = cur.execute("SELECT vector FROM chunk_vectors LIMIT 1").fetchone()[0]
         assert len(vec) == 64 * 4  # now matches the configured dim
+
+
+def test_content_addressable_dedup(vault, make_chunk):
+    """Identical chunk text across documents is stored once in chunks_ca."""
+    txt = "identical repeated boilerplate sentence"
+    vault.index_document("https://a.test/1", [make_chunk(txt)], {})
+    vault.index_document("https://b.test/2", [make_chunk(txt)], {})
+    with vault._db() as (_conn, cur):
+        n_ca = cur.execute("SELECT COUNT(*) FROM chunks_ca WHERE text = ?", (txt,)).fetchone()[0]
+    assert n_ca == 1  # deduplicated
+
+
+def test_verify_vault_passes_on_clean_vault(vault, make_chunk):
+    """verify_vault returns True on a healthy, correctly-sized vault."""
+    vault.index_document("https://solar.test/1",
+                         [make_chunk("solar farm megawatt capacity")], {})
+    assert vault.verify_vault() is True
+
+
+def test_verify_vault_catches_corruption(vault, make_chunk):
+    """verify_vault detects a hash mismatch in chunks_ca."""
+    vault.index_document("https://solar.test/1",
+                         [make_chunk("solar farm megawatt capacity")], {})
+    # Corrupt a canonical chunk's text so its stored hash no longer matches.
+    with vault._db() as (_conn, cur):
+        row = cur.execute("SELECT chunk_hash FROM chunks_ca LIMIT 1").fetchone()
+        assert row is not None
+        cur.execute("UPDATE chunks_ca SET text = 'tampered text' WHERE chunk_hash = ?",
+                    (row[0],))
+    assert vault.verify_vault() is False

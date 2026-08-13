@@ -26,6 +26,9 @@ artifacts/
 # Local config — auto-generated on first run and may contain cookies/credentials
 hoardcore.toml
 
+# External reference implementation (third-party MIT source used for porting)
+densevault-1.py
+
 # --- Editors / OS ---
 .DS_Store
 *.swp
