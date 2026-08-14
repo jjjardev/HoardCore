@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HoardCore v0.8.2 - Research toolkit for AI agents: retrieval & deep research.
+HoardCore v0.8.3 - Research toolkit for AI agents: retrieval & deep research.
 Ingests HTML, PDF, DOCX, EPUB, and TXT into a persistent, searchable SQLite Vault.
 Hybrid retrieval fuses FTS5 keyword search with vector search (RRF), and a
 web-discovery action feeds the crawler from a live search query.
@@ -15,7 +15,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.8.2"
+__version__ = "0.8.3"
 
 import argparse
 import asyncio

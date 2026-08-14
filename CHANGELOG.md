@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3] - 2026-08-14
+
+### Added
+- **Regression test for fast-path confidence (v0.8.2 test gap).** New
+  `test_fts_fast_path_confidence_is_medium_not_high` asserts every FTS-only
+  fast-path hit is tagged `confidence='medium'` (vector scan skipped, so
+  semantic closeness is unverified) — closing the gap that would have let the
+  dishonest `'high'` silently return. Test-only release; no behavior change.
+
 ## [0.8.2] - 2026-08-14
 
 ### Changed
