@@ -131,14 +131,99 @@ Use this to ingest an entire website.
 ### Action: "search"
 Use this to query the local vault.
 
-- **`url`** (string, required): The domain to search within (e.g., `https://docs.python.org/3/`).
+- **`url`** (string, optional): Restrict results to a domain (e.g., `https://docs.python.org/3/`). For an all-vault query pass the `_` placeholder as the positional, exactly like the `research`/`discover`/`check` actions — see the CLI form below.
 - **`action`** (string, required): Set to `"search"`.
 - **`query`** (string, required): The search term (e.g., `"asyncio event loop"`).
-- **`force_refresh`** (boolean, optional): Not applicable for search.
 - **`mode`** (optional): `fast` → FTS-only keyword results; `hybrid` → force
   vector+RRF fusion. Default (no flag) follows `embeddings.hybrid_search` /
   `fts_fast_path` config. Use `--mode fast` when you want exact keyword recall
   and speed; `--mode hybrid` when you want semantic recall guaranteed.
+
+CLI form:
+
+```
+venv/bin/python hoardcore.py _ --action search --query "asyncio event loop" --mode hybrid
+```
+
+### Action: "verify"
+Use this to machine-check a claim against the vault before you tag it `[V]`.
+
+- **`url`** (string, optional): `_` placeholder — the vault is searched globally.
+- **`action`** (string, required): Set to `"verify"`.
+- **`claim`** (string, required): The claim to check (e.g., `"the Epoch doubling time is 6 months"`).
+- **`recall`** (int, optional): Chunks to consider (default 5).
+- **Exit codes (CI-wireable):** `0` = `VERIFIED` (the normalized claim appears
+  verbatim in vault text, tested via a sliding 60-char window), `1` = `PARTIAL`
+  (the top FTS5 hit is a strong all-term BM25 match, `rank < -2.0`, but no
+  verbatim hit), `2` = `UNVERIFIED`. Refuse to emit a `[V]` tag unless this
+  returns `0` — that is what makes the provenance tag machine-verifiable.
+
+CLI form:
+
+```
+venv/bin/python hoardcore.py _ --action verify --claim "the Epoch doubling time is 6 months" --recall 5
+```
+
+### Action: "ingest"
+Use this to index an explicit list of URLs (so you can soak up a known set of
+documents and query them later offline).
+
+- **`url`** (string, optional): `_` placeholder — the list comes from `--urls`.
+- **`action`** (string, required): Set to `"ingest"`.
+- **`urls`** (string, required): Comma/space-separated URL list.
+
+CLI form:
+
+```
+venv/bin/python hoardcore.py _ --action ingest --urls "https://a.example/report,https://b.example/analysis"
+```
+
+### Action: "discover"
+Use this to live web-search a topic and ingest the top results into the vault.
+
+- **`url`** (string, optional): `_` placeholder — the query drives the search.
+- **`action`** (string, required): Set to `"discover"`.
+- **`query`** (string, required): The topic to hunt.
+- **`limit`** (int, optional): Number of top results to ingest (default 5).
+
+CLI form:
+
+```
+venv/bin/python hoardcore.py _ --action discover --query "negros renewable energy" --limit 5
+```
+
+### Action: "research"
+Use this to run the full agentic loop (`DISCOVER -> INGEST -> RECALL -> EMIT`)
+in one command. Writes a grounding-context file (day-sorted under
+`artifacts/YYYY-MM-DD/`) listing each retrieved chunk with its source URL,
+hybrid score, and confidence band.
+
+- **`url`** (string, optional): `_` placeholder.
+- **`action`** (string, required): Set to `"research"`.
+- **`query`** (string, required): The core question.
+- **`discover`** (int, optional): Sources to hunt first (default 5).
+- **`recall`** (int, optional): Chunks to retrieve (default 6).
+- **`out`** (string, optional): Override the output path.
+- **`vault`** (string, optional): Scope the whole session to `hoardcore_data/NAME/`.
+
+CLI form:
+
+```
+venv/bin/python hoardcore.py _ --action research \
+  --query "<the core question>" --discover 6 --recall 8 --vault sleep
+```
+
+### Action: "check"
+Use this to run the three-phase vault integrity check (document chunk counts,
+content hashes, vector dims). Exit `0` = pass, `1` = fail. Run it before
+trusting `[V]` claims built on a long-lived vault, and with `--migrate` to
+rebuild legacy 4 KB-page vaults at the configured `storage.page_size`.
+
+CLI form:
+
+```
+venv/bin/python hoardcore.py _ --action check --migrate
+```
 
 ## Workflow Guidance
 

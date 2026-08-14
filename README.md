@@ -344,7 +344,7 @@ The pipeline for each document:
 
 **Confidence bands.** Every hybrid hit is tagged `high`, `medium`, or `low`. A hit is `high` if it matched *both* the keyword (FTS5) and vector lists, or if its absolute fused score is strong; otherwise it scales by absolute score (`conf_high_abs` / `conf_low_abs`). This discriminates weak, vector-only result sets from strong keyword+vector ones — unlike a ratio-to-top score, which stays high even for weak queries. The band is attached to chunk metadata and printed in grounding-context output (e.g. `score 0.0325 | high`). A low-confidence hit signals a weak match that should be **re-verified before being tagged `[V]`** — or demoted to `[E]`.
 
-Empty, whitespace, and punctuation-only queries return `[]` instead of raising.
+Empty and whitespace-only queries return `[]` instead of raising. A punctuation-only query (no FTS tokens) still runs the vector scan in hybrid mode — the embedding model can match semantic content even when keywords are absent — while the FTS-only (`fast`) path returns `[]`.
 
 Queries are sanitized: operator characters (`" ( ) * ^ : -`) are stripped and tokens quoted, so free-text input cannot alter query semantics or raise FTS syntax errors.
 
@@ -434,11 +434,11 @@ python hoardcore.py _ --action verify --claim "the Epoch doubling time is 6 mont
 
 | Result | Meaning | Exit code |
 |---|---|---|
-| `VERIFIED` | The claim (or a distinctive substring) appears verbatim in stored chunk text | `0` |
-| `PARTIAL` | Retrieval finds real keyword coverage, but no verbatim match | `1` |
+| `VERIFIED` | The normalized claim appears verbatim in stored chunk text (a sliding 60-char window is tested across the whole claim, so a distinctive tail still verifies even if the opening is generic) | `0` |
+| `PARTIAL` | The top FTS5 hit is a **strong** all-term BM25 match (`rank < -2.0`), but there is no verbatim match; co-occurrence of a few common words in unrelated boilerplate does *not* count as partial | `1` |
 | `UNVERIFIED` | No vault support for the claim | `2` |
 
-Agents and CI can branch on the exit code: refuse to emit a `[V]` tag unless `verify` returns `0`.
+The verbatim stage checks the full normalized claim (not just a fixed-size prefix) against all candidate rows — it does not truncate candidates to the first 100. Agents and CI can branch on the exit code: refuse to emit a `[V]` tag unless `verify` returns `0`.
 
 ### Configuration file (`hoardcore.toml`)
 
@@ -499,7 +499,7 @@ Created automatically on first run. Key sections:
 - **FTS**: `SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank`.
 - **Vector**: brute-force cosine over `chunk_vectors` (fine for a hoard vault), top-`top_k`. In dense mode this is an ONNX-quantized sentence-transformer embedding (384-dim); in sparse mode it is the FNV-1a lexical hash.
 
-Each candidate contributes `1 / (k + rank + 1)`; results are sorted by the sum and the top-N returned. Hits carry a **confidence band** (`high`/`medium`/`low`) derived from each score's ratio to the top score. The brute-force vector scan is O(N) per query — ideal for thousands of chunks, not millions.
+Each candidate contributes `1 / (k + rank + 1)`; results are sorted by the sum and the top-N returned. Hits carry a **confidence band** (`high`/`medium`/`low`) derived from two signals rather than a ratio-to-top (which stays ~0.9 even for weak queries because RRF scores cluster): a hit is `high` if it matched *both* the keyword list and the vector list, or if its absolute fused score clears `conf_high_abs`; otherwise it scales by absolute score against `conf_high_abs`/`conf_low_abs`. The brute-force vector scan is O(N) per query — ideal for thousands of chunks, not millions.
 
 **Dimension migration.** `backfill_vectors` recomputes rows whose dimension no longer matches the configured mode (e.g. switching sparse 256-dim ↔ dense 384-dim) *in place*, so a mode switch is resumable across interrupts — no destructive delete-all.
 
@@ -537,10 +537,14 @@ HoardCore/
                                empty-query safety, content-addressed dedup, verify_vault
                                integrity, confidence bands, verify_claim, dense-mode fallback,
                                bge default model
+        test_cli.py            argparse CLI smoke suite (actions, flags, unknown-flag rejection)
         test_network.py        fetch chain fallback, provider parsing/fallback,
                                research strategy forwarding
         test_junk.py           boilerplate/empty/real-content detection
         test_crawler.py        sitemap/robots/discovery (no network I/O)
+        test_ocr.py            OCR fallback path for scanned PDF pages
+    tools/
+        bench_vector.py        brute-force cosine scan benchmark (float32/int8 x page sizes)
     hoardcore_data/         The vault (vault.db, per-domain binaries/extracted)
 ```
 
