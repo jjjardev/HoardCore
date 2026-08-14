@@ -3,6 +3,63 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-08-14
+
+### Added
+- **Third-party codebase audit-driven patch** (v0.8.1). Implements the ten
+  highest-ROI fixes from the audit (part H1) plus their directly-coupled tests:
+- **NumPy cosine rewrite.** `EmbeddingsEngine.cosine` now uses `numpy.dot`
+  (with a pure-Python fallback when numpy is absent), giving a 50–100x
+  speedup on the brute-force vector scan. int8 payloads are upcast before the
+  dot product to avoid silent int8 overflow.
+- **Strict vector dimension checks in cosine.** Mismatched payload lengths
+  (mixed int8/float32, corrupted blobs, stale embedding formats) are logged and
+  scored 0.0 instead of silently truncated into a plausible-but-wrong cosine
+  (A7/A12).
+- **`--action check` speedup:** new `idx_documents_url_fetched` index makes
+  recency lookups O(log N) instead of full scans (B7).
+
+### Fixed
+- **`verify_claim` long-claim verbatim detection (A1).** The 60-char prefix
+  fragment is replaced by a sliding 60-char window across the whole normalized
+  claim, so a claim whose distinctive portion is not its first 60 chars still
+  verifies.
+- **`verify_claim` "partial" false positives (A2).** "Partial" now requires the
+  top FTS5 hit to be a strong BM25 match (rank < -2.0); co-occurrence of
+  generic words in unrelated boilerplate is no longer reported as partial.
+- **`verify_claim` LIMIT-100 false negatives (A8).** The verbatim LIKE
+  candidate query no longer truncates candidates to the first 100 rows.
+- **`backfill_vectors` stale-dim detection (A5).** The dimension probe now
+  counts ALL wrong-length rows rather than sampling one — an interrupted
+  earlier backfill can no longer leave stale vectors silently in place.
+- **FTS fast-path recency weighting (A3).** When `fts_fast_path` fires, recency
+  weighting (`recency_half_life_days`) is applied uniformly; a 2-year-old
+  keyword match no longer ranks above a fresh page of identical text.
+- **Hybrid search with punctuation-only queries (A6).** When the query has no
+  FTS tokens, the vector scan still runs instead of returning `[]`.
+- **Parallel ingest pipeline deadlock + sentinel race (A11, E2).** Work-queue
+  sentinels replace the old result-queue / `join()` dance, and results are
+  consumed concurrently so batches larger than the bounded queues can't hang.
+- **Fail-closed network preflight (C1).** A preflight error (DNS/TLS/5xx) now
+  aborts the fetch instead of proceeding by default.
+- **BLAKE2b-64 filename suffixes (C2, C6).** Replaces the 24-bit MD5 suffix
+  (50% collision odds near ~4k URLs) and sanitizes illegal filename characters.
+
+### Changed
+- **CLI migrated to argparse (D3).** `--help`, type validation, loud rejection
+  of unknown/typo'd flags (`--recal` -> error, was silently ignored), no more
+  80-line manual `sys.argv` loop. Legacy positional-URL calls are unchanged.
+- **`EmbeddingsEngine._vectorize_dense` falls back to pure Python when numpy
+  is unavailable** instead of failing the import.
+- **README** documents the realistic test count (75) and corrects the "zero
+  global mutable state" claim (ConfigManager is a process singleton).
+
+### Tests
+- New direct coverage for: cosine dim-mismatch/int8-ordering/zero-norm (E1),
+  long-claim verbatim verification (E3), stale-dim mid-vault detection, the
+  parallel ingest pipeline (E2), fast-path recency reordering (A3), and a
+  subprocess CLI smoke suite (E9).
+
 ## [0.8.0] - 2026-08-13
 
 ### Added

@@ -4,7 +4,7 @@ Research toolkit for AI agents — give your agent a memory it can prove.
 
 Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo/Mojeek web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
 
-![Version](https://img.shields.io/badge/version-0.8.0-blue)
+![Version](https://img.shields.io/badge/version-0.8.1-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -560,13 +560,13 @@ make clean              # wipe vault, caches, and config
 
 ```bash
 venv/bin/python -m pip install -e ".[test]"
-venv/bin/python -m pytest tests/ -v     # 53 tests
+venv/bin/python -m pytest tests/ -v     # 75 tests
 ```
 
 ### Code standards
 
 - **Python 3.11+**, `from __future__ import annotations` throughout
-- **Zero global mutable state** where possible — one note: `ConfigManager` is a well-behaved singleton per-process (fine for the CLI)
+- **Minimal global mutable state** — `ConfigManager` is a process-scoped singleton (shared `_config` class attribute), which is fine for the CLI but means two `VaultManager`s in one process share a config; tests isolate this via a `TempConfig` stand-in
 - **DB access always through `_db()`** — the context manager guarantees commit/rollback/close
 - **Optional heavy dependencies lazy-imported** — HTML-only usage never pulls PDF/DOCX/EPUB libraries
 - **Annotated signatures** (`Optional`, `Tuple`, `List`) on all public methods

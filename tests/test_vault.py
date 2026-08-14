@@ -464,3 +464,162 @@ def test_mode_fast_and_hybrid_cli_route(vault, make_chunk):
     assert len(fast) == 1
     hyb = vault.search_vault("solar", limit=5, hybrid=True)
     assert len(hyb) == 1
+
+
+# --- v0.8.1 audit hardenings (E1 cosine, A1 long claims, A5 stale-dim) ---
+
+
+def test_cosine_rejects_dimension_mismatch():
+    """A7: mismatched vector payloads must be surfaced (scored 0.0), never
+    silently truncated into a plausible-but-wrong cosine."""
+    from hoardcore import ConfigManager, EmbeddingsEngine
+    cfg = ConfigManager()
+    cfg._config["embeddings"]["mode"] = "sparse"
+    cfg._config["embeddings"]["dim"] = 256
+    eng = EmbeddingsEngine(cfg)
+    a = eng.vectorize("renewable energy solar power negros")
+    # Float32 vec truncated to 100 bytes: previously silently sliced to a wrong
+    # score; now must be reported as a mismatch.
+    truncated = a[:100]
+    # int8 vs float32 mix: also a mismatch (256-byte int8 vs 1024-byte f32).
+    int8_a = EmbeddingsEngine._quantize_int8(a)
+    assert EmbeddingsEngine.cosine(a, truncated, eng.dim) == 0.0
+    assert EmbeddingsEngine.cosine(int8_a, a, eng.dim) == 0.0
+    # Same-format matches still score.
+    b = eng.vectorize("solar farm megawatts renewable")
+    assert EmbeddingsEngine.cosine(a, b, eng.dim) > 0.4
+
+
+def test_cosine_rejects_zero_norm_and_empty_vectors():
+    """E1: empty payloads must fail cleanly, not crash or produce NaN."""
+    from array import array
+
+    from hoardcore import ConfigManager, EmbeddingsEngine
+    cfg = ConfigManager()
+    cfg._config["embeddings"]["mode"] = "sparse"
+    cfg._config["embeddings"]["dim"] = 64
+    eng = EmbeddingsEngine(cfg)
+    dim = eng.dim
+    # Empty blobs: not a valid int8 or float32 length -> mismatch path.
+    assert EmbeddingsEngine.cosine(b"", b"", dim) == 0.0
+    # A float32 all-zeros vector is valid bytes; dot is 0.0 (no NaN).
+    zero = array('f', [0.0] * dim).tobytes()
+    assert EmbeddingsEngine.cosine(zero, zero, dim) == 0.0
+
+
+def test_cosine_int8_matches_float32_ordering():
+    """E1: the numPy int8 dot must match the pure-Python reference (no
+    int8 overflow) and still rank same-topic above different-topic."""
+    from hoardcore import ConfigManager, EmbeddingsEngine
+    cfg = ConfigManager()
+    cfg._config["embeddings"]["mode"] = "sparse"
+    cfg._config["embeddings"]["dim"] = 256
+    eng = EmbeddingsEngine(cfg)
+
+    def ref_int8_cosine(x, y):
+        from array import array
+        va = array('b')
+        va.frombytes(x)
+        vb = array('b')
+        vb.frombytes(y)
+        return float(sum(a_ * b_ for a_, b_ in zip(va, vb, strict=True))) / (127.0 ** 2)
+
+    a = EmbeddingsEngine._quantize_int8(eng.vectorize("renewable energy solar"))
+    b = EmbeddingsEngine._quantize_int8(eng.vectorize("solar farm megawatts"))
+    c = EmbeddingsEngine._quantize_int8(eng.vectorize("chocolate cake recipe"))
+    assert abs(EmbeddingsEngine.cosine(a, b, eng.dim) - ref_int8_cosine(a, b)) < 1e-6
+    assert EmbeddingsEngine.cosine(a, b, eng.dim) > EmbeddingsEngine.cosine(a, c, eng.dim)
+
+
+def test_verify_claim_long_claim_with_distinctive_tail(vault, make_chunk):
+    """A1 regression: a claim whose distinctive portion is NOT its first 60
+    chars (so the old prefix-only fragment missed it) must verify verbatim."""
+    text = ("The signatories agreed that the economic impact of renewable "
+            "energy in the Negros region has been measured at seventy three "
+            "billion pesos in the calendar year of twenty twenty six.")
+    vault.index_document("https://negros.test/1", [make_chunk(text)], {})
+    hc_inst = object.__new__(hc.HoardCore)
+    hc_inst.vault = vault
+    # 130+ char claim; 'seventy three' appears ~100 chars in -- past the old
+    # 60-char window, so this would previously fall through to partial.
+    claim = ("The signatories agreed that the economic impact of renewable "
+             "energy in the Negros region has been measured at seventy three "
+             "billion pesos")
+    assert hc_inst.verify_claim(claim) == "verified"
+
+
+def test_verify_claim_partial_requires_strong_bm25(vault, make_chunk):
+    """A2 regression: co-occurrence of generic words in unrelated boilerplate
+    must NOT be reported 'partial' — the top hit must be a strong BM25 match."""
+    vault.index_document("https://boilerplate.test/1", [
+        make_chunk("Click here to read our terms. The message was on the "
+                   "table by the door for everyone to see and understand it.")
+    ], {})
+    hc_inst = object.__new__(hc.HoardCore)
+    hc_inst.vault = vault
+    # All keywords exist in that one chunk, but it is a weak, generic match.
+    assert hc_inst.verify_claim("on the table under the door behind everyone") == "unverified"
+
+
+def test_backfill_detects_stale_dim_even_when_first_row_is_fresh(vault, make_chunk):
+    """A5 regression: stale-dim detection samples ALL rows, not just rowid 1.
+    A mixed vault (one fresh vec + one stale vec) must rebuild the stale row."""
+    from array import array
+    for i in range(3):
+        vault.index_document(f"https://solar.test/{i}",
+                             [make_chunk(f"solar farm megawatt capacity {i}")], {})
+    # Force one stale row (wrong dim) while others stay fresh.
+    stale = array('f', [0.1] * 128).tobytes()
+    with vault._db() as (_conn, cur):
+        rids = [r[0] for r in cur.execute("SELECT rowid FROM chunks_fts").fetchall()]
+        cur.execute(
+            "INSERT OR REPLACE INTO chunk_vectors (chunk_rowid, url, vector) "
+            "VALUES (?, ?, ?)", (rids[2], "https://solar.test/2", stale))
+    # Lower the dim expectation so the two fresh rows also look stale to force
+    # a rebuild of everything; the point is that backfill no longer misses the
+    # mismatch when sampling only the first row.
+    vault._vector_dim = 64
+    n = vault.backfill_vectors()
+    assert n > 0
+    with vault._db() as (_conn, cur):
+        bad = cur.execute(
+            "SELECT COUNT(*) FROM chunk_vectors WHERE length(vector) != 64 * 4"
+        ).fetchone()[0]
+    assert bad == 0
+
+
+def test_parallel_ingest_sentinels_and_results(tmp_path, make_chunk):
+    """A11 hardening plus E2 gap: the parallel pipeline must terminate and
+    store every chunk's vector without deadlock on batches larger than the
+    bounded queues."""
+    base = str(tmp_path)
+    vault = hc.VaultManager(TempConfig(base, {"indexer.parallel": True}))
+    chunks = [
+        hc.Chunk(text=f"parallel solar chunk item {i}", metadata={"source": "https://p.test/1"})
+        for i in range(40)
+    ]
+    vault.ingest_chunks_parallel("https://p.test/1", chunks, {})
+    with vault._db() as (_conn, cur):
+        fts = cur.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0]
+        vecs = cur.execute("SELECT COUNT(*) FROM chunk_vectors").fetchone()[0]
+    assert fts == 40
+    assert vecs == 40
+    assert len(vault.search_vault("solar", limit=20, hybrid=False)) == 20
+
+
+def test_fast_path_recency_reworks_stale_first(vault, make_chunk):
+    """A3 regression: the FTS fast path must apply recency weighting, so a
+    stale keyword match doesn't outrank a fresh one of identical text."""
+    vault.config._overrides["embeddings.recency_half_life_days"] = 7
+    now = time.time()
+    stale_url = "https://news.test/stale"
+    fresh_url = "https://news.test/fresh"
+    for url in (stale_url, fresh_url):
+        vault.index_document(url, [make_chunk("solar farm megawatt capacity", url=url)], {})
+    with vault._db() as (_conn, cur):
+        cur.execute("UPDATE documents SET fetched_at = ? WHERE url = ?",
+                    (now - 60 * 86400, stale_url))
+    # 2 matching docs >= limit 2 -> fast path fires; recency must promote fresh.
+    res = vault.search_vault("solar farm megawatt", limit=2, hybrid=True)
+    assert all(c.metadata.get("retrieval") == "fts_fast" for c in res)
+    assert res[0].metadata["source_url"] == fresh_url

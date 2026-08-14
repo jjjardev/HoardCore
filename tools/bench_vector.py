@@ -90,11 +90,19 @@ def main() -> None:
 
     float32 = make_vecs(args.vectors, args.dim, seed=0)
     int8 = [hc.EmbeddingsEngine._quantize_int8(v) for v in float32]
-    queries = make_vecs(args.queries, args.dim, seed=99)
+    # Queries must be in the SAME format as storage: float32 vectors against
+    # float32 storage, int8-quantized queries against int8 storage. Mixing
+    # them is a format mismatch (surfaced by EmbeddingsEngine.cosine) and
+    # produces meaningless timings.
+    q_f32 = make_vecs(args.queries, args.dim, seed=99)
+    q_int8 = [hc.EmbeddingsEngine._quantize_int8(v) for v in q_f32]
 
     rows: list[tuple[str, int, float, float, int, float]] = []
 
-    for fmt, vecs in (("float32", float32), ("int8", int8)):
+    for fmt, vecs, queries in (
+        ("float32", float32, q_f32),
+        ("int8", int8, q_int8),
+    ):
         for page_size in args.page_sizes:
             tmp = os.path.join(tempfile.mkdtemp(), f"bench_{fmt}_{page_size}.db")
             build_db(tmp, vecs, page_size)

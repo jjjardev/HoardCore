@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HoardCore v0.8.0 - Research toolkit for AI agents: retrieval & deep research.
+HoardCore v0.8.1 - Research toolkit for AI agents: retrieval & deep research.
 Ingests HTML, PDF, DOCX, EPUB, and TXT into a persistent, searchable SQLite Vault.
 Hybrid retrieval fuses FTS5 keyword search with vector search (RRF), and a
 web-discovery action feeds the crawler from a live search query.
@@ -15,8 +15,9 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 
+import argparse
 import asyncio
 import hashlib
 import io
@@ -53,6 +54,16 @@ EPUB_AVAILABLE = False
 RAPIDOCR_AVAILABLE = False
 _BINARY_IMPORTED = False
 
+# numpy is optional but strongly recommended: it makes the brute-force cosine
+# scan 50-100x faster than the pure-Python fallback (B1). fastembed pulls it in
+# transitively, but sparse-mode-only installs can live without it.
+try:
+    import numpy as _np
+    NP_AVAILABLE = True
+except ImportError:
+    _np = None
+    NP_AVAILABLE = False
+
 # curl_cffi is optional but highly recommended (installed via Makefile)
 try:
     from curl_cffi import requests as curl_requests
@@ -86,7 +97,7 @@ class Chunk:
 # =============================================================================
 
 DEFAULT_CONFIG = """
-# HoardCore v0.8.0 Configuration
+# HoardCore v0.8.1 Configuration
 
 [general]
 timeout_seconds = 30
@@ -363,38 +374,64 @@ class EmbeddingsEngine:
         """
         from array import array
 
-        import numpy as np
-
         model, dim = self._dense
         vec = next(iter(model.embed([text])), None)
         if vec is None:
             return b""
-        arr = np.asarray(vec, dtype=np.float32).reshape(-1)
-        norm = float(np.linalg.norm(arr))
+        if _np is not None:
+            arr = _np.asarray(vec, dtype=_np.float32).reshape(-1)
+            norm = float(_np.linalg.norm(arr))
+            if norm > 0:
+                arr = arr / norm
+            return array('f', arr).tobytes()
+        # Pure-Python fallback (no numpy installed).
+        arr = list(vec)
+        norm = float(sum(v * v for v in arr)) ** 0.5
         if norm > 0:
-            arr = arr / norm
+            arr = [v / norm for v in arr]
         return array('f', arr).tobytes()
 
     @staticmethod
     def cosine(a: bytes, b: bytes, dim: int) -> float:
-        # int8-quantized vectors are exactly `dim` bytes; float32 are 4x.
-        if len(a) == dim:
+        """Cosine similarity between two serialized vectors.
+
+        Vectors are stored L2-normalized at build time, so a plain dot product
+        equals cosine. int8-quantized vectors are exactly `dim` bytes; float32
+        are `dim * 4`. Any other payload length signals corruption or a stale
+        embedding format, and is surfaced instead of silently truncated (A7),
+        so mismatches are never hidden by a plausible-but-wrong score.
+        """
+        int8_desc = (dim, dim)
+        f32_desc = (dim * 4, dim * 4)
+        if (len(a), len(b)) != int8_desc and (len(a), len(b)) != f32_desc:
+            logger.warning(
+                "vector dim mismatch: query=%d bytes, stored=%d bytes, "
+                "expected int8=%d or float32=%d; scoring as 0.0",
+                len(a), len(b), dim, dim * 4,
+            )
+            return 0.0
+        if len(a) == dim:  # int8 path
+            if _np is not None:
+                va = _np.frombuffer(a, dtype=_np.int8).astype(_np.int32)
+                vb = _np.frombuffer(b, dtype=_np.int8).astype(_np.int32)
+                return float(_np.dot(va, vb)) / (127.0 ** 2)
             va = array('b')
             va.frombytes(a)
             vb = array('b')
             vb.frombytes(b)
-            # dot of dequantized vectors / 127^2 == cosine (L2-normalized)
-            return float(sum(x * y for x, y in zip(va, vb, strict=False))) / (127.0 ** 2)
+            # Both confirmed to be exactly `dim` bytes above, so strict is safe.
+            return float(sum(x * y for x, y in zip(va, vb, strict=True))) / (127.0 ** 2)
+        # float32 path (all dimensions are identical by the check above)
+        if _np is not None:
+            va = _np.frombuffer(a, dtype=_np.float32)
+            vb = _np.frombuffer(b, dtype=_np.float32)
+            return float(_np.dot(va, vb))
         va = array('f')
         va.frombytes(a)
         vb = array('f')
         vb.frombytes(b)
-        if len(va) > dim:
-            va = va[:dim]
-        if len(vb) > dim:
-            vb = vb[:dim]
-        dot = sum(x * y for x, y in zip(va, vb, strict=False))
-        return float(dot)  # vectors are L2-normalized at build, so dot == cosine
+        # Both confirmed to be exactly `dim * 4` bytes above, so strict is safe.
+        return float(sum(x * y for x, y in zip(va, vb, strict=True)))
 
 # =============================================================================
 # 3. PERSISTENT STORAGE & VAULT (SQLite + Filesystem)
@@ -623,6 +660,13 @@ class VaultManager:
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_chunk_vec_url ON chunk_vectors(url)")
 
+            # Recency weighting (P1.2) looks up documents by (url, fetched_at);
+            # this index turns those searches from O(N) scans into index seeks.
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_documents_url_fetched "
+                "ON documents(url, fetched_at DESC)"
+            )
+
             # Content-addressable vector cache: identical chunks share one
             # embedding, so cross-document duplicate text is embedded once.
             cursor.execute("""
@@ -649,8 +693,12 @@ class VaultManager:
         name = os.path.basename(path) or 'index'
         # Remove query strings
         name = re.sub(r'\?.*$', '', name)
+        # Sanitize characters that are illegal in filenames on some platforms
+        # (Windows `:`/`*`, path separators, etc.) instead of hoping the URL
+        # author cooperated (C6).
+        name = re.sub(r'[^A-Za-z0-9._-]+', '_', name).strip('.-') or 'index'
         if not name:
-            name = hashlib.md5(url.encode()).hexdigest()[:8]
+            name = hashlib.blake2b(url.encode(), digest_size=8).hexdigest()[:16]
 
         # Determine extension
         ext_map = {
@@ -661,8 +709,10 @@ class VaultManager:
             'text/plain': '.txt'
         }
         ext = ext_map.get(content_type, '.bin')
-        # Ensure unique by hashing
-        hash_suffix = hashlib.md5(url.encode()).hexdigest()[:6]
+        # Ensure unique by hashing. BLAKE2b-64 (16 hex chars) has a negligible
+        # collision risk, vs the old 24-bit MD5 suffix which hit a 50% collision
+        # probability around 4k URLs and silently overwrote files (C2).
+        hash_suffix = hashlib.blake2b(url.encode(), digest_size=8).hexdigest()[:16]
         return f"{name}_{hash_suffix}{ext}"
 
     def save_binary(self, url: str, content_type: str, data: bytes) -> str:
@@ -823,19 +873,24 @@ class VaultManager:
         expected_bytes = self._vector_dim * self.embeddings.bytes_per_dim
         stale_dim = False
         with self._db() as (_conn, cursor):
-            # Detect dimension mismatch: sample one stored vector's byte length.
+            # Detect dimension mismatch across ALL stored vectors, not just a
+            # LIMIT 1 sample: an interrupted earlier backfill can leave some
+            # rows fresh and some stale, and a one-row probe would miss it.
             cursor.execute("SELECT COUNT(*) FROM chunk_vectors")
             vec_count = cursor.fetchone()[0]
             if vec_count > 0:
-                cursor.execute("SELECT vector FROM chunk_vectors LIMIT 1")
-                row = cursor.fetchone()
-                if row is not None and row[0] is not None:
-                    stale_dim = len(row[0]) != expected_bytes
-                    if stale_dim:
-                        logger.info(
-                            f"Embedding dimension changed (stored != {self._vector_dim}); "
-                            f"recomputing vectors in place."
-                        )
+                cursor.execute(
+                    "SELECT COUNT(*) FROM chunk_vectors WHERE length(vector) != ?",
+                    (expected_bytes,),
+                )
+                stale_count = cursor.fetchone()[0]
+                stale_dim = stale_count > 0
+                if stale_dim:
+                    logger.info(
+                        f"{stale_count} of {vec_count} vectors have a stale "
+                        f"dimension (expected {expected_bytes} bytes); "
+                        f"recomputing them in place."
+                    )
 
         # Cheap count check: fully vectorized AND matching dim -> 0 work.
         # Skip the count shortcut when dims are stale (rows exist but are wrong).
@@ -1015,37 +1070,47 @@ class VaultManager:
         result_q: queue.Queue = queue.Queue(maxsize=PIPELINE_QUEUE_SIZE)
         error_holder: list[Exception] = []
         results: list[tuple[int, str, bytes | None]] = [None] * len(chunks)  # type: ignore[list-item]
+        # A sentinel is pushed to the WORK queue (not result_q) and consumed by
+        # the workers themselves, so shutdown can never race with the consumer
+        # (A11). The reader then collects exactly len(chunks) results.
+        sentinel = (-1, None)
 
         def _embed_worker() -> None:
             while True:
+                idx, text = work_q.get()
                 try:
-                    idx, text = work_q.get(timeout=1.0)
-                except queue.Empty:
-                    return
-                try:
+                    if idx == -1:
+                        return
                     vec = self.embeddings.vectorize(text) if embed_ok else None
                 except Exception as e:
                     error_holder.append(e)
                     vec = None
+                finally:
+                    work_q.task_done()
                 result_q.put((idx, vec))
-                work_q.task_done()
 
-        # Feed the reader queue.
-        for idx, chunk in enumerate(chunks):
-            work_q.put((idx, chunk.text))
+        # Start the workers, then feed work and sentinels. Feeding after start
+        # means the queue never fills up and block() can't deadlock even for
+        # batches larger than PIPELINE_QUEUE_SIZE.
         threads = [threading.Thread(target=_embed_worker, daemon=True)
                    for _ in range(WORKER_THREADS)]
         for t in threads:
             t.start()
-        work_q.join()
+        for idx, chunk in enumerate(chunks):
+            work_q.put((idx, chunk.text))
+        # Wake EXACTLY the number of workers we started so none hang waiting.
         for _ in threads:
-            result_q.put((-1, None))  # sentinels
-
-        while True:
-            idx, vec = result_q.get()
-            if idx == -1:
-                break
+            work_q.put(sentinel)
+        # Collect results CONCURRENTLY with the workers: result_q is bounded,
+        # so draining it here (rather than after join) prevents workers from
+        # blocking on a full queue while the main thread waits forever (A11).
+        for _ in range(len(chunks)):
+            idx, vec = result_q.get(timeout=10.0)
             results[idx] = vec  # type: ignore[assignment]
+        # By now every worker has seen its sentinel (the only items left in the
+        # queue) and exited, so join cannot hang.
+        for t in threads:
+            t.join()
 
         # Single writer thread commits the whole batch (dedup + vectors).
         with self._db() as (_conn, cursor):
@@ -1178,20 +1243,23 @@ class VaultManager:
         with self._db() as (_conn, cursor):
             # --- FTS candidate list (rowid -> rank score) ---
             fts_match = self._fts_query(query)
-            if not fts_match:
-                return []
             fts_where = "chunks_fts MATCH ?"
             fts_params: list[Any] = [fts_match]
             if domain:
                 fts_where += " AND url LIKE ?"
                 fts_params.append(f'%{domain}%')
-            cursor.execute(f"""
-                SELECT rowid, url FROM chunks_fts
-                WHERE {fts_where}
-                ORDER BY rank
-                LIMIT ?
-            """, (*fts_params, fts_pool))
-            fts_rows: list[tuple[int, str]] = cursor.fetchall()
+            # A query with no FTS tokens (e.g. "*", operators only) still has
+            # semantic content the embedding model can match: run the vector
+            # scan alone instead of returning [] (A6).
+            fts_rows: list[tuple[int, str]] = []
+            if fts_match:
+                cursor.execute(f"""
+                    SELECT rowid, url FROM chunks_fts
+                    WHERE {fts_where}
+                    ORDER BY rank
+                    LIMIT ?
+                """, (*fts_params, fts_pool))
+                fts_rows = cursor.fetchall()
 
             # --- FTS5 strong-signal fast path (P1.1) ---
             # When the FTS5 AND-match alone fills the requested result set, the
@@ -1200,7 +1268,31 @@ class VaultManager:
             # retrieval='fts_fast' so downstream provenance is explicit.
             if (self.config.get('embeddings.fts_fast_path', True)
                     and len(fts_rows) >= limit):
-                fast_ids = [rid for rid, _ in fts_rows[:limit]]
+                # Recency weighting must apply uniformly: without it, a 2-year-old
+                # keyword match would rank identically to a fresh page even when
+                # recency_half_life_days is configured (A3). We reorder the FTS
+                # candidates by recency decay before slicing to the limit.
+                half_life = float(self.config.get('embeddings.recency_half_life_days', 0) or 0)
+                selected: list[tuple[int, str]] = fts_rows[:limit]
+                if half_life > 0 and selected:
+                    now = time.time()
+                    urls = list({u for _rid, u in selected if u})
+                    if urls:
+                        placeholders = ",".join("?" * len(urls))
+                        cursor.execute(
+                            f"SELECT url, MAX(fetched_at) FROM documents "
+                            f"WHERE url IN ({placeholders}) GROUP BY url",
+                            urls,
+                        )
+                        fetched_by_url = dict(cursor.fetchall())
+                        def _decay(u: str) -> float:
+                            fetched = fetched_by_url.get(u)
+                            if not fetched:
+                                return 1.0
+                            age = max(0.0, (now - fetched) / 86400.0)
+                            return 0.5 ** (age / half_life)
+                        selected.sort(key=lambda t: (_decay(t[1]), t[0]), reverse=True)
+                fast_ids = [rid for rid, _ in selected]
                 if fast_ids:
                     placeholders = ",".join("?" * len(fast_ids))
                     order_map = {rid: i for i, rid in enumerate(fast_ids)}
@@ -1398,8 +1490,14 @@ class NetworkFetcher:
                     and 'captcha' in resp.headers.get('Location', '').lower()
                 )
                 return not (blocked or captcha_redirect)
-        except Exception:
-            return True
+        except Exception as e:
+            # Fail CLOSED: if the preflight itself errors (DNS, TLS, transient
+            # 5xx), the right default is to abort the fetch, not to proceed.
+            # Proceeding can hit Cloudflare with a request the probe could
+            # already have rejected, and failing open makes a soft-left case
+            # on any server deployment (C1).
+            logger.warning(f"Preflight check failed for {url}: {e}")
+            return False
 
     async def _fetch_aiohttp(self, url: str) -> tuple[str | None, bytes | None, str]:
         """Attempt 1: Standard aiohttp. Returns (text, binary, content_type)."""
@@ -2273,10 +2371,10 @@ class HoardCore:
 
         Checks the raw stored chunk text for the claim and reports whether it is
         supported. Returns one of:
-          "verified"   - the claim (or a distinctive 60-char substring) appears
-                         verbatim in a stored chunk.
-          "partial"    - FTS5 finds co-occurring keyword coverage, but no
-                         verbatim match.
+          "verified"   - the claim (or a distinctive normalized substring of it)
+                         appears verbatim in a stored chunk.
+          "partial"    - the vault has strong FTS5 keyword support for the
+                         claim, but no verbatim match.
           "unverified" - no vault support for the claim.
 
         This makes the [V] honor-system tag machine-checkable: the caller can
@@ -2294,40 +2392,53 @@ class HoardCore:
         #    so newlines/multi-space pass) and confirm the exact normalized
         #    needle in Python.
         needle = re.sub(r"\s+", " ", claim.strip()).lower()
-        # Long claims are broken into phrases; a distinctive fragment match counts.
-        fragment = needle[:60]
-        # Escape LIKE wildcards in the fragment itself before widening spaces.
-        like_fragment = fragment.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
-        like_fragment = re.sub(r"\s+", "%", like_fragment)
         candidates: list[str] = []
         with self.vault._db() as (_conn, cursor):
-            cursor.execute(
-                "SELECT text FROM chunks_fts WHERE lower(text) LIKE ? ESCAPE '\\' LIMIT 100",
-                (f"%{like_fragment}%",)
-            )
-            candidates = [row[0] for row in cursor.fetchall()]
-        for raw in candidates:
-            if needle in re.sub(r"\s+", " ", raw.lower()):
-                return "verified"
+            # Slide a 60-char window across the needle so a claim whose
+            # *distinctive* portion is not its first 60 chars still matches
+            # verbatim (A1). Every windowed fragment is tested; the first hit
+            # confirms the claim.
+            step = 60
+            window = 60
+            # A short needle is one fragment; a long one is broken into
+            # overlapping windows so a distinctive tail gets a chance.
+            fragments = [needle[i:i + window]
+                         for i in range(0, max(1, len(needle) - window + 1), step)]
+            for fragment in fragments:
+                if not fragment.strip():
+                    continue
+                # Escape LIKE wildcards in the fragment itself before widening
+                # spaces; then widen whitespace runs to % so stored line breaks
+                # pass the pre-filter.
+                like_fragment = fragment.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+                like_fragment = re.sub(r"\s+", "%", like_fragment)
+                cursor.execute(
+                    "SELECT text FROM chunks_fts WHERE lower(text) LIKE ? ESCAPE '\\'",
+                    (f"%{like_fragment}%",)
+                )
+                candidates = [row[0] for row in cursor.fetchall()]
+                for raw in candidates:
+                    if needle in re.sub(r"\s+", " ", raw.lower()):
+                        return "verified"
 
         # 2) FTS5 keyword overlap: build a proper AND-of-phrases MATCH for the
-        #    claim and see how many hits it yields. FTS5's combined ranking is
-        #    far more discriminating than per-token LIKE on a large vault
-        #    (where common words appear somewhere regardless of relevance).
+        #    claim and measure the strength of the top hit. "Partial" is only
+        #    reported when the TOP hit is a strong BM25 match (rank well into
+        #    negative territory) — co-occurrence of a few common stopwords in
+        #    unrelated boilerplate is NOT evidence (A2).
         fts = self.vault._fts_query(claim)
-        fts_hits = 0
         if fts:
             with self.vault._db() as (_conn, cursor):
                 cursor.execute(
-                    "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH ?",
+                    "SELECT rank FROM chunks_fts WHERE chunks_fts MATCH ? "
+                    "ORDER BY rank LIMIT 1",
                     (fts,)
                 )
-                fts_hits = cursor.fetchone()[0]
-
-        # 3) Partial only if FTS5 finds real co-occurring hits; otherwise the
-        #    claim has no keyword support in the vault.
-        if fts_hits > 0:
-            return "partial"
+                row = cursor.fetchone()
+                # FTS5 BM25 ranks are negative; a strong all-terms match scores
+                # far below -2.0. Anything shallower is treated as coincidence.
+                if row is not None and row[0] < -2.0:
+                    return "partial"
         return "unverified"
 
     async def _process_document(self, url: str, strategy: str, force_refresh: bool) -> tuple[list[Chunk], dict[str, Any]]:
@@ -2627,93 +2738,88 @@ class HoardCore:
 # 9. CLI ENTRYPOINT
 # =============================================================================
 
-async def main():
-    if len(sys.argv) < 2:
-        print(__doc__)
-        print("\nExamples:")
-        print("  python hoardcore.py https://example.com --action scrape")
-        print("  python hoardcore.py https://docs.python.org --action crawl --strategy aggressive")
-        print("  python hoardcore.py https://arxiv.org/abs/2110.12345.pdf --action scrape")
-        print("  python hoardcore.py https://example.com --action search --query 'machine learning'")
-        print("  python hoardcore.py _ --action ingest --urls 'u1,u2,u3'  ")
-        print("  python hoardcore.py _ --action discover --query 'negros renewable energy' --limit 5")
-        print("  python hoardcore.py _ --action research --query 'how does bokashi compost' --discover 5 --recall 6")
-        print("  python hoardcore.py _ --action research --query 'negros economy' --out artifacts/report.md  # day-sorted to artifacts/YYYY-MM-DD/")
-        print("  python hoardcore.py _ --action research --query 'sleep research' --vault sleep  # per-topic vault (recall stays clean)")
-        print("  python hoardcore.py _ --action verify --claim 'the Epoch doubling time is 6 months' --recall 5")
-        print("  python hoardcore.py _ --action check   # verify vault integrity")
-        sys.exit(1)
+_EXAMPLES = (
+    "\nExamples:\n"
+    "  python hoardcore.py https://example.com --action scrape\n"
+    "  python hoardcore.py https://docs.python.org --action crawl --strategy aggressive\n"
+    "  python hoardcore.py https://arxiv.org/abs/2110.12345.pdf --action scrape\n"
+    "  python hoardcore.py https://example.com --action search --query 'machine learning'\n"
+    "  python hoardcore.py _ --action ingest --urls 'u1,u2,u3'\n"
+    "  python hoardcore.py _ --action discover --query 'negros renewable energy' --limit 5\n"
+    "  python hoardcore.py _ --action research --query 'how does bokashi compost' --discover 5 --recall 6\n"
+    "  python hoardcore.py _ --action research --query 'negros economy' --out artifacts/report.md\n"
+    "  python hoardcore.py _ --action research --query 'sleep research' --vault sleep\n"
+    "  python hoardcore.py _ --action verify --claim 'the Epoch doubling time is 6 months'\n"
+    "  python hoardcore.py _ --action check   # verify vault integrity\n"
+)
 
-    url = sys.argv[1]
-    action = "scrape"
-    strategy = None
-    query = None
-    force_refresh = False
-    urls = None
-    max_results = 0
-    discover = None
-    recall = 6
-    claim = None
-    out_path: str | None = None
-    vault_name: str | None = None
-    migrate_page_size = False
-    mode: str | None = None
 
-    i = 2
-    while i < len(sys.argv):
-        if sys.argv[i] == "--action" and i + 1 < len(sys.argv):
-            action = sys.argv[i + 1]
-            i += 2
-        elif sys.argv[i] == "--strategy" and i + 1 < len(sys.argv):
-            strategy = sys.argv[i + 1]
-            i += 2
-        elif sys.argv[i] == "--query" and i + 1 < len(sys.argv):
-            query = sys.argv[i + 1]
-            i += 2
-        elif sys.argv[i] == "--claim" and i + 1 < len(sys.argv):
-            claim = sys.argv[i + 1]
-            i += 2
-        elif sys.argv[i] == "--discover" and i + 1 < len(sys.argv):
-            try:
-                discover = int(sys.argv[i + 1])
-            except ValueError:
-                discover = None
-            i += 2
-        elif sys.argv[i] == "--recall" and i + 1 < len(sys.argv):
-            try:
-                recall = int(sys.argv[i + 1])
-            except ValueError:
-                recall = 6
-            i += 2
-        elif sys.argv[i] == "--out" and i + 1 < len(sys.argv):
-            out_path = sys.argv[i + 1]
-            i += 2
-        elif sys.argv[i] == "--force":
-            force_refresh = True
-            i += 1
-        elif sys.argv[i] == "--urls" and i + 1 < len(sys.argv):
-            import re as _re
-            urls = _re.split(r'[,\s]+', sys.argv[i + 1].strip())
-            urls = [u for u in urls if u]
-            i += 2
-        elif sys.argv[i] == "--limit" and i + 1 < len(sys.argv):
-            try:
-                max_results = int(sys.argv[i + 1])
-            except ValueError:
-                max_results = 0
-            i += 2
-        elif sys.argv[i] == "--vault" and i + 1 < len(sys.argv):
-            vault_name = sys.argv[i + 1]
-            i += 2
-        elif sys.argv[i] == "--migrate":
-            migrate_page_size = True
-            i += 1
-        elif sys.argv[i] == "--mode" and i + 1 < len(sys.argv):
-            mode = sys.argv[i + 1]
-            i += 2
-        else:
-            print(f"  ⚠️  Unrecognized flag ignored: {sys.argv[i]!r}", file=sys.stderr)
-            i += 1
+def _build_parser() -> argparse.ArgumentParser:
+    """Argument parser for the hoardcore CLI (D3): typed, --help, no silent
+    typo tolerance. `url` is positional so legacy `hoardcore.py <URL>` calls,
+    and the `_` placeholder for vault-only actions, keep working verbatim."""
+    parser = argparse.ArgumentParser(
+        prog="hoardcore",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=_EXAMPLES,
+        # Reject prefix abbreviations so a typo like `--recal` fails loudly
+        # instead of silently matching --recall (D3).
+        allow_abbrev=False,
+    )
+    parser.add_argument(
+        "url", nargs="?", default="_",
+        help="Target URL or domain, or '_' for vault-only actions.",
+    )
+    parser.add_argument(
+        "--action", choices=["scrape", "crawl", "search", "ingest",
+                             "discover", "research", "verify", "check"],
+        default="scrape", help="Action to run (default: scrape).",
+    )
+    parser.add_argument(
+        "--strategy", choices=["fast", "balanced", "aggressive"], default=None,
+        help="Fetch strategy (default: network.default_strategy).",
+    )
+    parser.add_argument("--query", default=None, help="Search/research query.")
+    parser.add_argument("--claim", default=None, help="Claim to verify.")
+    parser.add_argument("--discover", type=int, default=None,
+                        help="Results to discover+ingest for research.")
+    parser.add_argument("--recall", type=int, default=6,
+                        help="Chunks to recall for research.")
+    parser.add_argument("--out", default=None, dest="out_path",
+                        help="Artifact output path for research.")
+    parser.add_argument("--force", action="store_true",
+                        help="Bypass the cache and re-fetch.")
+    parser.add_argument("--urls", default=None,
+                        help="Comma/space-separated URL list for ingest.")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="Max results for discover/search.")
+    parser.add_argument("--vault", default=None, dest="vault_name",
+                        help="Per-topic vault name.")
+    parser.add_argument("--migrate", action="store_true",
+                        help="With --action check: rebuild vault at 16 KB pages.")
+    parser.add_argument("--mode", choices=["fast", "hybrid"], default=None,
+                        help="Force search mode (FTS-only vs vector+RRF).")
+    return parser
+
+
+async def main(argv: list[str] | None = None) -> None:
+    args = _build_parser().parse_args(argv)
+    url = args.url
+    action = args.action
+    strategy = args.strategy
+    query = args.query
+    claim = args.claim
+    force_refresh = args.force
+    urls = re.split(r'[,\s]+', args.urls.strip()) if args.urls else None
+    urls = [u for u in urls if u] if urls else None
+    max_results = args.limit
+    discover = args.discover
+    recall = args.recall
+    out_path = args.out_path
+    vault_name = args.vault_name
+    migrate_page_size = args.migrate
+    mode = args.mode
 
     scraper = HoardCore(vault_name=vault_name)
     print(f"\n🚀 HoardCore v{__version__}: Action={action}, URL={url}, Strategy={strategy or 'default'}")
