@@ -422,6 +422,22 @@ def test_fts_fast_path_skips_vector_when_fts_fills_limit(vault, make_chunk):
     assert not any("recipe" in c.text or "sugar" in c.text for c in res)
 
 
+def test_fts_fast_path_confidence_is_medium_not_high(vault, make_chunk):
+    """v0.8.2: fast-path hits skip the vector scan, so semantic closeness is
+    unverified — confidence must be 'medium', not the dishonest 'high'."""
+    docs = [
+        ("https://solar.test/1", "solar farm inverters panels megawatt capacity"),
+        ("https://solar.test/2", "solar farm site chosen for megawatt output"),
+        ("https://solar.test/3", "solar farm construction megawatt timeline"),
+    ]
+    for url, text in docs:
+        vault.index_document(url, [make_chunk(text, url=url)], {})
+    res = vault.search_vault("solar farm megawatt", limit=3, hybrid=True)
+    assert all(c.metadata.get("retrieval") == "fts_fast" for c in res)
+    # Guard against regressing back to the dishonest 'high' (vector unverified).
+    assert all(c.metadata.get("confidence") == "medium" for c in res)
+
+
 def test_fts_fast_path_disabled_uses_hybrid(vault, make_chunk):
     """P1.1: with fts_fast_path off, hybrid RRF runs (retrieval='hybrid')."""
     vault.config._overrides["embeddings.fts_fast_path"] = False
