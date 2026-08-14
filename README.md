@@ -4,7 +4,7 @@ Research toolkit for AI agents — give your agent a memory it can prove.
 
 Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo/Mojeek web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
 
-![Version](https://img.shields.io/badge/version-0.8.1-blue)
+![Version](https://img.shields.io/badge/version-0.8.2-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -342,7 +342,7 @@ The pipeline for each document:
 
 **Sparse mode (fallback):** set `[embeddings] mode = "sparse"`. Uses FNV-1a feature hashing of word + 3-gram shingles into a 256-dim unit vector for lexical overlap. It's the automatic fallback when the dense dependency is missing and the mode for environments that want zero model weight. A lexical query can still surface near-literal matches (e.g., `sol*r` → `solar`).
 
-**Confidence bands.** Every hybrid hit is tagged `high`, `medium`, or `low`. A hit is `high` if it matched *both* the keyword (FTS5) and vector lists, or if its absolute fused score is strong; otherwise it scales by absolute score (`conf_high_abs` / `conf_low_abs`). This discriminates weak, vector-only result sets from strong keyword+vector ones — unlike a ratio-to-top score, which stays high even for weak queries. The band is attached to chunk metadata and printed in grounding-context output (e.g. `score 0.0325 | high`). A low-confidence hit signals a weak match that should be **re-verified before being tagged `[V]`** — or demoted to `[E]`.
+**Confidence bands.** Every hybrid hit is tagged `high`, `medium`, or `low`. A hit is `high` if it matched *both* the keyword (FTS5) and vector lists, or if its absolute fused score is strong; otherwise it scales by absolute score (`conf_high_abs` / `conf_low_abs`). This discriminates weak, vector-only result sets from strong keyword+vector ones — unlike a ratio-to-top score, which stays high even for weak queries. The band is attached to chunk metadata and printed in grounding-context output (e.g. `score 0.0325 | high`). A low-confidence hit signals a weak match that should be **re-verified before being tagged `[V]`** — or demoted to `[E]`. FTS fast-path hits (which skip the vector scan) are tagged `medium`, since semantic closeness is unverified.
 
 Empty and whitespace-only queries return `[]` instead of raising. A punctuation-only query (no FTS tokens) still runs the vector scan in hybrid mode — the embedding model can match semantic content even when keywords are absent — while the FTS-only (`fast`) path returns `[]`.
 

@@ -3,15 +3,31 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-08-14
+
+### Changed
+- **Honest int8 positioning.** The v0.8.1 numpy rewrite upcasts int8 payloads
+  to int32 (required: int16 overflows in just 2–3 dims at 127*127=16129). This
+  makes the float32 path the fast scan path and int8 the *storage* optimization
+  (~4x smaller vault). Corrected the stale v0.8.0 claim "~3.5x faster scans" and
+  the v0.8.1 "50–100x" estimate to the measured ~5–85x.
+- **Fast-path confidence no longer hardcoded `'high'`.** FTS-only fast-path hits
+  skip the vector scan, so semantic closeness is unverified; they are now tagged
+  `confidence='medium'` to match the banding discipline used by hybrid recall.
+- **`_decay` closure hoisted** out of the inner conditional in the recency
+  rework, so it is defined once per call instead of per-branch (A3 robustness).
+
 ## [0.8.1] - 2026-08-14
 
 ### Added
 - **Third-party codebase audit-driven patch** (v0.8.1). Implements the ten
   highest-ROI fixes from the audit (part H1) plus their directly-coupled tests:
 - **NumPy cosine rewrite.** `EmbeddingsEngine.cosine` now uses `numpy.dot`
-  (with a pure-Python fallback when numpy is absent), giving a 50–100x
-  speedup on the brute-force vector scan. int8 payloads are upcast before the
-  dot product to avoid silent int8 overflow.
+  (with a pure-Python fallback when numpy is absent), giving a ~5–85x
+  measured speedup on the brute-force vector scan. int8 payloads are upcast
+  to int32 (int16 would overflow in just 2–3 dims) before the dot product to
+  avoid silent int8 overflow; int8's value is 4x smaller on-disk storage,
+  not scan speed — float32 is the faster scan path.
 - **Strict vector dimension checks in cosine.** Mismatched payload lengths
   (mixed int8/float32, corrupted blobs, stale embedding formats) are logged and
   scored 0.0 instead of silently truncated into a plausible-but-wrong cosine
@@ -72,9 +88,9 @@ All notable changes to this project are documented here. This project adheres to
   (`fast`) or guaranteed vector+RRF fusion (`hybrid`) on search, independent of
   config.
 - **`[embeddings] quantize = "int8"`.** Dense vectors can be stored as signed
-  8-bit instead of float32 — ~4x smaller vault and ~3.5x faster scans with a
-  tiny recall cost. Cosine handles both formats; `verify_vault`/backfill track
-  the expected byte width.
+  8-bit instead of float32 — ~4x smaller vault storage with a tiny recall
+  cost. Cosine handles both formats; `verify_vault`/backfill track the
+  expected byte width.
 - **`[embeddings] fts_fast_path` (default true).** Strong-signal fast path: when
   FTS5's all-term AND match alone fills the requested result set, the vector
   scan is skipped and hits are tagged `retrieval='fts_fast'`. Set `false` to

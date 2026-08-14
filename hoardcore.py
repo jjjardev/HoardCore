@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HoardCore v0.8.1 - Research toolkit for AI agents: retrieval & deep research.
+HoardCore v0.8.2 - Research toolkit for AI agents: retrieval & deep research.
 Ingests HTML, PDF, DOCX, EPUB, and TXT into a persistent, searchable SQLite Vault.
 Hybrid retrieval fuses FTS5 keyword search with vector search (RRF), and a
 web-discovery action feeds the crawler from a live search query.
@@ -15,7 +15,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 
 import argparse
 import asyncio
@@ -412,6 +412,11 @@ class EmbeddingsEngine:
             return 0.0
         if len(a) == dim:  # int8 path
             if _np is not None:
+                # Must upcast to int32, NOT int16/int8: the worst-case element
+                # product is 127*127 = 16129, and int16 overflows at 32767 in
+                # just 2-3 dimensions; int8 would silently wrap. int8's value is
+                # 4x smaller on-disk storage, not scan speed — the float32 path
+                # below is the fast one (no copy/upcast).
                 va = _np.frombuffer(a, dtype=_np.int8).astype(_np.int32)
                 vb = _np.frombuffer(b, dtype=_np.int8).astype(_np.int32)
                 return float(_np.dot(va, vb)) / (127.0 ** 2)
@@ -1277,6 +1282,7 @@ class VaultManager:
                 if half_life > 0 and selected:
                     now = time.time()
                     urls = list({u for _rid, u in selected if u})
+                    fetched_by_url: dict[str, float] = {}
                     if urls:
                         placeholders = ",".join("?" * len(urls))
                         cursor.execute(
@@ -1285,13 +1291,15 @@ class VaultManager:
                             urls,
                         )
                         fetched_by_url = dict(cursor.fetchall())
-                        def _decay(u: str) -> float:
-                            fetched = fetched_by_url.get(u)
-                            if not fetched:
-                                return 1.0
-                            age = max(0.0, (now - fetched) / 86400.0)
-                            return 0.5 ** (age / half_life)
-                        selected.sort(key=lambda t: (_decay(t[1]), t[0]), reverse=True)
+
+                    def _decay(u: str) -> float:
+                        fetched = fetched_by_url.get(u)
+                        if not fetched:
+                            return 1.0
+                        age = max(0.0, (now - fetched) / 86400.0)
+                        return 0.5 ** (age / half_life)
+
+                    selected.sort(key=lambda t: (_decay(t[1]), t[0]), reverse=True)
                 fast_ids = [rid for rid, _ in selected]
                 if fast_ids:
                     placeholders = ",".join("?" * len(fast_ids))
@@ -1308,7 +1316,12 @@ class VaultManager:
                         meta['source_url'] = url
                         meta['retrieval'] = 'fts_fast'
                         meta['hybrid_score'] = None
-                        meta['confidence'] = 'high'
+                        # Confidence band is deliberately 'medium', not 'high':
+                        # the vector scan was skipped, so semantic closeness is
+                        # unverified. 'high' is reserved for hybrid hits that
+                        # matched BOTH the keyword AND vector lists (see the
+                        # confidence-band derivation below).
+                        meta['confidence'] = 'medium'
                         results.append(Chunk(text=text, metadata=meta))
                     return results
 
