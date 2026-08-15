@@ -3,6 +3,33 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-08-15
+
+### Fixed
+- **Docs accuracy audit.** Corrected false/outdated claims in `README.md` and
+  added missing v0.9.0 behavior to `skill.md`:
+  - `verify` `PARTIAL` semantics: now documented as "measurably beats the
+    vault's coincidence floor by a corpus-scaled relative margin" (not `rank < -2.0`).
+  - Test count corrected to 101 passing tests.
+  - `ConfigManager` singleton: now scoped to the default config path only;
+    non-default paths build fresh instances. Removed the stale "shared class
+    attribute" wording.
+  - Architecture section: vector scan corrected to a cached numpy
+    matrix-vector product with `argpartition` for top-k.
+  - Dimension migration clarified to the embed-fingerprint (`embed_fp`) model
+    with batch in-place backfill; `[parsers]` docs gained `enable_pdf_ocr`
+    (default true) which the 0.9.0 changelog claimed but the config table lacked.
+  - Makefile/tree listing updated (`bench` target; `bench_hoardcore_full.py`
+    matmul benchmark), and `Contributing` dropped already-shipped items
+    (CI/CD, config versioning, brute-force bench wording) in favor of the real
+    open areas.
+  - `skill.md`: documented `embeddings.reranker_model`, the `filter_low`
+    EMIT filter, and schema-version/embed-fingerprint guarantees surfaced by
+    `--action check`.
+- **Repo description** (GitHub `About`): kept factually faithful while
+  sharpening the differentiator — citations machine-verified by CLI, not
+  prompt-enforced.
+
 ## [0.9.0] - 2026-08-15
 
 ### Added

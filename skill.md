@@ -138,6 +138,10 @@ Use this to query the local vault.
   vector+RRF fusion. Default (no flag) follows `embeddings.hybrid_search` /
   `fts_fast_path` config. Use `--mode fast` when you want exact keyword recall
   and speed; `--mode hybrid` when you want semantic recall guaranteed.
+- **Optional precision boost**: if `embeddings.reranker_model` is set (e.g.
+  `BAAI/bge-reranker-base` or `jinaai/jina-reranker-v2-base-multilingual`), a
+  cross-encoder re-ranks the final recalled set in `search` and `research`
+  (lazy-loaded, degrades to input order on failure).
 
 CLI form:
 
@@ -217,6 +221,10 @@ hybrid score, and confidence band.
   "Answer-first recall". That is the right fast path for recurring
   questions — but a `deep`/`exhaustive` hunt whose whole point is *new*
   evidence should pass `--no-answer-first`.
+- **`filter_low`** (config, default true): at EMIT, confidence-`low` chunks are
+  dropped from a recall set whenever stronger (non-low) chunks remain; a lone
+  low hit is still returned rather than nothing. Disable to keep exhaustive
+  evidence in the grounding file.
 
 CLI form:
 
@@ -230,6 +238,11 @@ Use this to run the three-phase vault integrity check (document chunk counts,
 content hashes, vector dims). Exit `0` = pass, `1` = fail. Run it before
 trusting `[V]` claims built on a long-lived vault, and with `--migrate` to
 rebuild legacy 4 KB-page vaults at the configured `storage.page_size`.
+
+Vaults carry a schema version (`PRAGMA user_version`) and each cached vector is
+keyed by an embedding fingerprint (`embed_fp` = model/dim/quantize). If you ever
+switch `dense_model`/`dim`/`quantize`, stale vectors are never served — `check`
+reveals any dim drift and the affected rows get rebuilt on the next ingest.
 
 CLI form:
 

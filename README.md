@@ -36,7 +36,7 @@ Terminal tool that turns the web into a permanent, local SQLite vault your AI ag
 
 ## About
 
-HoardCore is a research toolkit for AI agents — a single-file Python module (SQLite vault + CLI) for retrieval and deep research. It hoards knowledge: it turns the web into a permanent, local, searchable SQLite vault, then backs your agent's research with explicit discovery budgets, hybrid retrieval, and citeable provenance. Retrieval is **dense by default** — an ONNX-quantized sentence-transformer (via `fastembed` on `onnxruntime`, no PyTorch) fused with SQLite FTS5 keyword search via Reciprocal Rank Fusion (RRF). A lightweight sparse-hash fallback kicks in automatically only where the dense model is unavailable.
+HoardCore is a research toolkit for AI agents — a single-file Python module (SQLite vault + CLI) for retrieval and deep research. It hoards knowledge: it turns the web into a permanent, local, searchable SQLite vault, then backs your agent's research with explicit discovery budgets, hybrid retrieval, and citeable provenance. Retrieval is **dense by default** — an ONNX-quantized sentence-transformer (via `fastembed` on `onnxruntime`, no PyTorch) fused with SQLite FTS5 keyword search via Reciprocal Rank Fusion (RRF). A lightweight sparse-hash fallback kicks in automatically only where the dense model is unavailable. The vault is schema-versioned and embedding-fingerprinted, so model/config switches never serve stale vectors.
 
 **HoardCore is not an agent harness.** It provides the DISCOVER → INGEST → RECALL → EMIT loop, hybrid retrieval, and provenance tagging — but it does not host an LLM or manage context. That is the job of your **agent harness** (e.g., OpenCode, Claude Code, or any other): the harness hosts the agent, the agent reads `skill.md`, and the agent executes HoardCore commands via its CLI.
 
@@ -48,10 +48,13 @@ Key characteristics:
 - **Real semantic retrieval, dense by default.** An ONNX-quantized sentence-transformer (`BAAI/bge-small-en-v1.5`, 384-dim) runs on `onnxruntime` — no PyTorch, no GPU. Hybrid retrieval fuses FTS5 keyword search with dense vector similarity so both exact terms and *meaning* surface. A lightweight sparse hash (`mode = "sparse"`) is available as a fallback for environments without `fastembed`, and dense mode degrades to it automatically if the dependency is missing.
 - **Lightweight and self-hosted.** One file, local-first, everything on your machine. Optional FlareSolverr (Docker) enables Cloudflare-heavy sites via the `aggressive` strategy; lazy binary imports mean HTML-only usage never pulls in PDF/DOCX/EPUB libraries.
 - **Resilient fetch chain.** `fast` → aiohttp, `balanced` → aiohttp then curl_cffi TLS-impersonation, `aggressive` (default) → adds FlareSolverr. Discovery adds bounded retry with exponential backoff and automatic provider fallback.
-- **Hybrid retrieval.** Merges keyword (BM25-style FTS5) and vector-similarity ranks via RRF, so both exact terms and near-literal matches surface. Empty or punctuation-only queries return safely instead of crashing. Hits carry **confidence bands** (`high`/`medium`/`low`) surfaced in chunk metadata and grounding output.
+- **Hybrid retrieval.** Merges keyword (BM25-style FTS5) and vector-similarity ranks via RRF, so both exact terms and near-literal matches surface. The dense scan is a cached numpy matrix–vector product over the whole vector table — no per-row Python loop. Empty or punctuation-only queries return safely instead of crashing. Hits carry **confidence bands** (`high`/`medium`/`low`) surfaced in chunk metadata and grounding output; an optional cross-encoder (`embeddings.reranker_model`) can re-rank the final set.
 - **Research workflow.** A single `research` action runs `DISCOVER → INGEST → RECALL → EMIT`, writing a grounding-context file into the `artifacts/` directory for direct injection into an LLM.
 - **Programmatic provenance audit.** A `verify` action re-checks a claim against the vault's stored text (verbatim, partial, or unverified) with CI-wireable exit codes, so the `[V]` tag is machine-checkable, not just prompt-enforced.
 - **Artifacts discipline.** Finished deliverables live in `artifacts/` with `[V]/[E]/[H]` provenance tags and numbered source links; a safe `write_artifact()` helper includes path-traversal protection, and deliverables are day-sorted into `artifacts/YYYY-MM-DD/`.
+- **SSRF protection on by default.** Fetch targets are validated before any request and after every redirect hop — non-`http(s)` schemes, private/LAN/loopback/link-local addresses, and DNS-special names are refused (`network.ssrf_protection`, default `true`).
+- **Plugin system & event bus.** Third-party parsers/fetchers/providers/chunkers drop in via `importlib.metadata` entry points, and a lifecycle `EventBus` publishes `document.ingested` / `chunk.embedded` / `discovery.completed` / `search.completed` hooks — a broken plugin never aborts a crawl.
+- **Self-verifying vault.** Content-addressed chunks (BLAKE2b), schema versioning (`PRAGMA user_version`), and embedding fingerprints (`embed_fp`) mean re-ingested content dedupes, stale vectors are never served, and `--action check` proves integrity with CI-wireable exit codes.
 - **MIT licensed.** Free to use, modify, and redistribute.
 
 ---
@@ -459,7 +462,7 @@ python hoardcore.py _ --action verify --claim "the Epoch doubling time is 6 mont
 | Result | Meaning | Exit code |
 |---|---|---|
 | `VERIFIED` | The normalized claim appears verbatim in stored chunk text (a sliding 60-char window is tested across the whole claim, so a distinctive tail still verifies even if the opening is generic) | `0` |
-| `PARTIAL` | The top FTS5 hit is a **strong** all-term BM25 match (`rank < -2.0`), but there is no verbatim match; co-occurrence of a few common words in unrelated boilerplate does *not* count as partial | `1` |
+| `PARTIAL` | The top all-terms FTS5 hit **measurably beats the vault's coincidence floor** (the best rank any single claim term achieves alone, by a corpus-scaled relative margin), but there is no verbatim match; co-occurrence of a few common words in unrelated boilerplate does *not* count as partial | `1` |
 | `UNVERIFIED` | No vault support for the claim | `2` |
 
 The verbatim stage checks the full normalized claim (not just a fixed-size prefix) against all candidate rows — it does not truncate candidates to the first 100. Agents and CI can branch on the exit code: refuse to emit a `[V]` tag unless `verify` returns `0`.
@@ -475,7 +478,7 @@ Created automatically on first run. Key sections:
 | `[auth]` | `cookie_string` (e.g. `cf_clearance=...; session=...`) |
 | `[solver]` | `enabled`, `url`, `solver_timeout` |
 | `[storage]` | `root_dir`, `artifacts_dir`, `artifacts_by_day`, `save_binary`, `save_raw_html`, `page_size` (16 KB default) |
-| `[parsers]` | `enable_pdf`, `enable_docx`, `enable_epub`, `extract_pdf_tables` |
+| `[parsers]` | `enable_pdf`, `enable_docx`, `enable_epub`, `extract_pdf_tables`, `enable_pdf_ocr` (auto-OCR scanned PDF pages when `rapidocr_onnxruntime` is present, default true) |
 | `[crawler]` | `respect_robots`, `sitemap_limit`, `parallel_workers` |
 | `[indexer]` | `enable_fts`, `search_limit`, `parallel` (threaded ingest, default off), `near_dedup` (simhash dup filter, default off), `near_dedup_threshold` |
 | `[embeddings]` | `enabled`, `mode` (`sparse`/`dense`), `dense_model`, `dim`, `mrl_dims` (Matryoshka truncation, 0 = full), `hybrid_search`, `top_k`, `quantize`, `fts_fast_path`, `recency_half_life_days`, `conf_high_abs`, `conf_low_abs`, `reranker_model` (optional cross-encoder re-ranker) |
@@ -523,11 +526,11 @@ Created automatically on first run. Key sections:
 
 `_search_hybrid()` computes two candidate lists (`k=60` RRF constant):
 - **FTS**: `SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank`.
-- **Vector**: brute-force cosine over `chunk_vectors` (fine for a hoard vault), top-`top_k`. In dense mode this is an ONNX-quantized sentence-transformer embedding (384-dim); in sparse mode it is the FNV-1a lexical hash.
+- **Vector**: a single numpy matrix–vector product over the whole vector table (`argpartition` for top-k, matrix cached when the table is unchanged), falling back to per-row cosine when numpy is absent. In dense mode this is an ONNX-quantized sentence-transformer embedding (384-dim); in sparse mode it is the FNV-1a lexical hash.
 
-Each candidate contributes `1 / (k + rank + 1)`; results are sorted by the sum and the top-N returned. Hits carry a **confidence band** (`high`/`medium`/`low`) derived from two signals rather than a ratio-to-top (which stays ~0.9 even for weak queries because RRF scores cluster): a hit is `high` if it matched *both* the keyword list and the vector list, or if its absolute fused score clears `conf_high_abs`; otherwise it scales by absolute score against `conf_high_abs`/`conf_low_abs`. The brute-force vector scan is O(N) per query — ideal for thousands of chunks, not millions.
+Each candidate contributes `1 / (k + rank + 1)`; results are sorted by the sum and the top-N returned. Hits carry a **confidence band** (`high`/`medium`/`low`) derived from two signals rather than a ratio-to-top (which stays ~0.9 even for weak queries because RRF scores cluster): a hit is `high` if it matched *both* the keyword list and the vector list, or if its absolute fused score clears `conf_high_abs`; otherwise it scales by absolute score against `conf_high_abs`/`conf_low_abs`. The vector scan is O(N) per query (one matmul + `argpartition`), but the numpy matrix form keeps the constant tiny — ideal for thousands of chunks, still fine at hundreds of thousands.
 
-**Dimension migration.** `backfill_vectors` recomputes rows whose dimension no longer matches the configured mode (e.g. switching sparse 256-dim ↔ dense 384-dim) *in place*, so a mode switch is resumable across interrupts — no destructive delete-all.
+**Dimension / embedding-config migration.** Each cached vector is keyed by an embedding fingerprint (`embed_fp` = model + dim + quantize). `backfill_vectors` recomputes rows whose fingerprint no longer matches the configured mode/`dense_model`/`dim` (e.g. switching sparse 256-dim ↔ dense 384-dim, or swapping models) *in place*, in batch transactions with stale-row cleanup — so stale vectors are never served and a config switch is resumable across interrupts, no destructive delete-all.
 
 ### Resilience & DB Hygiene
 
@@ -550,7 +553,7 @@ HoardCore/
                            crawler, discovery, vault, CLI, research action)
                            (research.py was merged into this single file)
     hoardcore.toml         Generated config on first run (git-ignored)
-    Makefile               install / run / discover / test / clean
+    Makefile               install / run / discover / test / bench / clean
     pyproject.toml         Packaging, deps + extras, console script
     AGENTS.md              Agent trigger doc — auto-loaded by your harness at
                            session start; mandates reading skill.md first
@@ -570,7 +573,10 @@ HoardCore/
         test_crawler.py        sitemap/robots/discovery (no network I/O)
         test_ocr.py            OCR fallback path for scanned PDF pages
     tools/
-        bench_vector.py        brute-force cosine scan benchmark (float32/int8 x page sizes)
+        bench_vector.py        numpy matmul vector-scan benchmark (float32/int8 x page sizes)
+        bench_hoardcore_full.py  full numeric benchmark: ingest throughput, search latency,
+                               retrieval quality (P@1/P@5/MRR/nDCG), storage footprint,
+                               integrity + page-size migration
     hoardcore_data/         The vault (vault.db, per-domain binaries/extracted)
 ```
 
@@ -590,13 +596,13 @@ make clean              # wipe vault, caches, and config
 
 ```bash
 venv/bin/python -m pip install -e ".[test]"
-venv/bin/python -m pytest tests/ -v     # 97 tests
+venv/bin/python -m pytest tests/ -v     # 101 tests
 ```
 
 ### Code standards
 
 - **Python 3.11+**, `from __future__ import annotations` throughout
-- **Minimal global mutable state** — `ConfigManager` is a process-scoped singleton (shared `_config` class attribute), which is fine for the CLI but means two `VaultManager`s in one process share a config; tests isolate this via a `TempConfig` stand-in
+- **Minimal global mutable state** — `ConfigManager` is a singleton **only on the default config path**; constructing one with a non-default `config_path` builds a fresh, independent instance (fixing state bleed between separately-constructed managers), and tests isolate via a `TempConfig` stand-in
 - **DB access always through `_db()`** — the context manager guarantees commit/rollback/close
 - **Optional heavy dependencies lazy-imported** — HTML-only usage never pulls PDF/DOCX/EPUB libraries
 - **Annotated signatures** (`Optional`, `Tuple`, `List`) on all public methods
@@ -631,11 +637,9 @@ Bug reports, feature requests, and pull requests are welcome.
 7. Push and open a pull request
 
 Areas open to contribution:
-- A `--log-level` flag and structured exit codes
-- A config version single-source-of-truth
-- Multi-process config reload / real library confidence
-- Expanded test coverage (crawl, ingest, PDF/DOCX/EPUB, CLI end-to-end)
-- CI/CD with GitHub Actions
+- A `--log-level` flag and structured exit codes for `scrape`/`crawl`/`search`/`ingest`/`discover` (only `verify`/`check`/`research` emit meaningful exit codes today)
+- Multi-process config reload
+- Expanded end-to-end test coverage (crawl with network, live discovery, plugin registration)
 
 ---
 
