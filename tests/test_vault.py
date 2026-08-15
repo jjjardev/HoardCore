@@ -821,8 +821,8 @@ def test_simhash_top_bit_cleared_so_ingest_never_overflows(vault):
     raise 'Python int too large to convert to SQLite INTEGER', killing ingest
     of ~44% of docs with indexer.near_dedup on. The value must stay within the
     signed-64-bit range, and ingest must never raise."""
-    import string
     import random
+    import string
     random.seed(7)
     overflow_tokens = None
     for _ in range(500):  # guaranteed to terminate; ~50% hit per draw

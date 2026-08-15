@@ -145,7 +145,7 @@ def quality(vault: hc.VaultManager, k: int = 5) -> dict[str, dict[str, float]]:
         return {"p1": p1, "p5": p5, "r5": r5, "mrr": mrr, "ndcg": ndcg}
 
     # Lexical-topic queries (exact words present in docs)
-    for label, words in TOPICS:
+    for _label, words in TOPICS:
         query = f"{words[0]} {words[1]}"
         for mode in ("fast", "hybrid"):
             out[mode]["lex"].append(_run(mode, query, words))
@@ -205,9 +205,12 @@ def vector_bench(dim: int, n: int, page_sizes: list[int]) -> list[tuple]:
 def footprint(db_path: str, n_chunks: int) -> tuple[float, float, float]:
     size = os.path.getsize(db_path) / 1e6
     conn = sqlite3.connect(db_path)
-    q = lambda pat: (conn.execute(
-        "SELECT COALESCE(sum(pgsize),0) FROM dbstat WHERE name LIKE ?",
-        (pat,)).fetchone()[0])
+
+    def q(pat: str) -> int:
+        return conn.execute(
+            "SELECT COALESCE(sum(pgsize),0) FROM dbstat WHERE name LIKE ?",
+            (pat,)).fetchone()[0]
+
     fts = q("chunks_fts%")
     vec = q("chunk_vectors%")
     conn.close()
@@ -260,7 +263,6 @@ def main() -> None:
     print("\n[B] SEARCH LATENCY (median ms/query)")
     res["search"] = {}
     for label, vault_here in (("1,000", None), (f"{master_chunks:,}", vault)):
-        already = vault_here
         if vault_here is None:                       # build the small vault
             cfg_s = fresh_config(root)
             vault_here = hc.VaultManager(cfg_s, vault_name=f"s{len(corpus[:250])}")
@@ -285,9 +287,9 @@ def main() -> None:
     print("\n[D] VECTOR STORE (10k vecs, brute-force cosine)")
     vb = vector_bench(384, 10_000, [4096, 16384])
     res["vector"] = [{"format": f, "page": p, "ms": m, "qps": q_,
-                      "db_mb": mb} for f, p, m, q_, n, mb in vb]
+                      "db_mb": mb} for f, p, m, q_, _n, mb in vb]
     print(f"    {'format':<9}{'page':<7}{'ms/query':<10}{'q/s':<7}{'db_mb':<8}")
-    for f, p, m, q_, n, mb in vb:
+    for f, p, m, q_, _n, mb in vb:
         print(f"    {f:<9}{p:<7}{m:<10.3f}{q_:<7.0f}{mb:<8.2f}")
 
     print(f"\n[E] STORAGE FOOTPRINT @ {master_chunks} chunks")

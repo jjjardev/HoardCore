@@ -15,7 +15,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.8.5"
+__version__ = "0.8.6"
 
 import argparse
 import asyncio
@@ -305,10 +305,8 @@ def is_ad_tracking_url(url: str) -> bool:
     if host.endswith("bing.com") and path.startswith("/aclick"):
         return True
     # Explicit ad metadata carried in the query string.
-    if any(k in query for k in ("ad_domain=", "ad_provider=", "ad_type=",
-                                "ad_url=", "ad_clickid=", "bct=ad")):
-        return True
-    return False
+    return any(k in query for k in ("ad_domain=", "ad_provider=", "ad_type=",
+                                    "ad_url=", "ad_clickid=", "bct=ad"))
 
 
 def _simhash_bucket_patterns(k: int) -> list[int]:
@@ -2664,7 +2662,7 @@ class HoardCore:
             c.metadata.get('confidence') == 'high' for c in memory_chunks))
 
         if answered:
-            print(f"\n[0/ANSWER-FIRST] memory answers the question; skipping DISCOVER", flush=True)
+            print("\n[0/ANSWER-FIRST] memory answers the question; skipping DISCOVER", flush=True)
             chunks: list[Chunk] = memory_chunks
         else:
             # --discover N controls the hunt breadth; --discover 0 is an
