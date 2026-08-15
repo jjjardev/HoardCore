@@ -58,7 +58,7 @@ All notable changes to this project are documented here. This project adheres to
   provider attempt).
 
 ### Not implemented (deliberately deferred)
-- **`sqlite-vec` (vec0) was NOT adopted** despite the audit listing it. The
+- **`sqlite-vec` (vec0) was not adopted.** The
   libsql `vec0` virtual table is a *brute-force exact scan*, not an ANN index —
   its advertised gains are storage/compression wins, not asymptotic search
   speed — and the production-grade HNSW variant is still marked alpha. For the
