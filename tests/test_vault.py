@@ -223,6 +223,26 @@ def test_verify_claim_three_states(vault, make_chunk):
     assert hc_obj.verify_claim("quantum banana zillion marketplace") == "unverified"
 
 
+def test_verify_claim_partial_is_corpus_scaled(vault, make_chunk):
+    """Regression: PARTIAL used a fixed absolute BM25 rank cutoff (-2.0) that
+    is unreachable on small vaults (top ranks ~1e-6), so any non-verbatim
+    claim reported UNVERIFIED for a fresh vault. The all-terms match must now
+    beat the best single-term coincidence floor instead — corpus-size free."""
+    from hoardcore import HoardCore
+    vault.index_document("https://solar.test/2",
+                         [make_chunk("solar farm megawatt capacity grew this year",
+                                     url="https://solar.test/2")], {})
+    hc_obj = HoardCore.__new__(HoardCore)
+    hc_obj.config = vault.config
+    hc_obj.vault = vault
+    # Terms all present but NOT verbatim-contiguous (that would VERIFY): the
+    # honest state is PARTIAL — previously UNVERIFIED because the small
+    # vault's ranks never reached the old absolute cutoff.
+    assert hc_obj.verify_claim("megawatt solar farm") == "partial"
+    # Stopword-garbage with no real coverage is still UNVERIFIED.
+    assert hc_obj.verify_claim("the or and not of to") == "unverified"
+
+
 def test_backfill_rebuilds_stale_dimension_in_place(vault, make_chunk):
     """Switching embedding dimension recomputes mismatched vectors w/o DELETE."""
     vault.index_document("https://solar.test/1",
@@ -710,6 +730,90 @@ def test_near_dedup_off_keeps_both_copies(vault, make_chunk):
     with vault._db() as (_conn, cur):
         n = cur.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0]
     assert n == 2
+
+
+def test_near_dedup_distinct_chunks_not_dropped(vault, make_chunk):
+    """Regression (bucket-probe): the bounded near-dup probe must not
+    false-positive on many genuinely distinct chunks in a single document."""
+    vault.config._overrides["indexer.near_dedup"] = True
+    # Fully disjoint token vocabularies per chunk: no two chunks share a
+    # token, so their simhashes are effectively independent 63-bit values and
+    # none can sit within the hamming window of another.
+    chunks = [make_chunk(" ".join(f"k{i}{c}" for c in "abcdefghijklmnopqrstuvwxyz"),
+                         url=f"https://scale.test/{i}") for i in range(80)]
+    vault.index_document("https://scale.test/1", chunks, {})
+    with vault._db() as (_conn, cur):
+        n = cur.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0]
+    assert n == 80
+
+
+def test_near_dedup_bucket_probe_finds_true_near_dup(vault):
+    """Regression (bucket-probe): a stored simhash whose bucket differs from
+    the candidate's by <= threshold bits must still be matched. The old
+    full-table scan found this trivially; the bounded probe must reproduce it
+    exactly without loading the entire chunks_simhash table."""
+    sh_a = (1 << 20) | (1 << 5)
+    sh_b = sh_a ^ ((1 << 5) | (1 << 12))  # hamming 2, distinct buckets
+
+    def check():
+        assert hc.hamming64(sh_a, sh_b) == 2
+        assert (sh_a & hc._SIMHASH_BUCKET_MASK) != (sh_b & hc._SIMHASH_BUCKET_MASK)
+    check()
+    vault.config._overrides["indexer.near_dedup"] = True
+    vault._simhash = lambda tokens: sh_a
+    vault.index_document("https://probe.test/a",
+                         [hc.Chunk(text="first document body here",
+                                   metadata={"source": "https://probe.test/a"})], {})
+    vault._simhash = lambda tokens: sh_b
+    vault.index_document("https://probe.test/b",
+                         [hc.Chunk(text="second document body here",
+                                   metadata={"source": "https://probe.test/b"})], {})
+    with vault._db() as (_conn, cur):
+        n = cur.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0]
+    assert n == 1
+
+
+def test_simhash_bucket_patterns_cover_hamming_window():
+    """The probe set provably contains the bucket of any stored simhash within
+    hamming distance k: flipping <= k bits anywhere in the 63-bit hash changes
+    at most k of the low-16 bucket bits."""
+    import random
+
+    random.seed(11)
+    pats = set(hc._simhash_bucket_patterns(3))
+    for _ in range(200):
+        a = random.getrandbits(63)
+        b = a
+        for _ in range(random.randint(1, 3)):
+            b ^= 1 << random.randrange(63)
+        assert hc.hamming64(a, b) <= 3
+        diff = (a ^ b) & hc._SIMHASH_BUCKET_MASK
+        assert diff in pats
+
+
+def test_ca_vector_cache_refreshed_after_dim_change(tmp_path):
+    """Regression (A9): chunk_vectors_ca is keyed by content hash only. After
+    the embedding dimension changes, a stale cached vector must never be
+    served for an identical chunk — the cache entry must be recomputed to the
+    new dim, and the new vector row must match."""
+    cfg = TempConfig(str(tmp_path))
+    cfg._overrides["embeddings.mode"] = "sparse"
+    cfg._overrides["embeddings.dim"] = 64
+    v = hc.VaultManager(cfg)
+    text = "the quick brown fox jumps over the lazy dog solar photovoltaic battery"
+    v.index_document("https://dim.test/1",
+                     [hc.Chunk(text=text, metadata={"source": "https://dim.test/1"})], {})
+    cfg._overrides["embeddings.dim"] = 8
+    v.embeddings = hc.EmbeddingsEngine(cfg)
+    v.index_document("https://dim.test/2",
+                     [hc.Chunk(text=text, metadata={"source": "https://dim.test/2"})], {})
+    with v._db() as (_conn, cur):
+        ca = [r[0] for r in cur.execute(
+            "SELECT length(vector) FROM chunk_vectors_ca").fetchall()]
+        vecs = [r[0] for r in cur.execute(
+            "SELECT length(vector) FROM chunk_vectors").fetchall()]
+    assert ca == [8 * 4]  # refreshed to the new dim, not 64*4
+    assert 8 * 4 in vecs
 
 
 def test_simhash_top_bit_cleared_so_ingest_never_overflows(vault):

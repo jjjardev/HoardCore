@@ -4,7 +4,7 @@ Research toolkit for AI agents — give your agent a memory it can prove.
 
 Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo/Mojeek web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
 
-![Version](https://img.shields.io/badge/version-0.8.4-blue)
+![Version](https://img.shields.io/badge/version-0.8.5-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -177,7 +177,7 @@ Because an agent drives HoardCore via `skill.md` and the CLI, these parameters a
 
 | Parameter | What It Controls | Why It Matters |
 |---|---|---|
-| `--discover N` | How many sources to hunt before ingesting | More sources = broader coverage; fewer = faster turnaround |
+| `--discover N` | How many sources to hunt before ingesting (`0` = recall-only: vault query + grounding only, web hunt skipped) | More sources = broader coverage; fewer = faster turnaround |
 | `--recall N` | How many chunks to retrieve per synthesis pass | More chunks = deeper context; fewer = sharper focus |
 | `--strategy {fast,balanced,aggressive}` | Anti-bot escalation chain | Government sites and job boards require FlareSolverr; lightweight blogs don't |
 | `--vault NAME` | Scope the whole session to a per-topic vault (`hoardcore_data/NAME/`) | Keeps recall clean: research memory is isolated per topic/domain instead of polluting one shared pool |
@@ -573,7 +573,7 @@ make clean              # wipe vault, caches, and config
 
 ```bash
 venv/bin/python -m pip install -e ".[test]"
-venv/bin/python -m pytest tests/ -v     # 84 tests
+venv/bin/python -m pytest tests/ -v     # 97 tests
 ```
 
 ### Code standards

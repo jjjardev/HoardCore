@@ -16,9 +16,18 @@ def _fetcher(tmp_path, overrides=None):
 
 def test_fast_uses_only_aiohttp(tmp_path):
     f = _fetcher(tmp_path)
+    f._fetch_aiohttp = lambda u: _stub(("html", None, "text/html", 200))
+    out = asyncio.run(f.fetch("http://x/", "fast"))
+    assert out == ("html", None, "text/html", 200)
+
+
+def test_fetch_pads_3_tuple_strategy_results(tmp_path):
+    """fetch() must tolerate a strategy returning the legacy 3-tuple (e.g.
+    test doubles) by padding status=None, not crashing the chain."""
+    f = _fetcher(tmp_path)
     f._fetch_aiohttp = lambda u: _stub(("html", None, "text/html"))
     out = asyncio.run(f.fetch("http://x/", "fast"))
-    assert out == ("html", None, "text/html")
+    assert out == ("html", None, "text/html", None)
 
 
 async def _stub(value):
@@ -107,6 +116,113 @@ def test_parse_mojeek_links():
     assert "Mojeek" in res[0].title
 
 
+def test_parse_duckduckgo_filters_ad_tracking_links():
+    """Regression: DuckDuckGo's ad tracker (/y.js) and Bing's /aclick
+    redirector were ingested as false 'sources'. Ad/tracking URLs must be
+    dropped at parse time, not fetched+indexed."""
+    yjs = ("https://html.duckduckgo.com/y.js?ad_domain=top10.com&ad_provider=bingv7aa"
+           "&ad_type=txad&u2=https%3A%2F%2Fwww.bing.com%2Faclick%3Fld%3D123")
+    bing = "https://www.bing.com/aclick?ld=e8FFWqWt2SuSI0&u=aHR0cHM6Ly9leGFtcGxlLmNvbQ"
+    ads = "https://www.googlesyndication.com/pagead/conversion/?ad_type=txad"
+    html = (f'<a class="result__a" href="{yjs}"><b>Ad</b></a>'
+            f'<a class="result__a" href="{bing}"><b>Ad2</b></a>'
+            f'<a class="result__a" href="{ads}"><b>Ad3</b></a>'
+            '<a class="result__a" href="/l/?uddg=https%3A%2F%2Fexample.com%2Fpage&rut=xx">'
+            '<b>Real</b> Result</a>')
+    res = hc.WebSearchProvider._parse_duckduckgo(html, 5)
+    assert len(res) == 1
+    assert res[0].url == "https://example.com/page"
+
+
+def test_is_ad_tracking_url():
+    good = ("https://example.com/report"
+            "?gclid=123&utm_source=news&utm_medium=email")
+    for bad in (
+        "https://duckduckgo.com/y.js?ad_domain=top10.com&ad_type=txad",
+        "https://www.bing.com/aclick?ld=123&u=abc",
+        "https://ad.doubleclick.net/ddm/trackclk/N123",
+        "https://pagead2.googlesyndication.com/pagead/aclk?sac=1",
+        "https://tag.adservice.google.com.au/",
+        "https://s.amazon-adsystem.com/aaaaaaaa/amzn-adsystem",
+    ):
+        assert hc.is_ad_tracking_url(bad), bad
+    assert not hc.is_ad_tracking_url(good)
+    assert not hc.is_ad_tracking_url("")
+    assert not hc.is_ad_tracking_url("not a url")
+
+
+def test_process_document_refuses_http_error_status(tmp_path, monkeypatch):
+    """Regression (soft-404): a body delivered with a 4xx/5xx status is an
+    error page, not content. It must be refused (junk) rather than indexed."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+    scraper = hc.HoardCore()
+
+    async def fake_fetch(url, strategy):
+        return ("<html><body>404 not found. Sorry.</body></html>",
+                None, "text/html", 404)
+
+    scraper.fetcher.fetch = fake_fetch
+    out = asyncio.run(scraper._process_document(
+        "https://example.test/ghost-page", "fast", False))
+    assert out[1].get("junk_reason") == "http_error_status=404"
+    # 200 responses are still fetched/parsed normally (no status refusal).
+    async def ok_fetch(url, strategy):
+        return ("<html><body>This page details real solar farm capacity.</body></html>",
+                None, "text/html", 200)
+    scraper.fetcher.fetch = ok_fetch
+    out2 = asyncio.run(scraper._process_document(
+        "https://example.test/real", "fast", False))
+    assert not out2[1].get("junk")
+
+
+def test_research_discover_zero_is_recall_only(tmp_path, monkeypatch):
+    """Regression: `--discover 0` must mean "never touch the web", not fall
+    back to the config default and run live discovery anyway."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+    scraper = hc.HoardCore()
+    ran = {"discover": False}
+
+    async def boom(query, max_results, strategy, force_refresh):
+        ran["discover"] = True
+        raise AssertionError("DISCOVER must be skipped when discover=0")
+
+    scraper._discover_and_ingest = boom
+    hit = hc.Chunk(text="recall-only answer body",
+                   metadata={"confidence": "high",
+                             "source_url": "https://memory.test/x"})
+    scraper.vault.search_vault = lambda *a, **k: [hit]
+    out = os.path.join(str(tmp_path), "grounding.md")
+    path = asyncio.run(scraper.research("question", out_path=out,
+                                        discover=0, recall=3,
+                                        answer_first=False))
+    assert ran["discover"] is False  # no web hunt
+    assert path is not None
+    with open(path, encoding="utf-8") as f:
+        assert "recall-only answer body" in f.read()
+
+
+def test_process_document_skips_ad_tracking_url(tmp_path, monkeypatch):
+    """Even if an ad URL reaches the pipeline, it must be refused before any
+    fetch or index happens (the crawler-level regression)."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+    scraper = hc.HoardCore()
+    hit = {"fetched": False}
+
+    async def boom(*a, **k):
+        hit["fetched"] = True
+        return ()
+
+    scraper.fetcher.fetch = boom
+    out = asyncio.run(scraper._process_document(
+        "https://html.duckduckgo.com/y.js?ad_domain=top10.com&ad_type=txad",
+        "fast", False))
+    assert hit["fetched"] is False
+    assert out[1].get("junk_reason") == "ad_tracking_url"
+
+
 def test_search_falls_back_across_providers(tmp_path):
     """Provider 1 returns nothing -> provider 2 (mojeek) is used."""
     cfg = TempConfig(str(tmp_path), {"discovery.max_retries": 0})
@@ -185,6 +301,32 @@ def test_scrape_returns_cached_chunks_on_cache_hit(tmp_path, monkeypatch):
     assert chunks
     assert "cached body" in chunks[0].text
     assert chunks[0].metadata["source_url"] == url
+
+
+def test_default_grounding_context_is_suffixed_not_clobbered(tmp_path, monkeypatch):
+    """Regression: two research runs in one day shared the default
+    artifacts/YYYY-MM-DD/grounding_context.md, so the second silently wiped
+    the first. The default name must uniquify (grounding_context_N.md)."""
+    cfg = TempConfig(str(tmp_path))
+    cfg._overrides["storage.artifacts_dir"] = os.path.join(str(tmp_path), "arts")
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+    scraper = hc.HoardCore()
+    first = scraper.resolve_artifact_out(None)
+    assert first.endswith("grounding_context.md")
+    # First run writes it; second run must pick a fresh name.
+    with open(first, "w", encoding="utf-8") as f:
+        f.write("# first")
+    second = scraper.resolve_artifact_out(None)
+    assert second.endswith("grounding_context_2.md")
+    assert second != first
+    with open(second, "w", encoding="utf-8") as f:
+        f.write("# second")
+    with open(first, encoding="utf-8") as f:
+        assert f.read() == "# first"
+
+    # Explicit --out paths are never rewritten or renamed.
+    explicit = os.path.join(str(tmp_path), "mine.md")
+    assert scraper.resolve_artifact_out(explicit) == explicit
 
 
 def test_research_emits_citations_block(tmp_path, monkeypatch):

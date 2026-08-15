@@ -176,8 +176,9 @@ def vector_bench(dim: int, n: int, page_sizes: list[int]) -> list[tuple]:
         nrm = sum(v * v for v in vals) ** 0.5 or 1.0
         vecs.append(array('f', (v / nrm for v in vals)).tobytes())
     int8 = [hc.EmbeddingsEngine._quantize_int8(v) for v in vecs]
-    queries, rows = vecs[:3], []
+    rows = []
     for fmt, vs in (("float32", vecs), ("int8", int8)):
+        queries, dimq = (vecs[:3], dim) if fmt == "float32" else (int8[:3], dim)
         for ps in page_sizes:
             tmp = os.path.join(tempfile.mkdtemp(), f"vb_{fmt}_{ps}.db")
             conn = sqlite3.connect(tmp)
@@ -191,7 +192,7 @@ def vector_bench(dim: int, n: int, page_sizes: list[int]) -> list[tuple]:
             t0 = time.perf_counter()
             for _ in range(3):
                 for q in queries:
-                    sc = [hc.EmbeddingsEngine.cosine(q, b, dim) for b in allv]
+                    sc = [hc.EmbeddingsEngine.cosine(q, b, dimq) for b in allv]
                     sc.sort(reverse=True)
             dt = (time.perf_counter() - t0) / 3 / 3 * 1000
             mb = os.path.getsize(tmp) / 1e6

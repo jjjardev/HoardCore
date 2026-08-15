@@ -15,7 +15,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.8.4"
+__version__ = "0.8.5"
 
 import argparse
 import asyncio
@@ -36,6 +36,7 @@ from array import array
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
+from itertools import combinations
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -267,6 +268,69 @@ def _fnv1a(data: bytes) -> int:
 def hamming64(a: int, b: int) -> int:
     """Popcount of the XOR of two 64-bit hashes (simhash near-dup distance)."""
     return bin(a ^ b).count("1")
+
+
+# Near-duplicate index bucketing. To avoid loading the whole chunks_simhash
+# table for every ingest (O(N) memory + candidates), each stored simhash also
+# records a `bucket` = low 16 bits. Because a hamming distance of <= D changes
+# at most D of those 16 bits, every simhash within distance D of a candidate
+# has a bucket that is the candidate's bucket with <= D bits flipped — so
+# probing only those (sum C(16,i)) bucket values finds all near-duplicates.
+_SIMHASH_BUCKET_BITS = 16
+_SIMHASH_BUCKET_MASK = (1 << _SIMHASH_BUCKET_BITS) - 1
+_SIMHASH_PATTERN_CACHE: dict[int, list[int]] = {}
+
+
+def is_ad_tracking_url(url: str) -> bool:
+    """True if a URL is an ad-redirect or tracking beacon, not content.
+
+    Search engines occasionally surface ad-redirect links (e.g. DuckDuckGo's
+    /y.js tracker, Bing's /aclick redirector) as if they were organic results.
+    Ingesting one stores an ad landing page as a "source", polluting recall.
+    Recognized by host, path, or query markers and dropped before fetch/index.
+    """
+    if not url or not url.startswith("http"):
+        return False
+    parts = urlparse(url)
+    host = (parts.netloc or "").lower()
+    path = (parts.path or "").lower()
+    query = (parts.query or "").lower()
+    if any(s in host for s in (
+            "doubleclick.net", "googlesyndication.com", "googleadservices.com",
+            "amazon-adsystem.com", "adsrvr.org", "adservice.google")):
+        return True
+    # DuckDuckGo ad tracker / Bing ad-click redirector.
+    if host == "duckduckgo.com" and path.startswith("/y.js"):
+        return True
+    if host.endswith("bing.com") and path.startswith("/aclick"):
+        return True
+    # Explicit ad metadata carried in the query string.
+    if any(k in query for k in ("ad_domain=", "ad_provider=", "ad_type=",
+                                "ad_url=", "ad_clickid=", "bct=ad")):
+        return True
+    return False
+
+
+def _simhash_bucket_patterns(k: int) -> list[int]:
+    """All 16-bit masks whose popcount is <= min(k, 16), for hamming probing.
+
+    Probe buckets for a candidate are `candidate_bucket ^ p` over these
+    patterns; this set provably contains the bucket of any stored simhash
+    within hamming distance k. Maxing out at 2^16 patterns degrades gracefully
+    for thresholds >= 16 (falling back to a full-table scan, still correct).
+    """
+    k = min(int(k), _SIMHASH_BUCKET_BITS)
+    if k in _SIMHASH_PATTERN_CACHE:
+        return _SIMHASH_PATTERN_CACHE[k]
+    pats: list[int] = []
+    for i in range(k + 1):
+        for bits in combinations(range(_SIMHASH_BUCKET_BITS), i):
+            m = 0
+            for b in bits:
+                m |= 1 << b
+            pats.append(m)
+    _SIMHASH_PATTERN_CACHE[k] = pats
+    return pats
 
 
 class EmbeddingsEngine:
@@ -746,9 +810,25 @@ class VaultManager:
                     chunk_hash TEXT,
                     url TEXT,
                     text TEXT,
-                    first_seen REAL
+                    first_seen REAL,
+                    bucket INTEGER
                 )
             """)
+
+            # Vaults created before the bucket-based near-dup probe index lack
+            # the column; add and backfill it before any bucket queries run.
+            cols = [c[1] for c in cursor.execute(
+                "PRAGMA table_info(chunks_simhash)").fetchall()]
+            if 'bucket' not in cols:
+                cursor.execute("ALTER TABLE chunks_simhash ADD COLUMN bucket INTEGER")
+                cursor.execute(
+                    "UPDATE chunks_simhash SET bucket = simhash & ?",
+                    (_SIMHASH_BUCKET_MASK,),
+                )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chunks_simhash_bucket "
+                "ON chunks_simhash(bucket)"
+            )
 
     def _get_domain_folder(self, url: str) -> str:
         parsed = urlparse(url)
@@ -860,30 +940,64 @@ class VaultManager:
         if not self.config.get('indexer.near_dedup', False):
             return chunks
         threshold = int(self.config.get('indexer.near_dedup_threshold', 3))
-        existing = [row[0] for row in cursor.execute(
-            "SELECT simhash FROM chunks_simhash").fetchall()]
         kept: list[Chunk] = []
+        local_seen: set[int] = set()
         for chunk in chunks:
             tokens = EmbeddingsEngine._tokens(chunk.text)
             if not tokens:
                 kept.append(chunk)  # no lexical features -> cannot judge
                 continue
             sh = self._simhash(tokens)
-            if any(hamming64(sh, e) <= threshold for e in existing):
+            if self._is_near_duplicate(cursor, sh, threshold, local_seen):
                 logger.debug(f"near-dup block (hamming<= {threshold}) for {url}")
                 continue
-            existing.append(sh)
+            local_seen.add(sh)
             c_hash = hashlib.blake2b(chunk.text.encode("utf-8"),
                                      digest_size=32).hexdigest()
             cursor.execute(
                 "INSERT OR IGNORE INTO chunks_simhash "
-                "(simhash, chunk_hash, url, text, first_seen) VALUES (?, ?, ?, ?, ?)",
-                (sh, c_hash, url, chunk.text, time.time()),
+                "(simhash, chunk_hash, url, text, first_seen, bucket) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (sh, c_hash, url, chunk.text, time.time(),
+                 sh & _SIMHASH_BUCKET_MASK),
             )
             kept.append(chunk)
         if len(kept) != len(chunks):
             logger.info(f"near-dedup kept {len(kept)}/{len(chunks)} chunks for {url}")
         return kept
+
+    def _near_duplicate_candidates(self, cursor: sqlite3.Cursor,
+                                   sh: int, threshold: int) -> list[int]:
+        """Stored simhashes within hamming `threshold` of `sh`.
+
+        Probes only the buckets that could contain a near-duplicate (see
+        _simhash_bucket_patterns) instead of scanning the whole table, so
+        ingest cost stays bounded by the near-dup cluster size rather than the
+        vault's total chunk count.
+        """
+        base = sh & _SIMHASH_BUCKET_MASK
+        probes = [base ^ p for p in _simhash_bucket_patterns(threshold)]
+        qmarks = ",".join("?" * len(probes))
+        rows = cursor.execute(
+            f"SELECT simhash FROM chunks_simhash WHERE bucket IN ({qmarks})",
+            probes).fetchall()
+        return [r[0] for r in rows]
+
+    def _is_near_duplicate(self, cursor: sqlite3.Cursor, sh: int,
+                           threshold: int, local_seen: set[int]) -> bool:
+        """True if `sh` is within hamming threshold of a stored or just-kept
+        simhash. `local_seen` avoids re-querying the DB for chunks kept earlier
+        in the same document.
+        """
+        for e in local_seen:
+            if hamming64(sh, e) <= threshold:
+                return True
+        for e in self._near_duplicate_candidates(cursor, sh, threshold):
+            if e in local_seen:
+                continue
+            if hamming64(sh, e) <= threshold:
+                return True
+        return False
 
     def index_document(self, url: str, chunks: list[Chunk], meta: dict[str, Any]) -> None:
         """Insert/update document and chunks in SQLite FTS.
@@ -981,7 +1095,12 @@ class VaultManager:
             )
             row = cursor.fetchone()
             if row is not None and row[0] is not None:
-                return row[0]
+                expected = self.embeddings.dim * self.embeddings.bytes_per_dim
+                if len(row[0]) == expected:
+                    return row[0]
+                # Stale format (dim/model/quantize changed since the chunk was
+                # last embedded): fall through and recompute so a cached vector
+                # can never silently mismatch the current embedding config (A9).
         except Exception:
             pass
         try:
@@ -992,7 +1111,7 @@ class VaultManager:
         if vec:
             with suppress(Exception):
                 cursor.execute(
-                    "INSERT OR IGNORE INTO chunk_vectors_ca (chunk_hash, vector) "
+                    "INSERT OR REPLACE INTO chunk_vectors_ca (chunk_hash, vector) "
                     "VALUES (?, ?)",
                     (c_hash, vec),
                 )
@@ -1648,8 +1767,8 @@ class NetworkFetcher:
             logger.warning(f"Preflight check failed for {url}: {e}")
             return False
 
-    async def _fetch_aiohttp(self, url: str) -> tuple[str | None, bytes | None, str]:
-        """Attempt 1: Standard aiohttp. Returns (text, binary, content_type)."""
+    async def _fetch_aiohttp(self, url: str) -> tuple[str | None, bytes | None, str, int | None]:
+        """Attempt 1: Standard aiohttp. Returns (text, binary, content_type, status)."""
         cookies = self._parse_cookies()
         headers = {'User-Agent': self._user_agent}
         connector = TCPConnector(force_close=True, enable_cleanup_closed=True, ttl_dns_cache=300)
@@ -1662,22 +1781,22 @@ class NetworkFetcher:
                 content_type = resp.headers.get('Content-Type', 'text/plain').split(';')[0].strip()
                 if resp.status == 200:
                     if 'text' in content_type:
-                        return await resp.text(), None, content_type
+                        return await resp.text(), None, content_type, resp.status
                     else:
-                        return None, await resp.read(), content_type
+                        return None, await resp.read(), content_type, resp.status
                 elif resp.status == 403:
                     logger.warning("aiohttp: 403 Blocked.")
-                    return None, None, content_type
+                    return None, None, content_type, resp.status
                 else:
                     logger.warning(f"aiohttp: Status {resp.status}")
-                    return None, None, content_type
+                    return None, None, content_type, resp.status
         except Exception as e:
             logger.debug(f"aiohttp failed: {e}")
-            return None, None, ''
+            return None, None, '', None
 
-    async def _fetch_curl_cffi(self, url: str) -> tuple[str | None, bytes | None, str]:
+    async def _fetch_curl_cffi(self, url: str) -> tuple[str | None, bytes | None, str, int | None]:
         if not CURL_AVAILABLE:
-            return None, None, ''
+            return None, None, '', None
 
         cookies = self._parse_cookies()
         try:
@@ -1695,22 +1814,22 @@ class NetworkFetcher:
             content_type = resp.headers.get('Content-Type', 'text/plain').split(';')[0].strip()
             if resp.status_code == 200:
                 if 'text' in content_type:
-                    return resp.text, None, content_type
+                    return resp.text, None, content_type, resp.status_code
                 else:
-                    return None, resp.content, content_type
+                    return None, resp.content, content_type, resp.status_code
             elif resp.status_code == 403:
                 logger.warning("curl_cffi: 403 Blocked.")
-                return None, None, content_type
+                return None, None, content_type, resp.status_code
             else:
                 logger.warning(f"curl_cffi: Status {resp.status_code}")
-                return None, None, content_type
+                return None, None, content_type, resp.status_code
         except Exception as e:
             logger.debug(f"curl_cffi failed: {e}")
-            return None, None, ''
+            return None, None, '', None
 
-    async def _fetch_flaresolverr(self, url: str) -> tuple[str | None, bytes | None, str]:
+    async def _fetch_flaresolverr(self, url: str) -> tuple[str | None, bytes | None, str, int | None]:
         if not self._solver_enabled:
-            return None, None, ''
+            return None, None, '', None
 
         logger.info("FlareSolverr: Solving challenge...")
         payload = {
@@ -1728,28 +1847,42 @@ class NetworkFetcher:
                 self._solver_url, json=payload, timeout=timeout
             ) as resp:
                 if resp.status != 200:
-                    return None, None, ''
+                    return None, None, '', None
                 data = await resp.json()
                 if data.get("status") != "ok":
-                    return None, None, ''
+                    return None, None, '', None
                 solution = data.get("solution", {})
                 if solution.get("status") == 200:
                     content_type = solution.get('headers', {}).get('Content-Type', 'text/html').split(';')[0]
                     response = solution.get('response', '')
                     if 'text' in content_type:
-                        return response, None, content_type
+                        return response, None, content_type, int(solution.get('status', 200))
                     else:
                         # FlareSolverr usually returns binary as b64, but we handle text mostly
-                        return None, response.encode('utf-8'), content_type
-                return None, None, ''
+                        return None, response.encode('utf-8'), content_type, int(solution.get('status', 200))
+                return None, None, '', None
         except Exception as e:
             logger.error(f"FlareSolverr failed: {e}")
-            return None, None, ''
+            return None, None, '', None
 
-    async def fetch(self, url: str, strategy: str) -> tuple[str | None, bytes | None, str]:
+    @staticmethod
+    def _normalize_fetch(result: tuple) -> tuple[str | None, bytes | None, str, int | None]:
+        """Pad a fetch-strategy result to (text, binary, content_type, status).
+
+        Strategy methods return the full 4-tuple; test doubles/older callers
+        may return 3-tuples, which are padded with status=None.
+        """
+        r = tuple(result)
+        if len(r) < 4:
+            return r + (None,) * (4 - len(r))
+        return r[:4]
+
+    async def fetch(self, url: str, strategy: str) -> tuple[str | None, bytes | None, str, int | None]:
         """
         Execute the explicit strategy chain.
-        Returns: (text, binary_data, content_type)
+        Returns: (text, binary_data, content_type, status) where status is the
+        final HTTP status (None if unknown) so the caller can refuse soft-404
+        and other error bodies instead of indexing them as content.
         """
         logger.info(f"Fetching {url} with strategy: {strategy}")
 
@@ -1759,33 +1892,39 @@ class NetworkFetcher:
             raise RuntimeError("CF_COOKIE_EXPIRED")
 
         # Strategy dispatch
-        text, binary, ctype = None, None, ''
+        text, binary, ctype, status = None, None, '', None
 
         if strategy == "fast":
-            text, binary, ctype = await self._fetch_aiohttp(url)
+            text, binary, ctype, status = self._normalize_fetch(
+                await self._fetch_aiohttp(url))
             if text is not None or binary is not None:
-                return text, binary, ctype
+                return text, binary, ctype, status
             raise RuntimeError("FETCH_FAILED")
 
         elif strategy == "balanced":
-            text, binary, ctype = await self._fetch_aiohttp(url)
+            text, binary, ctype, status = self._normalize_fetch(
+                await self._fetch_aiohttp(url))
             if text is not None or binary is not None:
-                return text, binary, ctype
-            text, binary, ctype = await self._fetch_curl_cffi(url)
+                return text, binary, ctype, status
+            text, binary, ctype, status = self._normalize_fetch(
+                await self._fetch_curl_cffi(url))
             if text is not None or binary is not None:
-                return text, binary, ctype
+                return text, binary, ctype, status
             raise RuntimeError("FETCH_FAILED")
 
         elif strategy == "aggressive":
-            text, binary, ctype = await self._fetch_aiohttp(url)
+            text, binary, ctype, status = self._normalize_fetch(
+                await self._fetch_aiohttp(url))
             if text is not None or binary is not None:
-                return text, binary, ctype
-            text, binary, ctype = await self._fetch_curl_cffi(url)
+                return text, binary, ctype, status
+            text, binary, ctype, status = self._normalize_fetch(
+                await self._fetch_curl_cffi(url))
             if text is not None or binary is not None:
-                return text, binary, ctype
-            text, binary, ctype = await self._fetch_flaresolverr(url)
+                return text, binary, ctype, status
+            text, binary, ctype, status = self._normalize_fetch(
+                await self._fetch_flaresolverr(url))
             if text is not None or binary is not None:
-                return text, binary, ctype
+                return text, binary, ctype, status
             raise RuntimeError("FETCH_FAILED")
 
         raise RuntimeError("FETCH_FAILED")
@@ -2257,7 +2396,8 @@ class WebSearchProvider:
         last_exc: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
-                text, _binary, _ctype = await self.fetcher.fetch(url, strategy)
+                data = await self.fetcher.fetch(url, strategy)
+                text = data[0] if data else None
                 if text:
                     return text
                 raise RuntimeError("empty search response")
@@ -2286,6 +2426,8 @@ class WebSearchProvider:
                 target = unquote(href.split("uddg=", 1)[1].split("&", 1)[0])
             if not target.startswith("http"):
                 continue
+            if is_ad_tracking_url(target):
+                continue  # ad-redirect/tracker URLs are not search content
             results.append(SearchResult(
                 title=WebSearchProvider._clean_title(title_raw),
                 url=target
@@ -2304,6 +2446,8 @@ class WebSearchProvider:
             href, title_raw = m.group(1), m.group(2)
             if not href.startswith("http"):
                 continue
+            if is_ad_tracking_url(href):
+                continue  # ad-redirect/tracker URLs are not search content
             results.append(SearchResult(
                 title=WebSearchProvider._clean_title(title_raw),
                 url=href
@@ -2389,7 +2533,17 @@ class HoardCore:
         if not self.config.get('storage.artifacts_by_day', True):
             return out_path
         if out_path is None:
-            return os.path.join(self._artifact_day_subdir(), "grounding_context.md")
+            # Default deliverables share one name; if today's file already
+            # exists, suffix it so a second research run never clobbers the
+            # first session's grounding context.
+            base = os.path.join(self._artifact_day_subdir(), "grounding_context.md")
+            if not os.path.exists(base):
+                return base
+            i = 2
+            while os.path.exists(os.path.join(
+                    self._artifact_day_subdir(), f"grounding_context_{i}.md")):
+                i += 1
+            return os.path.join(self._artifact_day_subdir(), f"grounding_context_{i}.md")
         artifacts_root = os.path.abspath(self.artifacts_dir) + os.sep
         if os.path.abspath(out_path).startswith(artifacts_root):
             return os.path.join(self._artifact_day_subdir(), os.path.basename(out_path))
@@ -2513,8 +2667,14 @@ class HoardCore:
             print(f"\n[0/ANSWER-FIRST] memory answers the question; skipping DISCOVER", flush=True)
             chunks: list[Chunk] = memory_chunks
         else:
-            print(f"\n[1/DISCOVER] searching web for: {question!r} (top {discover})", flush=True)
-            await self._discover_and_ingest(question, discover, strategy, force_refresh=False)
+            # --discover N controls the hunt breadth; --discover 0 is an
+            # explicit "recall-only" run (never touch the web). Omitted
+            # (None) falls back to the config default live discovery.
+            if discover is not None and discover <= 0:
+                logger.info("Skipping DISCOVER (--discover 0 = recall-only).")
+            else:
+                print(f"\n[1/DISCOVER] searching web for: {question!r} (top {discover})", flush=True)
+                await self._discover_and_ingest(question, discover, strategy, force_refresh=False)
 
             print(f"\n[2/RECALL] hybrid-retrieving top {recall} chunks", flush=True)
             chunks = self.vault.search_vault(question, limit=recall, hybrid=True)
@@ -2605,9 +2765,15 @@ class HoardCore:
 
         # 2) FTS5 keyword overlap: build a proper AND-of-phrases MATCH for the
         #    claim and measure the strength of the top hit. "Partial" is only
-        #    reported when the TOP hit is a strong BM25 match (rank well into
-        #    negative territory) — co-occurrence of a few common stopwords in
-        #    unrelated boilerplate is NOT evidence (A2).
+        #    reported when the top all-terms hit measurably beats the vault's
+        #    coincidence floor — the best rank any single claim term achieves
+#     alone. Semantics are the same as an absolute-BM25 bar (co-
+        #     occurrence of a few common stopwords is NOT evidence, A2) but
+        #     corpus-size independent: raw FTS5 ranks are ~1e-6 on a small
+        #     vault and ~-20 on a large one, so a fixed absolute cutoff like
+        #     -2.0 is unreachable at small scale and trivially passed at
+        #     scale. The margin below is relative to the single-term floor,
+        #     so a fixed ratio of separation is always required.
         fts = self.vault._fts_query(claim)
         if fts:
             with self.vault._db() as (_conn, cursor):
@@ -2617,10 +2783,30 @@ class HoardCore:
                     (fts,)
                 )
                 row = cursor.fetchone()
-                # FTS5 BM25 ranks are negative; a strong all-terms match scores
-                # far below -2.0. Anything shallower is treated as coincidence.
-                if row is not None and row[0] < -2.0:
-                    return "partial"
+                if row is None:
+                    return "unverified"  # no chunk matches every claim term
+                top_all = row[0]
+                # Coincidence floor: the least-negative best single-term rank.
+                floor: float | None = None
+                for single in fts.split(" AND "):
+                    cursor.execute(
+                        "SELECT rank FROM chunks_fts WHERE chunks_fts MATCH ? "
+                        "ORDER BY rank LIMIT 1",
+                        (single,)
+                    )
+                    sr = cursor.fetchone()
+                    if sr is None:  # a claim term matches nothing anywhere
+                        floor = None
+                        break
+                    floor = sr[0] if floor is None else max(floor, sr[0])
+                if floor is not None:
+                    # Margin is relative to the coincidence floor so it is
+                    # corpus-size free: FTS5 ranks are ~1e-6 on a small vault
+                    # and ~-20 on a large one, so a fixed absolute margin is
+                    # either unattainable at scale or trivially passed.
+                    margin = 0.15 * abs(floor)
+                    if top_all <= floor - margin:
+                        return "partial"
         return "unverified"
 
     async def _process_document(self, url: str, strategy: str, force_refresh: bool) -> tuple[list[Chunk], dict[str, Any]]:
@@ -2628,6 +2814,15 @@ class HoardCore:
         Core processing pipeline for a single URL.
         Returns (chunks, meta_overrides).
         """
+        # Ad-redirect / tracking beacons are never content; don't fetch them.
+        if is_ad_tracking_url(url):
+            logger.warning(f"Skipping index of {url} (ad/tracking URL).")
+            return [Chunk(
+                text="",
+                metadata={"source": url, "junk": True,
+                          "junk_reason": "ad_tracking_url"}
+            )], {"junk": True, "junk_reason": "ad_tracking_url"}
+
         # Check cache
         if not force_refresh and self.vault.document_exists(url, self.config.get('cache.ttl_seconds', 86400)):
             logger.info(f"Cache HIT for {url} (in vault). Skipping network.")
@@ -2636,7 +2831,7 @@ class HoardCore:
 
         # Fetch
         try:
-            text, binary, content_type = await self.fetcher.fetch(url, strategy)
+            text, binary, content_type, status = await self.fetcher.fetch(url, strategy)
         except RuntimeError as e:
             error_msg = str(e)
             if error_msg == "CF_COOKIE_EXPIRED":
@@ -2655,6 +2850,16 @@ class HoardCore:
         binary_path = None
         if binary and self.save_binary and content_type not in ['text/html', 'text/plain']:
             binary_path = self.vault.save_binary(url, content_type, binary)
+
+        # A body delivered alongside a 4xx/5xx status is an error page, not
+        # content — refusing it keeps soft-404 bodies out of the vault.
+        if status is not None and status >= 400:
+            logger.warning(f"Skipping index of {url} (http_error_status={status}).")
+            return [Chunk(
+                text="",
+                metadata={"source": url, "junk": True,
+                          "junk_reason": f"http_error_status={status}"}
+            )], {"junk": True, "junk_reason": f"http_error_status={status}"}
 
         # Parse document
         markdown = ""
@@ -2727,6 +2932,13 @@ class HoardCore:
             "cloudflare", "not a robot", "access denied",
             "the page you are looking for", "we couldn't find the page",
             "bad gateway", "404 not found", "the requested url was not found",
+            # login / consent walls (extraction sees only the sign-in chrome)
+            "agree & join", "new to linkedin", "join now", "create new account",
+            "forgot your password", "log in to see", "sign in",
+            "your web browser is not fully supported",
+            "instagram from meta", "meta pay",
+            "email o telepono", "mag-sign up", "mag-log in",
+            "patakaran sa privacy", "log ng aktibidad",
         ]
         lower = stripped.lower()
         matched = [b for b in boilerplate if b in lower]
@@ -2735,6 +2947,14 @@ class HoardCore:
             return "near_empty_extraction"
         if matched and len(stripped) < 600:
             return f"boilerplate:{matched[0]}"
+
+        # A low-quality flat list (e.g. a site's language-picker while logged
+        # out) has no prose at all: many short lines, no sentence-like line.
+        if quality_score < 0.15 and 60 <= len(stripped) < 4000:
+            lines = [ln for ln in stripped.splitlines() if ln.strip()]
+            if (len(lines) >= 12
+                    and all(len(ln.split()) <= 3 for ln in lines)):
+                return "chrome_shell:flat_list"
 
         # Some failures leave a low-score body that is still real (PDF ratio is naturally low);
         # rely on structural signals above, not raw length ratio alone.

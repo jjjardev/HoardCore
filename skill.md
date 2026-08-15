@@ -154,9 +154,11 @@ Use this to machine-check a claim against the vault before you tag it `[V]`.
 - **`recall`** (int, optional): Chunks to consider (default 5).
 - **Exit codes (CI-wireable):** `0` = `VERIFIED` (the normalized claim appears
   verbatim in vault text, tested via a sliding 60-char window), `1` = `PARTIAL`
-  (the top FTS5 hit is a strong all-term BM25 match, `rank < -2.0`, but no
-  verbatim hit), `2` = `UNVERIFIED`. Refuse to emit a `[V]` tag unless this
-  returns `0` — that is what makes the provenance tag machine-verifiable.
+  (the top FTS5 hit is a strong all-term BM25 match — it measurably beats the
+  vault's single-term coincidence floor, so the bar is corpus-scaled, not a
+  fixed absolute rank — but no verbatim hit), `2` = `UNVERIFIED`. Refuse to
+  emit a `[V]` tag unless this returns `0` — that is what makes the provenance
+  tag machine-verifiable.
 
 CLI form:
 
@@ -201,7 +203,10 @@ hybrid score, and confidence band.
 - **`url`** (string, optional): `_` placeholder.
 - **`action`** (string, required): Set to `"research"`.
 - **`query`** (string, required): The core question.
-- **`discover`** (int, optional): Sources to hunt first (default 5).
+- **`discover`** (int, optional): Sources to hunt first (default 5). Set to
+  `0` for a recall-only run: the vault is queried and the grounding
+  context is written, but the web search/ingestion phase is skipped
+  entirely (it does NOT fall back to the config default).
 - **`recall`** (int, optional): Chunks to retrieve (default 6).
 - **`out`** (string, optional): Override the output path.
 - **`vault`** (string, optional): Scope the whole session to `hoardcore_data/NAME/`.
