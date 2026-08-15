@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HoardCore v0.9.0 - Research toolkit for AI agents: retrieval & deep research.
+HoardCore v0.9.2 - Research toolkit for AI agents: retrieval & deep research.
 Ingests HTML, PDF, DOCX, EPUB, and TXT into a persistent, searchable SQLite Vault.
 Hybrid retrieval fuses FTS5 keyword search with vector search (RRF), a
 web-discovery action feeds the crawler from a live search query, and an
@@ -13,11 +13,13 @@ Usage:
     python hoardcore.py _ --action discover --query "negros occidental renewable energy" --limit 5
     python hoardcore.py _ --action search --query "solar" --mode fast   # FTS-only
     python hoardcore.py _ --action search --query "solar" --mode hybrid # force vector+RRF
+    python hoardcore.py _ --action verify --claim "..." --hint          # nearest-vault coaching
     python hoardcore.py _ --action check --migrate  # rebuild vault at 16 KB pages
+    python hoardcore.py _ --action stats            # vault summary
 """
 from __future__ import annotations
 
-__version__ = "0.9.1"
+__version__ = "0.9.2"
 
 import argparse
 import asyncio
@@ -36,11 +38,13 @@ import sys
 import threading
 import time
 import tomllib
+import unicodedata
 import zipfile
 from array import array
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from itertools import combinations
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -344,6 +348,48 @@ def is_ad_tracking_url(url: str) -> bool:
     # Explicit ad metadata carried in the query string.
     return any(k in query for k in ("ad_domain=", "ad_provider=", "ad_type=",
                                     "ad_url=", "ad_clickid=", "bct=ad"))
+
+
+def normalize_claim(text: str) -> str:
+    """Normalize a claim for verbatim matching: fold *typographic* noise only.
+
+    `verify`'s exact-phrasing gate is deliberately strict — `[V]` is only
+    meaningful if a claim appears verbatim in stored text. But strictness must
+    not extend to render artifacts: en/em dashes, curly quotes, NBSP and
+    full-width (NFKC) characters are typographic variants of the *same* claim,
+    not different ones. This folds exactly those equivalences:
+
+    - en/em/figure/horizontal-bar/minus dashes -> ASCII hyphen
+    - curly/smart quotes (single + double) -> ASCII quotes
+    - any whitespace run (incl. NBSP) -> single ASCII space
+    - NFKC full-width variants (e.g. U+FF0B fullwidth plus) -> ASCII
+
+    It deliberately does NOT add/remove tokens: "400K" stays distinct from
+    "400K+" and reordered words never match. Typography-blind, semantics-strict.
+    """
+    if not text:
+        return ""
+    t = text.translate({
+        0x2010: "-", 0x2011: "-", 0x2012: "-", 0x2013: "-",
+        0x2014: "-", 0x2015: "-", 0x2212: "-",
+        0x2018: "'", 0x2019: "'", 0x201A: "'", 0x201B: "'",
+        0x201C: '"', 0x201D: '"', 0x201E: '"', 0x201F: '"',
+    })
+    # NFKC folds full-width variants (FVPLUS "+"/FVHYPHEN) onto ASCII, and
+    # unifies look-alike punctuation; do it on the translated string.
+    norm = unicodedata.normalize("NFKC", t)
+    return re.sub(r"\s+", " ", norm).strip().lower()
+
+
+def _nearest_phrase_probe(text: str, needle: str) -> tuple[float, int, int]:
+    """Best fuzzy overlap of `needle` in `text`; returns (ratio, start, size)."""
+    hay = normalize_claim(text)
+    if not hay:
+        return (0.0, 0, 0)
+    m = SequenceMatcher(None, needle, hay).find_longest_match(
+        0, len(needle), 0, len(hay))
+    ratio = (2.0 * m.size) / (len(needle) + len(hay)) if (len(needle) + len(hay)) else 0.0
+    return (ratio, m.b, m.size)
 
 
 def _simhash_bucket_patterns(k: int) -> list[int]:
@@ -1392,6 +1438,46 @@ class VaultManager:
         else:
             logger.error(f"Vault integrity FAIL ({errors} error(s) across {checks} checks).")
         return errors == 0
+
+    def stats(self) -> dict[str, Any]:
+        """High-level vault statistics for the `stats` action.
+
+        Counts sources (distinct URLs), document versions, chunks, embedded
+        vectors, schema version and page size — the numbers a promotion or
+        maintenance pass needs to quantify the vault. Uses single aggregate
+        queries (B4 N+1 discipline).
+        """
+        with self._db() as (_conn, cursor):
+            sources = cursor.execute(
+                "SELECT COUNT(DISTINCT url) FROM documents").fetchone()[0]
+            doc_versions = cursor.execute(
+                "SELECT COUNT(*) FROM documents").fetchone()[0]
+            chunks = cursor.execute(
+                "SELECT COUNT(*) FROM chunks_fts").fetchone()[0]
+            vectors = cursor.execute(
+                "SELECT COUNT(*) FROM chunk_vectors").fetchone()[0]
+            schema_version = cursor.execute(
+                "PRAGMA user_version").fetchone()[0]
+            page_size = cursor.execute(
+                "PRAGMA page_size").fetchone()[0]
+        try:
+            db_bytes = os.path.getsize(self.db_path)
+        except OSError:
+            db_bytes = 0
+        dim = getattr(self.embeddings, "dim", None) or 0
+        return {
+            "vault": self.vault_name,
+            "sources": sources,
+            "doc_versions": doc_versions,
+            "chunks": chunks,
+            "vectors": vectors,
+            "dim": dim,
+            "mode": str(getattr(self.embeddings, "mode", "")),
+            "schema_version": schema_version,
+            "page_size": page_size,
+            "db_bytes": db_bytes,
+            "preferred_name": self.vault_name,
+        }
 
     def migrate_page_size(self, target: int | None = None) -> bool:
         """Rewrite the vault DB at a different SQLite page size via `VACUUM INTO`.
@@ -3372,19 +3458,24 @@ class HoardCore:
 
         This makes the [V] honor-system tag machine-checkable: the caller can
         refuse to tag [V] unless this returns "verified".
+
+        Comparison is strict but typography-blind (see `normalize_claim`):
+        en/em dashes, smart quotes, NBSP and full-width Unicode are folded so a
+        typesetter's dash choice never flips the verdict — while token identity
+        ("400K" vs "400K+") and word order are still enforced.
         """
         if not claim or not claim.strip():
             return "unverified"
 
         # 1) Verbatim check against ALL stored chunk text (ground truth),
-        #    not just the top retrieval hits. Normalize whitespace on BOTH
-        #    sides: stored chunks may split a phrase across line breaks
-        #    (e.g. "is \ndefined"), so a raw LIKE against a single-space
-        #    needle would miss verbatim text. Instead, use the LIKE only as
-        #    a cheap candidate pre-filter (with whitespace runs widened to %
-        #    so newlines/multi-space pass) and confirm the exact normalized
-        #    needle in Python.
-        needle = re.sub(r"\s+", " ", claim.strip()).lower()
+        #    not just the top retrieval hits. Normalize on BOTH sides: stored
+        #    chunks may split a phrase across line breaks (e.g. "is \ndefined")
+        #    or use typographic dashes/quotes, so a raw LIKE against the raw
+        #    needle would miss verbatim text. Use the LIKE only as a cheap
+        #    candidate pre-filter — with whitespace *and* typographic variants
+        #    widened to % so newlines/dashes/quotes pass — and confirm the
+        #    exact `normalize_claim`'d needle in Python.
+        needle = normalize_claim(claim)
         candidates: list[str] = []
         with self.vault._db() as (_conn, cursor):
             # Slide a 60-char window across the needle so a claim whose
@@ -3400,18 +3491,21 @@ class HoardCore:
             for fragment in fragments:
                 if not fragment.strip():
                     continue
-                # Escape LIKE wildcards in the fragment itself before widening
-                # spaces; then widen whitespace runs to % so stored line breaks
-                # pass the pre-filter.
+                # Escape LIKE wildcards in the fragment itself before widening.
                 like_fragment = fragment.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
-                like_fragment = re.sub(r"\s+", "%", like_fragment)
+                # Widen whitespace runs AND the typographic equivalences to %:
+                # stored text may use an en-dash where the claim has a hyphen,
+                # curly quotes where the claim has straight ones, etc. The
+                # Python confirm below is authoritative, so over-widening here
+                # only costs a few extra candidate rows, never a wrong verdict.
+                like_fragment = re.sub(r"[\s\-'\u2010\u2011\u2012\u2013\u2014\u2015\u2212\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u201f]+", "%", like_fragment)
                 cursor.execute(
                     "SELECT text FROM chunks_fts WHERE lower(text) LIKE ? ESCAPE '\\'",
                     (f"%{like_fragment}%",)
                 )
                 candidates = [row[0] for row in cursor.fetchall()]
                 for raw in candidates:
-                    if needle in re.sub(r"\s+", " ", raw.lower()):
+                    if needle in normalize_claim(raw):
                         return "verified"
 
         # 2) FTS5 keyword overlap: build a proper AND-of-phrases MATCH for the
@@ -3459,6 +3553,67 @@ class HoardCore:
                     if top_all <= floor - margin:
                         return "partial"
         return "unverified"
+
+    def verify_hint(self, claim: str, recall: int = 5) -> str | None:
+        """Coaching message for a non-verified claim: the nearest vault phrase.
+
+        `verify` is exact-phrasing by design: on PARTIAL/UNVERIFIED the caller
+        is expected to re-express the claim in the source's own words. This
+        returns a ready-to-print hint showing the closest stored phrase (best
+        fuzzy overlap versus the normalized claim) plus a reformulation nudge,
+        so the denial reads as an instruction instead of a dead-end. None when
+        the vault has nothing remotely similar.
+        """
+        if not claim or not claim.strip():
+            return None
+        needle = normalize_claim(claim)
+        if not needle:
+            return None
+        fts = self.vault._fts_query(claim)
+        top: list[str] = []
+        if fts:
+            with self.vault._db() as (_conn, cursor):
+                cursor.execute(
+                    "SELECT text FROM chunks_fts WHERE chunks_fts MATCH ? "
+                    "ORDER BY rank LIMIT ?",
+                    (fts, recall),
+                )
+                top = [row[0] for row in cursor.fetchall()]
+                # Also pull the oldest rows: a fresh spin-off vault may have
+                # better prose in low-ranked chunks than the top FTS hit.
+                cursor.execute(
+                    "SELECT text FROM chunks_fts ORDER BY rowid LIMIT ?",
+                    (recall,),
+                )
+                top.extend(row[0] for row in cursor.fetchall())
+        best: tuple[float, str] | None = None  # (ratio, phrase)
+        for raw in top:
+            if not raw or raw.isspace():
+                continue
+            ratio, _start, size = _nearest_phrase_probe(raw, needle)
+            if size == 0:
+                continue
+            phrase = normalize_claim(raw)
+            best = (ratio, phrase) if best is None or ratio > best[0] else best
+        if best is None:
+            return None
+        ratio, phrase = best
+        # Trim the normalized phrase to a tight window around the fuzzy match.
+        m = SequenceMatcher(None, needle, phrase).find_longest_match(
+            0, len(needle), 0, len(phrase))
+        lo_full = max(0, m.b - 40)
+        hi_full = min(len(phrase), m.b + m.size + 40)
+        window = phrase[lo_full:hi_full]
+        shown = (("…" if lo_full > 0 else "") + window +
+                 ("…" if hi_full < len(phrase) else ""))
+        matched = window[m.b - lo_full:m.b - lo_full + m.size] if m.size else ""
+        return (
+            f"  nearest vault phrase (overlap {ratio:.0%}):\n"
+            f"    “{shown}”\n"
+            f"  — reword your claim to match the source text exactly"
+            + (f" (the vault writes {matched!r} here)" if matched and matched not in needle else "")
+            + "\n  — then re-run this verify."
+        )
 
     async def _process_document(self, url: str, strategy: str, force_refresh: bool) -> tuple[list[Chunk], dict[str, Any]]:
         """
@@ -3796,6 +3951,34 @@ class HoardCore:
 # 9. CLI ENTRYPOINT
 # =============================================================================
 
+def citation_list(sources: list[str] | dict[str, str]) -> str:
+    """Module-level alias for the artifacts **Source Links / Citations** block.
+
+    Accepts either a list of source URLs or a ``{label: url}`` mapping and
+    renders the exact ``[#N] <label> — <url>`` lines every artifact should close
+    with (the provenance tags use ``[V#N]``/``[E#N]`` -> ``[#N]``). This makes
+    ``hoardcore.citation_list(urls)`` available at module level exactly as
+    skill.md documents it, without constructing a manager.
+    """
+    return HoardCore.citation_list(sources)
+
+
+def write_artifact(filename: str, content: str) -> str:
+    """Module-level convenience for encoding a research deliverable into the
+    day-sorted artifacts directory (``hoardcore.write_artifact`` per skill.md).
+
+    Constructs a default HoardCore instance so the vault config (artifacts
+    dir, day-sorting) is honored; returns the absolute path written.
+    """
+    return HoardCore().write_artifact(filename, content)
+
+
+def organize_artifacts_by_day() -> list[str]:
+    """Module-level convenience: move any legacy flat artifacts/ files into
+    ``artifacts/YYYY-MM-DD/`` subfolders by mtime (``hoardcore.organize_artifacts_by_day``).
+    """
+    return HoardCore().organize_artifacts_by_day()
+
 _EXAMPLES = (
     "\nExamples:\n"
     "  python hoardcore.py https://example.com --action scrape\n"
@@ -3808,7 +3991,9 @@ _EXAMPLES = (
     "  python hoardcore.py _ --action research --query 'negros economy' --out artifacts/report.md\n"
     "  python hoardcore.py _ --action research --query 'sleep research' --vault sleep\n"
     "  python hoardcore.py _ --action verify --claim 'the Epoch doubling time is 6 months'\n"
+    "  python hoardcore.py _ --action verify --claim '500-2000 stars' --hint  # nearest-vault coaching\n"
     "  python hoardcore.py _ --action check   # verify vault integrity\n"
+    "  python hoardcore.py _ --action stats   # sources/chunks/vectors summary\n"
 )
 
 
@@ -3831,15 +4016,27 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action", choices=["scrape", "crawl", "search", "ingest",
-                             "discover", "research", "verify", "check"],
+                             "discover", "research", "verify", "check", "stats"],
         default="scrape", help="Action to run (default: scrape).",
     )
     parser.add_argument(
         "--strategy", choices=["fast", "balanced", "aggressive"], default=None,
         help="Fetch strategy (default: network.default_strategy).",
     )
-    parser.add_argument("--query", default=None, help="Search/research query.")
-    parser.add_argument("--claim", default=None, help="Claim to verify.")
+    parser.add_argument(
+        "--query", default=None, help="Search/research query."
+    )
+    parser.add_argument(
+        "--claim", default=None,
+        help="Claim to verify verbatim against the vault "
+             "(exact phrasing; typographic variants like en/em dashes and "
+             "curly quotes are folded).",
+    )
+    parser.add_argument(
+        "--hint", action="store_true",
+        help="With --action verify on a denied claim: print the nearest vault "
+             "phrase so the claim can be reworded to the source's own words.",
+    )
     parser.add_argument("--discover", type=int, default=None,
                         help="Results to discover+ingest for research.")
     parser.add_argument("--recall", type=int, default=6,
@@ -3906,6 +4103,13 @@ async def main(argv: list[str] | None = None) -> None:
         result = scraper.verify_claim(claim)
         print(f"VERIFY: {result.upper()}")
         print(f"claim: {claim}")
+        # On denial, coach (--hint): show the nearest vault phrase so the agent
+        # can re-express the claim in the source's own words and re-run (the
+        # exact-phrasing contract), instead of dead-ending.
+        if args.hint and result != "verified":
+            hint = scraper.verify_hint(claim)
+            if hint:
+                print(hint)
         # exit codes: 0=verified, 1=partial, 2=unverified (CI-wireable)
         sys.exit(0 if result == "verified" else (1 if result == "partial" else 2))
 
@@ -3915,6 +4119,19 @@ async def main(argv: list[str] | None = None) -> None:
             print(f"  🔧 Page size: {'migrated to 16 KB' if migrated else 'already at target'}")
         ok = scraper.vault.verify_vault()
         sys.exit(0 if ok else 1)
+
+    if action == "stats":
+        st = scraper.vault.stats()
+        print(f"  Vault:      {st['vault'] or '(default)'}")
+        print(f"  Sources:    {st['sources']} distinct URLs")
+        print(f"  Versions:   {st['doc_versions']} document rows")
+        print(f"  Chunks:     {st['chunks']}")
+        print(f"  Vectors:    {st['vectors']}")
+        print(f"  Embedding:  {st['mode']}, dim {st['dim']}")
+        print(f"  Schema:     v{st['schema_version']} | page {st['page_size']} B")
+        mb = st['db_bytes'] / (1024 * 1024)
+        print(f"  DB size:    {mb:.1f} MiB")
+        sys.exit(0)
 
     result = await scraper.fetch(
         url, action=action, strategy=strategy,

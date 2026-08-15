@@ -3,6 +3,33 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] - 2026-08-15
+
+### Added
+- **Typography-blind exact-phrasing verification.** `verify` now folds
+  *typographic* noise only — en/em/figure/horizontal-bar/minus dashes, smart
+  quotes, NBSP, and NFKC full-width variants — so a typesetter's dash never
+  flips a verdict. Token identity (`400K` vs `400K+`) and word order are still
+  enforced, preserving the exact-phrasing `[V]` contract.
+- **`verify --hint` coaching.** On a `PARTIAL`/`UNVERIFIED` denial, prints the
+  nearest stored phrase (fuzzy overlap vs. the normalized claim) with a
+  "reword your claim to match the source text" nudge — turning a dead-end
+  denial into the reformulation loop the exact-phrasing gate is designed for.
+- **`--action stats`.** One-command vault summary: distinct sources, document
+  versions, chunks, vectors, embedding mode/dim, schema version, page size,
+  and DB size — the numbers a promotion/maintenance pass needs.
+- **Module-level artifact helpers.** `hoardcore.citation_list(urls)`,
+  `hoardcore.write_artifact(...)`, and `hoardcore.organize_artifacts_by_day()`
+  now exist at module level exactly as `skill.md` documents them (previously
+  only `HoardCore.citation_list` existed as an instance/static method, so the
+  documented call raised `AttributeError`).
+
+### Fixed
+- **`verify` false negatives from typography** — e.g. `500–2,000` (en-dash) vs
+  `500-2,000` (hyphen) previously reported `UNVERIFIED`; now `VERIFIED` (A6).
+- **Doc/code drift on artifacts helpers** — the skill-documented module-level
+  `citation_list`/`write_artifact`/`organize_artifacts_by_day` imports work.
+
 ## [0.9.1] - 2026-08-15
 
 ### Fixed

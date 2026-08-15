@@ -599,6 +599,73 @@ def test_verify_claim_partial_requires_strong_bm25(vault, make_chunk):
     assert hc_inst.verify_claim("on the table under the door behind everyone") == "unverified"
 
 
+def test_verify_claim_folds_typographic_dashes(vault, make_chunk):
+    """A6 regression: '500–2,000' (en-dash) must verify against the same claim
+    stored with an ASCII hyphen — typography is a render artifact, not a
+    wording difference. Folding must NOT loosen token identity though."""
+    text = "A successful Product Hunt launch can deliver 500-2,000 GitHub stars in 48 hours"
+    vault.index_document("https://launch.test/1", [make_chunk(text)], {})
+    hc_inst = object.__new__(hc.HoardCore)
+    hc_inst.vault = vault
+    # en-dash + curly-quote variants of the exact same claim verify:
+    assert hc_inst.verify_claim(
+        "A successful Product Hunt launch can deliver 500\u20132,000 GitHub stars in 48 hours"
+    ) == "verified"
+    # Nested typographic variants also verify (straight quote need, given
+    # apex im) — the em-dash standing in for the stored hyphen is folded:
+    assert hc_inst.verify_claim(
+        "launch can deliver 500\u20142,000 GitHub"
+    ) == "verified"
+
+
+def test_verify_claim_still_rejects_token_change(vault, make_chunk):
+    """A6 guard: typographic folding must not become fuzzy matching — '400K'
+    stays distinct from '400K+' and reordered words never verify."""
+    text = "TLDR AI has 400K+ subscribers, part of the TLDR newsletter family"
+    vault.index_document("https://tldr.test/1", [make_chunk(text)], {})
+    hc_inst = object.__new__(hc.HoardCore)
+    hc_inst.vault = vault
+    # exact phrasing (verbatim) verifies...
+    assert hc_inst.verify_claim("TLDR AI has 400K+ subscribers") == "verified"
+    # ...but the missing '+' is a different claim: not verbatim -> not verified.
+    assert hc_inst.verify_claim("TLDR AI has 400K subscribers") != "verified"
+
+
+def test_verify_hint_surfaces_nearest_phrase(vault, make_chunk):
+    """Coaching: a denied claim gets a hint pointing at the source's actual
+    wording (the reformulation contract), not a dead-end."""
+    text = "The vault stores 640K+ tokens of source text for recall"
+    vault.index_document("https://hint.test/1", [make_chunk(text)], {})
+    hc_inst = object.__new__(hc.HoardCore)
+    hc_inst.vault = vault
+    hint = hc_inst.verify_hint("the vault stores 640K tokens of source text")
+    assert hint is not None
+    assert "640K+" in hint or "640k+" in hint
+    assert "reword" in hint
+
+
+def test_normalize_claim_folds_typography_only():
+    """normalize_claim folds punctuation/whitespace variants but preserves
+    token identity and order (the exact-phrasing contract)."""
+    assert hc.normalize_claim("\u201cHi\u201d \u2014 it\u2019s 500\u20132,000") == \
+        '"hi" - it\'s 500-2,000'
+    assert hc.normalize_claim("400K") != hc.normalize_claim("400K+")
+    assert hc.normalize_claim("solar farm") != hc.normalize_claim("farm solar")
+
+
+def test_vault_stats_counts_sources_and_chunks(vault, make_chunk):
+    """stats() returns aggregate vault numbers (sources/chunks/vectors)."""
+    for url, txt in [("https://a.test/1", "solar farm megawatt capacity"),
+                     ("https://b.test/2", "sleep duration 7 to 9 hours"),
+                     ("https://c.test/3", "bokashi compost in a bucket")]:
+        vault.index_document(url, [make_chunk(txt)], {})
+    st = vault.stats()
+    assert st["sources"] == 3
+    assert st["doc_versions"] == 3
+    assert st["chunks"] == 3
+    assert st["page_size"] >= 4096
+
+
 def test_backfill_detects_stale_dim_even_when_first_row_is_fresh(vault, make_chunk):
     """A5 regression: stale-dim detection samples ALL rows, not just rowid 1.
     A mixed vault (one fresh vec + one stale vec) must rebuild the stale row."""

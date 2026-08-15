@@ -67,3 +67,37 @@ def test_cli_check_creates_vault_and_passes(tmp_path, monkeypatch):
     )
     assert res.returncode == 0, res.stderr
     assert (tmp_path / "data" / "vault.db").exists()
+
+
+def test_cli_stats_action_reports_vault_counts(tmp_path):
+    """`--action stats` on a fresh vault exits 0 and prints a source count."""
+    (tmp_path / "hoardcore.toml").write_text(
+        f"[storage]\nroot_dir = '{tmp_path / 'data'}'\n\n"
+        "[embeddings]\nenabled = true\nmode = 'sparse'\ndim = 64\n",
+        encoding="utf-8",
+    )
+    res = subprocess.run(
+        [sys.executable, str(MODULE), "_", "--action", "stats"],
+        capture_output=True, text=True, timeout=120,
+        cwd=str(tmp_path),
+    )
+    assert res.returncode == 0, res.stderr
+    assert "Sources:" in res.stdout
+
+
+def test_cli_verify_hint_flag_errors_without_claim():
+    """`--hint` still requires --claim (exit 2), not a silent no-op."""
+    res = _run("_", "--action", "verify", "--hint")
+    assert res.returncode == 2
+    assert "--claim" in (res.stdout + res.stderr)
+
+
+def test_module_level_citation_list_is_exported():
+    """skill.md documents hoardcore.citation_list(urls); it must exist as a
+    top-level module function (was AttributeError before the fix)."""
+    import hoardcore as hc
+    urls = ["https://a.example/1", "https://b.example/2"]
+    block = hc.citation_list(urls)
+    assert "## Source Links / Citations" in block
+    assert "[#1] https://a.example/1" in block
+    assert "[#2] https://b.example/2" in block

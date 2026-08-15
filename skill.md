@@ -156,13 +156,20 @@ Use this to machine-check a claim against the vault before you tag it `[V]`.
 - **`action`** (string, required): Set to `"verify"`.
 - **`claim`** (string, required): The claim to check (e.g., `"the Epoch doubling time is 6 months"`).
 - **`recall`** (int, optional): Chunks to consider (default 5).
+- **Exact phrasing, typography-blind.** Comparison folds *typographic* noise
+  only — en/em dashes, smart quotes, NBSP, full-width Unicode — so a
+  typesetter's dash never flips a verdict, while token identity ("400K" vs
+  "400K+") and word order are still enforced. A `PARTIAL`/`UNVERIFIED` result
+  is an instruction to re-express the claim in the source's own words; pass
+  `--hint` to print the nearest vault phrase as a rewording target.
 - **Exit codes (CI-wireable):** `0` = `VERIFIED` (the normalized claim appears
   verbatim in vault text, tested via a sliding 60-char window), `1` = `PARTIAL`
   (the top FTS5 hit is a strong all-term BM25 match — it measurably beats the
   vault's single-term coincidence floor, so the bar is corpus-scaled, not a
   fixed absolute rank — but no verbatim hit), `2` = `UNVERIFIED`. Refuse to
   emit a `[V]` tag unless this returns `0` — that is what makes the provenance
-  tag machine-verifiable.
+  tag machine-verifiable. Never bypass a denial with manual SQL: reword the
+  claim to match the vault's stored wording, then re-run.
 
 CLI form:
 
@@ -248,6 +255,20 @@ CLI form:
 
 ```
 venv/bin/python hoardcore.py _ --action check --migrate
+```
+
+### Action: "stats"
+Use this to summarize a vault in one command — the numbers a promotion or
+maintenance pass needs (sources, chunks, vectors, embedding dim/mode, schema
+version, page size, DB size). Exits `0`.
+
+- **`url`** (string, optional): `_` placeholder.
+- **`action`** (string, required): Set to `"stats"`.
+
+CLI form:
+
+```
+venv/bin/python hoardcore.py _ --action stats --vault growth
 ```
 
 ## Workflow Guidance

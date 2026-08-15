@@ -425,16 +425,17 @@ hoardcore [URL] [options]
 | `ingest` | Index an explicit URL list given as a comma/space separated `--urls` string. |
 | `discover` | Web-search `--query`, ingest the top `--limit` results. |
 | `research` | Run `discover -> ingest -> recall -> emit` (memory-first: live DISCOVER is skipped when the vault already has a high-confidence answer, unless `--no-answer-first`); writes to `--out` or a day-sorted `artifacts/YYYY-MM-DD/grounding_context.md`. |
-| `verify` | Programmatic provenance audit: confirm `--claim` against vault text (see below). |
+| `verify` | Programmatic provenance audit: confirm `--claim` against vault text (exact phrasing, typography-blind; `--hint` prints the nearest vault phrase on denial). |
 | `check` | Run a three-phase vault integrity check (content hashes, counts, vector dims). |
+| `stats` | Vault summary in one command: sources, chunks, vectors, embedding dim/mode, schema version, DB size. |
 
-Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `check`) does not need a URL.
+Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `check`, `stats`) does not need a URL.
 
 ### Flags
 
 | Flag | Description |
 |---|---|
-| `--action ACTION` | One of `scrape`, `crawl`, `search`, `ingest`, `discover`, `research`, `verify`, `check`. |
+| `--action ACTION` | One of `scrape`, `crawl`, `search`, `ingest`, `discover`, `research`, `verify`, `check`, `stats`. |
 | `--strategy S` | `fast`, `balanced`, or `aggressive` (default from config). |
 | `--query Q` | Required for `search`, `discover`, `research`. |
 | `--limit N` | Web results to ingest for `discover`. |
@@ -461,11 +462,11 @@ python hoardcore.py _ --action verify --claim "the Epoch doubling time is 6 mont
 
 | Result | Meaning | Exit code |
 |---|---|---|
-| `VERIFIED` | The normalized claim appears verbatim in stored chunk text (a sliding 60-char window is tested across the whole claim, so a distinctive tail still verifies even if the opening is generic) | `0` |
+| `VERIFIED` | The normalized claim appears verbatim in stored chunk text (a sliding 60-char window is tested across the whole claim, so a distinctive tail still verifies even if the opening is generic; comparison is *typography-blind* — en/em dashes, smart quotes and full-width Unicode are folded so a typesetter's dash never flips a verdict) | `0` |
 | `PARTIAL` | The top all-terms FTS5 hit **measurably beats the vault's coincidence floor** (the best rank any single claim term achieves alone, by a corpus-scaled relative margin), but there is no verbatim match; co-occurrence of a few common words in unrelated boilerplate does *not* count as partial | `1` |
 | `UNVERIFIED` | No vault support for the claim | `2` |
 
-The verbatim stage checks the full normalized claim (not just a fixed-size prefix) against all candidate rows — it does not truncate candidates to the first 100. Agents and CI can branch on the exit code: refuse to emit a `[V]` tag unless `verify` returns `0`.
+The verbatim stage checks the full normalized claim (not just a fixed-size prefix) against all candidate rows — it does not truncate candidates to the first 100. Agents and CI can branch on the exit code: refuse to emit a `[V]` tag unless `verify` returns `0`. A `PARTIAL`/`UNVERIFIED` denial is an instruction to re-express the claim in the source's own words — pass `--hint` to print the nearest vault phrase as the rewording target.
 
 ### Configuration file (`hoardcore.toml`)
 
