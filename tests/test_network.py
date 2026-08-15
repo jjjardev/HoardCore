@@ -216,3 +216,54 @@ def test_research_emits_citations_block(tmp_path, monkeypatch):
         content = f.read()
     assert "## Source Links / Citations" in content
     assert f"[#1] {url} — {url}" in content
+
+
+def test_research_answer_first_skips_discovery(tmp_path, monkeypatch):
+    """Adaptive-RAG routing: an existing high-confidence memory hit must
+    bypass live DISCOVER entirely; the grounding file flags it."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+
+    scraper = hc.HoardCore()
+    hit = hc.Chunk(text="cached high-confidence answer body",
+                   metadata={"confidence": "high",
+                             "source_url": "https://memory.test/x"})
+    scraper.vault.search_vault = lambda *a, **k: [hit]
+
+    async def boom(*args, **kwargs):
+        raise AssertionError("live DISCOVER must be skipped on a high-confidence hit")
+
+    scraper._discover_and_ingest = boom
+    out = os.path.join(str(tmp_path), "grounding.md")
+    path = asyncio.run(scraper.research("proxy auth may be needed",
+                                        out_path=out, discover=2, recall=3))
+    assert path is not None
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    assert "Answer-first recall" in content
+    assert "cached high-confidence answer body" in content
+
+
+def test_research_answer_first_disabled_runs_discovery(tmp_path, monkeypatch):
+    """--no-answer-first forces live DISCOVER even when memory has a hit."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+
+    scraper = hc.HoardCore()
+    hit = hc.Chunk(text="cached high-confidence answer body",
+                   metadata={"confidence": "high",
+                             "source_url": "https://memory.test/x"})
+    scraper.vault.search_vault = lambda *a, **k: [hit]
+    captured = {}
+
+    async def fake_discover(query, max_results, strategy, force_refresh):
+        captured["ran"] = True
+        return []
+
+    scraper._discover_and_ingest = fake_discover
+    out = os.path.join(str(tmp_path), "grounding.md")
+    path = asyncio.run(scraper.research("proxy auth may be needed",
+                                        out_path=out, discover=2, recall=3,
+                                        answer_first=False))
+    assert path is not None
+    assert captured.get("ran") is True

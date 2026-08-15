@@ -3,6 +3,46 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Adaptive answer-first routing for `research`.** The agentic loop now queries
+  the existing vault *before* touching the web (`research.answer_first`, default
+  true): a high-confidence memory hit for a repeat question skips live DISCOVER
+  entirely, and the grounding file is flagged "Answer-first recall". New
+  `--no-answer-first` forces fresh DISCOVER regardless. When no high-confidence
+  answer exists, the loop is unchanged (`DISCOVER -> INGEST -> RECALL -> EMIT`).
+- **Low-confidence filtering at EMIT** (`research.filter_low`, default true).
+  Confidence-`low` chunks are dropped from a recall set whenever stronger
+  (non-low) chunks remain; a lone low hit is still returned rather than nothing.
+- **Matryoshka dimension truncation surfaced in config** (`embeddings.mrl_dims`,
+  default 0 = full model dimension). Dense vectors can be stored at a truncated
+  dimension; the existing dimension-migration backfill rebuilds stale rows.
+- **Near-duplicate chunk filter made configurable** (`indexer.near_dedup`,
+  default false, and `indexer.near_dedup_threshold`). Optionally drops simhash
+  near-duplicate chunks at ingest; off by default to preserve cross-source
+  corroborating text as evidence.
+- **New `[research]` TOML section** and config plumbing (`DEFAULT_CONFIG`,
+  `_defaults`, `hoardcore.toml`) for the above.
+- **Tests** covering answer-first routing (skip path and forced discovery),
+  low-confidence filtering, MRL truncation, near-dedup (on/off), and simhash
+  SQLite safety.
+
+### Changed
+- **README and `skill.md` updated.** The `research` action reference, the
+  Hardcore Research Loop, and the CLI/config tables now document answer-first
+  routing, `--no-answer-first`, `mrl_dims`, `near_dedup`, and `filter_low`.
+- **Two dense-mode tests hardened** to pin `mrl_dims=0` so they no longer depend
+  on the machine's `hoardcore.toml`.
+
+### Fixed
+- **Simhash overflow broke ingest with near-dedup enabled.** `_simhash()`
+  produced a full unsigned 64-bit value; when bit 63 was set it exceeded
+  SQLite's signed INTEGER maximum, raising "Python int too large to convert to
+  SQLite INTEGER" and failing to ingest ~44% of documents. The top bit is now
+  forced clear so values always fit; hamming-distance comparisons are
+  unaffected because every value is masked identically.
+
 ## [0.8.3] - 2026-08-14
 
 ### Added

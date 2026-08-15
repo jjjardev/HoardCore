@@ -38,7 +38,7 @@ The user controls *effort*, not a raw number. Map these directions to budgets:
 On any research request, open with the budget line (passes × sources from the **depth preset above**, capacity the user set, or the state `x N` cap), then execute this loop without deviation:
 
 1.  **Parsing the Directive** — Identify the core concept, question, or hypothesis. Isolate the key entities and relationships.
-2.  **The Hunt (Discovery & Ingestion)** — Command HoardCore to hunt the open web for high-authority, deep primary sources (academic papers, official reports, technical docs) over shallow blog posts. Run `research` (or `discover` then `ingest`) to bring the top-ranked results into the local SQLite Vault — you are assimilating evidence, not browsing. `aggressive` is the default fetch strategy (aiohttp → curl_cffi → FlareSolverr), so anti-bot-protected sources are handled automatically.
+2.  **The Hunt (Discovery & Ingestion)** — Command HoardCore to hunt the open web for high-authority, deep primary sources (academic papers, official reports, technical docs) over shallow blog posts. Run `research` (or `discover` then `ingest`) to bring the top-ranked results into the local SQLite Vault — you are assimilating evidence, not browsing. `aggressive` is the default fetch strategy (aiohttp → curl_cffi → FlareSolverr), so anti-bot-protected sources are handled automatically. **Memory-first caveat:** by default `research` skips this phase when the vault already returns a high-confidence answer (`research.answer_first`). For a repeat question that is the fast, correct path; pass `--no-answer-first` when the task explicitly demands *new* web evidence (e.g. `deep`/`exhaustive` hunts).
 3.  **The Recall (Hybrid Retrieval)** — Query the Vault via hybrid retrieval for the **5–10 most relevant chunks** that address the core question (`--recall 5` to `--recall 10`). Cross-reference each chunk against the raw source; if a chunk feels flimsy or lacks context, discard it and retrieve another.
 4.  **The Synthesis (Artifact Emission)** — Compile the evidence into a structured **Grounding Context** file (exact source URLs, hybrid scores, distinct-sources summary) via the `research` action, then write the final synthesis report into `artifacts/`. That report is the deliverable.
 
@@ -205,6 +205,13 @@ hybrid score, and confidence band.
 - **`recall`** (int, optional): Chunks to retrieve (default 6).
 - **`out`** (string, optional): Override the output path.
 - **`vault`** (string, optional): Scope the whole session to `hoardcore_data/NAME/`.
+- **`--no-answer-first`** (flag, optional): Force fresh DISCOVER. By default
+  (`research.answer_first = true`) `research` queries the existing vault
+  *before* touching the web: a high-confidence memory hit for a repeat
+  question skips live DISCOVER entirely and the grounding file is flagged
+  "Answer-first recall". That is the right fast path for recurring
+  questions — but a `deep`/`exhaustive` hunt whose whole point is *new*
+  evidence should pass `--no-answer-first`.
 
 CLI form:
 

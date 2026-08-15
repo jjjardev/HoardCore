@@ -145,6 +145,7 @@ def test_dense_model_default_is_bge(tmp_path):
     # mutation from other tests that pin sparse).
     cfg = ConfigManager()
     cfg._config["embeddings"]["mode"] = "dense"
+    cfg._config["embeddings"]["mrl_dims"] = 0  # pin: user config may set 96+
     eng = EmbeddingsEngine(cfg)
     assert eng.mode == "dense"
     assert eng.dim == 384
@@ -156,6 +157,7 @@ def test_dense_mode_falls_back_to_sparse_when_unavailable(tmp_path):
     cfg = ConfigManager()
     cfg._config["embeddings"]["mode"] = "dense"
     cfg._config["embeddings"]["dim"] = 256
+    cfg._config["embeddings"]["mrl_dims"] = 0  # pin: user config may set 96+
     eng = EmbeddingsEngine(cfg)
     # Either dense loaded (fastembed present) or fell back to sparse; never crash.
     assert eng.dim in (256, 384)
@@ -639,3 +641,118 @@ def test_fast_path_recency_reworks_stale_first(vault, make_chunk):
     res = vault.search_vault("solar farm megawatt", limit=2, hybrid=True)
     assert all(c.metadata.get("retrieval") == "fts_fast" for c in res)
     assert res[0].metadata["source_url"] == fresh_url
+
+
+# --- Matryoshka truncation (embeddings.mrl_dims) ---
+
+def test_mrl_truncation_slices_f32_blob():
+    """_truncate_f32 keeps the first N float32 dims; oversized inputs pass
+    through unchanged."""
+    from array import array
+    vec = array('f', [0.1, 0.2, 0.3, 0.4]).tobytes()
+    truncated = hc.EmbeddingsEngine._truncate_f32(vec, 2)
+    assert truncated == array('f', [0.1, 0.2]).tobytes()
+    # dims >= length is a no-op (same blob back); 0 truncates to empty.
+    assert hc.EmbeddingsEngine._truncate_f32(vec, 4) is vec
+    assert hc.EmbeddingsEngine._truncate_f32(vec, 0) == b""
+
+
+def test_mrl_truncate_empty_passthrough():
+    from array import array
+    empty = array('f').tobytes()
+    assert hc.EmbeddingsEngine._truncate_f32(empty, 2) == empty
+
+
+def test_mrl_engine_reduces_dim_payload(tmp_path):
+    """With mrl_dims set, the dense path truncates the stored vector payload
+    before it reaches the DB: vectorize() length == mrl_dims * bytes_per_dim."""
+    import math
+    cfg = TempConfig(str(tmp_path))
+    cfg._overrides["embeddings.mode"] = "dense"
+    cfg._overrides["embeddings.mrl_dims"] = 4
+    eng = hc.EmbeddingsEngine(cfg)  # may fall back to sparse if fastembed absent
+
+    class FakeModel:
+        def embed(self, texts):
+            vec = list(range(1, 9))
+            norm = math.sqrt(sum(x * x for x in vec))
+            yield [x / norm for x in vec]
+
+    # Force the dense path with a fake 8-dim model (no network/fastembed).
+    eng.mode = "dense"
+    eng._dense = (FakeModel(), 8)
+    eng.base_dim = 8
+    eng.dim = 4
+    eng.quantize = "float32"
+    vec = eng.vectorize("solar panama photovoltaic negros")
+    assert len(vec) == 4 * 4  # 4 dims * 4 bytes
+
+
+# --- Near-duplicate chunk filter (indexer.near_dedup) ---
+
+def test_near_dedup_collapses_identical_chunks_across_urls(vault, make_chunk):
+    """With indexer.near_dedup on, a chunk identical (same simhash) to an
+    earlier one is dropped at ingest — first-write wins."""
+    vault.config._overrides["indexer.near_dedup"] = True
+    text = "the quick brown fox jumps over the lazy dog " * 6
+    vault.index_document("https://a.test/1", [make_chunk(text, url="https://a.test/1")], {})
+    vault.index_document("https://b.test/2", [make_chunk(text, url="https://b.test/2")], {})
+    with vault._db() as (_conn, cur):
+        n = cur.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0]
+    assert n == 1
+
+
+def test_near_dedup_off_keeps_both_copies(vault, make_chunk):
+    """Default (off): cross-source corroborating chunks are preserved."""
+    text = "the quick brown fox jumps over the lazy dog " * 6
+    vault.index_document("https://a.test/1", [make_chunk(text, url="https://a.test/1")], {})
+    vault.index_document("https://b.test/2", [make_chunk(text, url="https://b.test/2")], {})
+    with vault._db() as (_conn, cur):
+        n = cur.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0]
+    assert n == 2
+
+
+def test_simhash_top_bit_cleared_so_ingest_never_overflows(vault):
+    """Regression: a 64-bit simhash with bit 63 set (> 2^63-1) made SQLite
+    raise 'Python int too large to convert to SQLite INTEGER', killing ingest
+    of ~44% of docs with indexer.near_dedup on. The value must stay within the
+    signed-64-bit range, and ingest must never raise."""
+    import string
+    import random
+    random.seed(7)
+    overflow_tokens = None
+    for _ in range(500):  # guaranteed to terminate; ~50% hit per draw
+        tokens = ["".join(random.choice(string.ascii_lowercase)
+                          for _ in range(12)) for _ in range(40)]
+        # Replicate the pre-fix 64-bit vote for bit 63: positive vote would
+        # have set the top bit and overflowed SQLite's signed INTEGER.
+        votes = [0] * 64
+        for t in set(tokens):
+            h = hc._fnv1a(t.encode("utf-8"))
+            for i in range(64):
+                votes[i] += 1 if (h >> i) & 1 else -1
+        if votes[63] > 0:
+            overflow_tokens = tokens
+            break
+    assert overflow_tokens is not None
+    full = hc.VaultManager._simhash(overflow_tokens)
+    assert full <= 0x7FFFFFFFFFFFFFFF  # fits signed 64-bit <= SQLite max
+    assert overflow_tokens  # sanity: found an overflow-prone token set
+    vault.config._overrides["indexer.near_dedup"] = True
+    vault.index_document("https://overflow.test/1",
+                         [hc.Chunk(text=" ".join(overflow_tokens),
+                                   metadata={"source": "https://overflow.test/1"})],
+                         {})
+    with vault._db() as (_conn, cur):
+        n = cur.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0]
+    assert n == 1
+
+
+def test_drop_low_confidence_keeps_strong():
+    """EMIT hygiene: confidence='low' chunks drop when stronger ones remain,
+    but an all-low result still returns something (better than nothing)."""
+    low = hc.Chunk(text="low-confidence hit", metadata={"confidence": "low"})
+    high = hc.Chunk(text="high-confidence hit", metadata={"confidence": "high"})
+    assert hc.HoardCore._drop_low_confidence([low, high]) == [high]
+    assert hc.HoardCore._drop_low_confidence([low, low]) == [low, low]
+    assert hc.HoardCore._drop_low_confidence([]) == []

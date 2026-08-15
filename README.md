@@ -356,11 +356,18 @@ Queries are sanitized: operator characters (`" ( ) * ^ : -`) are stripped and to
 
 `research` is the full agentic loop in one command:
 ```
+[0/ANSWER-FIRST] optionally: serve a high-confidence existing memory hit, skip live DISCOVER
 [1/DISCOVER] web-search the question, ingest top sources
 [2/RECALL]   hybrid-retrieve the best chunks
 [3/EMIT]     write a grounding-context file
 ```
-The emitted file lists each retrieved chunk with its source URL, hybrid score, and confidence band, plus a distinct-sources summary and a **Source Links / Citations** block — ready to be injected verbatim as grounding context for an LLM.
+By default the vault is queried *before* any web traffic: a high-confidence
+memory hit for a repeat question answers immediately (no network; the
+grounding file is flagged "Answer-first recall"). Pass `--no-answer-first` to
+always run live DISCOVER. The emitted file lists each retrieved chunk with its
+source URL, hybrid score, and confidence band, plus a distinct-sources summary
+and a **Source Links / Citations** block — ready to be injected verbatim as
+grounding context for an LLM.
 
 ### Artifacts
 
@@ -398,7 +405,7 @@ hoardcore [URL] [options]
 | `search` | Query the vault with `--query`; restrict to a domain by passing its host as the positional. |
 | `ingest` | Index an explicit URL list given as a comma/space separated `--urls` string. |
 | `discover` | Web-search `--query`, ingest the top `--limit` results. |
-| `research` | Run `discover -> ingest -> recall -> emit`; writes to `--out` or `artifacts/grounding_context.md`. |
+| `research` | Run `discover -> ingest -> recall -> emit` (memory-first: live DISCOVER is skipped when the vault already has a high-confidence answer, unless `--no-answer-first`); writes to `--out` or a day-sorted `artifacts/YYYY-MM-DD/grounding_context.md`. |
 | `verify` | Programmatic provenance audit: confirm `--claim` against vault text (see below). |
 | `check` | Run a three-phase vault integrity check (content hashes, counts, vector dims). |
 
@@ -415,6 +422,7 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 | `--urls U1,U2,U3` | Explicit URL list for `ingest`. |
 | `--discover N` | Sources to discover first in `research` (default 5). |
 | `--recall N` | Chunks to retrieve in `research` (default 6). |
+| `--no-answer-first` | With `research`: always run live DISCOVER, even if the vault already has a high-confidence answer (default: `research.answer_first = true` skips it). |
 | `--out PATH` | Output file for `research` (default day-sorted `artifacts/YYYY-MM-DD/grounding_context.md`). |
 | `--claim C` | Claim text to verify for the `verify` action. |
 | `--vault NAME` | Scope the whole session to a per-topic vault (`hoardcore_data/NAME/`). |
@@ -453,9 +461,10 @@ Created automatically on first run. Key sections:
 | `[storage]` | `root_dir`, `artifacts_dir`, `artifacts_by_day`, `save_binary`, `save_raw_html`, `page_size` (16 KB default) |
 | `[parsers]` | `enable_pdf`, `enable_docx`, `enable_epub`, `extract_pdf_tables` |
 | `[crawler]` | `respect_robots`, `sitemap_limit`, `parallel_workers` |
-| `[indexer]` | `enable_fts`, `search_limit`, `parallel` (threaded ingest, default off) |
-| `[embeddings]` | `enabled`, `mode` (`sparse`/`dense`), `dense_model`, `dim`, `hybrid_search`, `top_k`, `quantize`, `fts_fast_path`, `recency_half_life_days`, `conf_high_abs`, `conf_low_abs` |
+| `[indexer]` | `enable_fts`, `search_limit`, `parallel` (threaded ingest, default off), `near_dedup` (simhash dup filter, default off), `near_dedup_threshold` |
+| `[embeddings]` | `enabled`, `mode` (`sparse`/`dense`), `dense_model`, `dim`, `mrl_dims` (Matryoshka truncation, 0 = full), `hybrid_search`, `top_k`, `quantize`, `fts_fast_path`, `recency_half_life_days`, `conf_high_abs`, `conf_low_abs` |
 | `[discovery]` | `provider`, `top_rank`, `max_retries`, `backoff_seconds` |
+| `[research]` | `answer_first` (memory-first routing, default true), `filter_low` (drop low-confidence chunks at EMIT, default true) |
 | `[chunking]` | `max_tokens`, `overlap_tokens`, `strategy` |
 | `[cache]` | `ttl_seconds` |
 
@@ -564,7 +573,7 @@ make clean              # wipe vault, caches, and config
 
 ```bash
 venv/bin/python -m pip install -e ".[test]"
-venv/bin/python -m pytest tests/ -v     # 75 tests
+venv/bin/python -m pytest tests/ -v     # 84 tests
 ```
 
 ### Code standards

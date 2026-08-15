@@ -144,17 +144,31 @@ parallel_workers = 5
 enable_fts = true
 search_limit = 20
 # parallel = false        # threaded ingest for large batches (off by default)
+near_dedup = false        # simhash near-duplicate chunk filter (off: preserves
+                          # cross-source corroborating text as evidence)
+near_dedup_threshold = 3  # hamming-distance cutoff for a near-dup block (0-64)
 
 [embeddings]
 enabled = true
 mode = "dense"           # dense = ONNX sentence-transformer (default); sparse = lightweight hash fallback
 dense_model = "BAAI/bge-small-en-v1.5"
 dim = 256                # used in sparse mode; dense uses the model's dimension
+mrl_dims = 0             # Matryoshka truncation: store only the first N dims of
+                         # dense vectors (0 = keep the full model dim). Shrinks
+                         # the vector table ~4x at 384->96; best on MRL-trained
+                         # models. Existing rows rebuild via backfill.
 hybrid_search = true       # merge FTS + vector via RRF
 top_k = 40                 # candidate pool from vector search
 quantize = "float32"       # "float32" (default) or "int8" (1 byte/dim, ~4x smaller, tiny recall cost)
 fts_fast_path = true       # skip the vector scan when FTS5 alone fills the result set (all-term AND match)
 recency_half_life_days = 0 # recency weighting in RRF: 0 = disabled; e.g. 30 halves an old hit's score per month
+
+[research]
+answer_first = true      # skip live DISCOVER when the existing vault already
+                         # returns a high-confidence hit (Adaptive-RAG style:
+                         # most recurring questions need no new retrieval)
+filter_low = true        # at EMIT, drop confidence='low' chunks whenever
+                         # stronger (non-low) chunks remain
 
 [discovery]
 enabled = true
@@ -219,8 +233,10 @@ class ConfigManager:
             "storage": {"root_dir": "hoardcore_data", "artifacts_dir": "artifacts", "artifacts_by_day": True, "save_binary": True, "save_raw_html": False, "page_size": 16384},
             "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "extract_pdf_tables": True, "enable_pdf_ocr": True},
             "crawler": {"respect_robots": True, "sitemap_limit": 500, "parallel_workers": 5},
-            "indexer": {"enable_fts": True, "search_limit": 20, "parallel": False},
-            "embeddings": {"enabled": True, "mode": "dense", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 256, "hybrid_search": True, "top_k": 40, "conf_high_abs": 0.025, "conf_low_abs": 0.020, "quantize": "float32", "fts_fast_path": True, "recency_half_life_days": 0},
+            "indexer": {"enable_fts": True, "search_limit": 20, "parallel": False,
+                        "near_dedup": False, "near_dedup_threshold": 3},
+            "embeddings": {"enabled": True, "mode": "dense", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 256, "mrl_dims": 0, "hybrid_search": True, "top_k": 40, "conf_high_abs": 0.025, "conf_low_abs": 0.020, "quantize": "float32", "fts_fast_path": True, "recency_half_life_days": 0},
+            "research": {"answer_first": True, "filter_low": True},
             "discovery": {"enabled": True, "provider": "duckduckgo_html", "max_results": 10, "top_rank": 6, "max_retries": 2, "backoff_seconds": 1.5},
             "chunking": {"max_tokens": 512, "overlap_tokens": 50, "strategy": "heading"},
             "cache": {"ttl_seconds": 86400}
@@ -248,6 +264,11 @@ def _fnv1a(data: bytes) -> int:
     return h
 
 
+def hamming64(a: int, b: int) -> int:
+    """Popcount of the XOR of two 64-bit hashes (simhash near-dup distance)."""
+    return bin(a ^ b).count("1")
+
+
 class EmbeddingsEngine:
     """Turns chunk text into fixed-dimension vectors for hybrid retrieval.
 
@@ -267,6 +288,14 @@ class EmbeddingsEngine:
         # is lazily loaded and falls back to sparse if fastembed is missing.
         self.mode = str(config.get('embeddings.mode', 'dense')).lower()
         self.dim = int(config.get('embeddings.dim', 256))
+        # Matryoshka-style dimension truncation (MRL): embed at full model
+        # dim, then STORE only the first `mrl_dims` dimensions (models trained
+        # for MRL like nomic/mxbai retain most quality when truncated; e.g.
+        # 93% retention at 12x compression on OpenAI's text-embedding-3-large).
+        # Queries are truncated the same way so cosine stays consistent; the
+        # existing backfill dimension-migration rebuilds any stale rows.
+        self.mrl_dims = int(config.get('embeddings.mrl_dims', 0) or 0)
+        self.base_dim = self.dim
         # Vector storage format: "float32" (4 bytes/dim) or "int8" (1 byte/dim,
         # ~4x smaller vault, tiny recall cost). int8 is applied to dense output
         # only — the sparse hash already produces compact normalized vectors.
@@ -280,12 +309,19 @@ class EmbeddingsEngine:
         if self.mode == 'dense':
             try:
                 self.dim = self._load_dense()
+                self.base_dim = self.dim
             except Exception as e:  # fastembed missing or model download failed
                 logger.warning(
                     f"Dense mode requested but unavailable ({e}); "
                     f"falling back to sparse lexical hashing."
                 )
                 self.mode = 'sparse'
+        if self.mode == 'dense' and self.mrl_dims > 0 and self.mrl_dims < self.base_dim:
+            self.dim = self.mrl_dims
+            logger.info(
+                f"MRL dim truncation active: storing first {self.dim} of "
+                f"{self.base_dim} embedding dims."
+            )
 
     @property
     def bytes_per_dim(self) -> int:
@@ -349,9 +385,28 @@ class EmbeddingsEngine:
         vec = self._vectorize_dense(text) if (
             self.mode == 'dense' and self._dense is not None
         ) else self._hash_vector(text)
+        if self.mode == 'dense' and self.mrl_dims > 0:
+            vec = self._truncate_f32(vec, self.dim)
         if self.mode == 'dense' and self.quantize == 'int8' and vec:
             return self._quantize_int8(vec)
         return vec
+
+    @staticmethod
+    def _truncate_f32(vec: bytes, dims: int) -> bytes:
+        """Slice a float32 vector blob to its first `dims` dimensions.
+
+        Matryoshka-style truncation for models trained for progressive dim
+        reduction (MRL). Query and stored vectors are truncated identically so
+        the cosine dimension check stays consistent. Empty/invalid payloads
+        pass through unchanged.
+        """
+        if not vec:
+            return vec
+        arr = array('f')
+        arr.frombytes(vec)
+        if len(arr) <= dims:
+            return vec
+        return array('f', arr[:dims]).tobytes()
 
     @staticmethod
     def _quantize_int8(vec: bytes) -> bytes:
@@ -681,6 +736,20 @@ class VaultManager:
                 )
             """)
 
+            # Near-duplicate index (optional, indexer.near_dedup): a 64-bit
+            # simhash per stored chunk. Exact content handling stays in
+            # chunks_ca; this catches near-identical re-crawled text whose
+            # boilerplate differs. First-write wins, like chunks_ca.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS chunks_simhash (
+                    simhash INTEGER PRIMARY KEY,
+                    chunk_hash TEXT,
+                    url TEXT,
+                    text TEXT,
+                    first_seen REAL
+                )
+            """)
+
     def _get_domain_folder(self, url: str) -> str:
         parsed = urlparse(url)
         domain = parsed.netloc or "unknown_domain"
@@ -754,6 +823,68 @@ class VaultManager:
 
         logger.info(f"Saved extracted text to {ext_dir}")
 
+    @staticmethod
+    def _simhash(tokens: list[str]) -> int:
+        """63-bit simhash over token features (FNV-1a feature hashing).
+
+        Standard weighted simhash: each token's 64-bit hash votes up/down on
+        every bit; the sign of each bit's total vote becomes the bit value.
+        The top bit is forced clear so the value always fits SQLite's *signed*
+        64-bit INTEGER — otherwise ~44% of documents fail ingest with
+        "Python int too large to convert to SQLite INTEGER". All bits still
+        vote; comparisons only ever see masked values, so hamming distances
+        between them are unaffected.
+        """
+        v = [0] * 64
+        for t in set(tokens):
+            h = _fnv1a(t.encode("utf-8"))
+            for i in range(64):
+                v[i] += 1 if (h >> i) & 1 else -1
+        out = 0
+        for i in range(63):
+            if v[i] > 0:
+                out |= 1 << i
+        return out
+
+    def _filter_near_dupes(self, cursor: sqlite3.Cursor, url: str,
+                           chunks: list[Chunk]) -> list[Chunk]:
+        """Drop chunks near-duplicate (simhash hamming <= threshold) to already
+        stored text, optionally, when config indexer.near_dedup is true.
+
+        Exact-duplicate handling stays in chunks_ca; this catches near-identical
+        re-crawled pages whose boilerplate differs. Kept chunks get their
+        simhash recorded (first-write wins). Off by default because collapsing
+        cross-source corroborating text would hide evidence — enable when
+        crawling large sites and duplicate growth matters.
+        """
+        if not self.config.get('indexer.near_dedup', False):
+            return chunks
+        threshold = int(self.config.get('indexer.near_dedup_threshold', 3))
+        existing = [row[0] for row in cursor.execute(
+            "SELECT simhash FROM chunks_simhash").fetchall()]
+        kept: list[Chunk] = []
+        for chunk in chunks:
+            tokens = EmbeddingsEngine._tokens(chunk.text)
+            if not tokens:
+                kept.append(chunk)  # no lexical features -> cannot judge
+                continue
+            sh = self._simhash(tokens)
+            if any(hamming64(sh, e) <= threshold for e in existing):
+                logger.debug(f"near-dup block (hamming<= {threshold}) for {url}")
+                continue
+            existing.append(sh)
+            c_hash = hashlib.blake2b(chunk.text.encode("utf-8"),
+                                     digest_size=32).hexdigest()
+            cursor.execute(
+                "INSERT OR IGNORE INTO chunks_simhash "
+                "(simhash, chunk_hash, url, text, first_seen) VALUES (?, ?, ?, ?, ?)",
+                (sh, c_hash, url, chunk.text, time.time()),
+            )
+            kept.append(chunk)
+        if len(kept) != len(chunks):
+            logger.info(f"near-dedup kept {len(kept)}/{len(chunks)} chunks for {url}")
+        return kept
+
     def index_document(self, url: str, chunks: list[Chunk], meta: dict[str, Any]) -> None:
         """Insert/update document and chunks in SQLite FTS.
 
@@ -767,12 +898,16 @@ class VaultManager:
 
         embed_ok = self.config.get('embeddings.enabled', True)
         domain = urlparse(url).netloc
-        content_hash = hashlib.blake2b(
-            "\n".join(c.text for c in chunks).encode("utf-8"),
-            digest_size=32,
-        ).hexdigest()
 
         with self._db() as (_conn, cursor):
+            # Optional near-duplicate filter (indexer.near_dedup) runs inside
+            # the same transaction so skipped chunks never half-persist.
+            chunks = self._filter_near_dupes(cursor, url, chunks)
+            content_hash = hashlib.blake2b(
+                "\n".join(c.text for c in chunks).encode("utf-8"),
+                digest_size=32,
+            ).hexdigest()
+
             # WORM: determine the next version for this URL (never overwrite).
             cursor.execute(
                 "SELECT COALESCE(MAX(version), 0) FROM documents WHERE url = ?",
@@ -1120,6 +1255,7 @@ class VaultManager:
         # Single writer thread commits the whole batch (dedup + vectors).
         with self._db() as (_conn, cursor):
             domain = urlparse(url).netloc
+            chunks = self._filter_near_dupes(cursor, url, chunks)
             content_hash = hashlib.blake2b(
                 "\n".join(c.text for c in chunks).encode("utf-8"),
                 digest_size=32,
@@ -2330,9 +2466,18 @@ class HoardCore:
         lines.append("")
         return "\n".join(lines)
 
+    @staticmethod
+    def _drop_low_confidence(chunks: list[Chunk]) -> list[Chunk]:
+        """EMIT hygiene: drop confidence='low' hits unless they are all we have
+        (a lone low hit is still better than nothing)."""
+        strong = [c for c in chunks
+                  if c.metadata.get('confidence') != 'low']
+        return strong or chunks
+
     async def research(self, question: str, out_path: str | None = None,
                        discover: int = 5, recall: int = 6,
-                       strategy: str | None = None) -> str | None:
+                       strategy: str | None = None,
+                       answer_first: bool | None = None) -> str | None:
         """Agentic research workflow: DISCOVER -> INGEST -> RECALL -> EMIT.
 
         Live web-searches the question (via the configured discovery provider),
@@ -2344,18 +2489,39 @@ class HoardCore:
             network.default_strategy from config. Controls the fetch chain used
             for both discovery and ingestion (e.g. "aggressive" enables the
             FlareSolverr path for anti-bot-protected sources).
+
+        answer_first: when True (config research.answer_first, default), the
+            existing vault is queried BEFORE any discovery; if a high-confidence
+            memory hit answers the question, live discovery is skipped entirely
+            (Adaptive-RAG-style routing — most recurring questions need no new
+            retrieval). Pass False to always run live discovery.
         """
         if strategy is None:
             strategy = self.config.get("network.default_strategy", "aggressive")
 
-        print(f"\n[1/DISCOVER] searching web for: {question!r} (top {discover})", flush=True)
-        await self._discover_and_ingest(question, discover, strategy, force_refresh=False)
+        if answer_first is None:
+            answer_first = bool(self.config.get('research.answer_first', True))
 
-        print(f"\n[2/RECALL] hybrid-retrieving top {recall} chunks", flush=True)
-        chunks: list[Chunk] = self.vault.search_vault(question, limit=recall, hybrid=True)
-        if not chunks:
-            print("  -> no chunks retrieved")
-            return None
+        # [0/ANSWER-FIRST] memory check before touching the web.
+        memory_chunks: list[Chunk] = self.vault.search_vault(
+            question, limit=recall, hybrid=True)
+        memory_chunks = self._drop_low_confidence(memory_chunks)
+        answered = (answer_first and memory_chunks and any(
+            c.metadata.get('confidence') == 'high' for c in memory_chunks))
+
+        if answered:
+            print(f"\n[0/ANSWER-FIRST] memory answers the question; skipping DISCOVER", flush=True)
+            chunks: list[Chunk] = memory_chunks
+        else:
+            print(f"\n[1/DISCOVER] searching web for: {question!r} (top {discover})", flush=True)
+            await self._discover_and_ingest(question, discover, strategy, force_refresh=False)
+
+            print(f"\n[2/RECALL] hybrid-retrieving top {recall} chunks", flush=True)
+            chunks = self.vault.search_vault(question, limit=recall, hybrid=True)
+            chunks = self._drop_low_confidence(chunks)
+            if not chunks:
+                print("  -> no chunks retrieved")
+                return None
 
         out_path = self.resolve_artifact_out(out_path)
         os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
@@ -2363,6 +2529,9 @@ class HoardCore:
         print("\n[3/EMIT] writing grounding context", flush=True)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(f"# Grounding Context\n## Question\n{question}\n\n")
+            if answered:
+                f.write("> Answer-first recall: live DISCOVER was skipped "
+                        "(existing high-confidence memory hit).\n\n")
             f.write(f"## Retrieved sources ({len(chunks)})\n\n")
             seen: set = set()
             for i, c in enumerate(chunks, 1):
@@ -2813,6 +2982,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="With --action check: rebuild vault at 16 KB pages.")
     parser.add_argument("--mode", choices=["fast", "hybrid"], default=None,
                         help="Force search mode (FTS-only vs vector+RRF).")
+    parser.add_argument("--no-answer-first", action="store_true",
+                        help="With --action research: always run live DISCOVER, "
+                             "even if the existing vault has a high-confidence answer.")
     return parser
 
 
@@ -2847,7 +3019,8 @@ async def main(argv: list[str] | None = None) -> None:
             sys.exit(2)
         written = await scraper.research(query, out_path=out_path,
                                          discover=discover or 5, recall=recall,
-                                         strategy=strategy)
+                                         strategy=strategy,
+                                         answer_first=not args.no_answer_first)
         sys.exit(0 if written else 1)
 
     if action == "verify":
