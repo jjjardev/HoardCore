@@ -278,6 +278,8 @@ The `fetch()` function returns a list of dictionaries. Each dictionary has:
 - **Text-only**: This tool extracts **text**. It cannot "see" images or play videos, though it will download them as binary blobs.
 - **Quality**: The `quality_score` in the metadata indicates extraction success. A low score (e.g., < 0.1) means the document was likely a scanned image or heavily garbled.
 - **Configuration**: For advanced usage (e.g., adding cookies for authentication), the user must edit the `hoardcore.toml` file. You can guide them to do this.
+- **SSRF protection is on by default** (`network.ssrf_protection = true`): fetches to private/LAN/loopback/link-local addresses and non-http(s) URLs are refused, and every redirect hop is re-validated. If research involves an internal or isolated-network target, ask the user before setting `ssrf_protection = false` in `hoardcore.toml`.
+- **Plugin system**: third-party `hoardcore.*` entry-point plugins (parsers/fetchers/providers/chunkers) are discovered automatically when installed (`plugins.enabled`, default true); a plugin chunker is selected by `chunking.strategy = "plugin.<name>"`. Lifecycle hooks (`document.ingested`, `chunk.embedded`, `discovery.completed`, `search.completed`) fire on `hoardcore.EventBus`.
 - **Dependencies**: Requires Python 3.11+ and the libraries listed in the `Makefile`. If a command fails, suggest running `make install`.
 
 ## Remember

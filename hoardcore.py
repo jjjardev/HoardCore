@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-HoardCore v0.8.3 - Research toolkit for AI agents: retrieval & deep research.
+HoardCore v0.9.0 - Research toolkit for AI agents: retrieval & deep research.
 Ingests HTML, PDF, DOCX, EPUB, and TXT into a persistent, searchable SQLite Vault.
-Hybrid retrieval fuses FTS5 keyword search with vector search (RRF), and a
-web-discovery action feeds the crawler from a live search query.
+Hybrid retrieval fuses FTS5 keyword search with vector search (RRF), a
+web-discovery action feeds the crawler from a live search query, and an
+entry-point plugin system lets third-party parsers/fetchers/providers/chunkers
+drop in without editing the module.
 
 Usage:
     python hoardcore.py <URL> --action scrape|crawl|search --query "text"
@@ -15,17 +17,20 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.8.6"
+__version__ = "0.9.0"
 
 import argparse
 import asyncio
 import hashlib
+import importlib.metadata
 import io
+import ipaddress
 import json
 import logging
 import os
 import queue
 import re
+import socket
 import sqlite3
 import sys
 import threading
@@ -98,7 +103,7 @@ class Chunk:
 # =============================================================================
 
 DEFAULT_CONFIG = """
-# HoardCore v0.8.1 Configuration
+# HoardCore v0.9.0 Configuration
 
 [general]
 timeout_seconds = 30
@@ -108,6 +113,10 @@ user_agent = "HoardCore-Bot/5.0 (LLM Agent)"
 [network]
 default_strategy = "aggressive"   # fast, balanced, aggressive
 enable_preflight = true
+ssrf_protection = true            # refuse non-public (private/local/link-local)
+                                  # and non-http(s) fetch targets, and re-check
+                                  # every redirect hop. Disable only on trusted
+                                  # isolated networks.
 
 [auth]
 cookie_string = ""
@@ -153,6 +162,13 @@ near_dedup_threshold = 3  # hamming-distance cutoff for a near-dup block (0-64)
 enabled = true
 mode = "dense"           # dense = ONNX sentence-transformer (default); sparse = lightweight hash fallback
 dense_model = "BAAI/bge-small-en-v1.5"
+                         # English (384-d) by default. Multilingual-alternatives:
+                         #   intfloat/multilingual-e5-small  (384-d — same dim as
+                         #     the default, so vectors do NOT need re-embedding)
+                         #   BAAI/bge-small-zh-v1.5     (512-d — needs backfill re-embed)
+                         # The model name participates in the embedding cache
+                         # fingerprint, so switching models can never serve
+                         # stale cross-model vectors.
 dim = 256                # used in sparse mode; dense uses the model's dimension
 mrl_dims = 0             # Matryoshka truncation: store only the first N dims of
                          # dense vectors (0 = keep the full model dim). Shrinks
@@ -163,6 +179,11 @@ top_k = 40                 # candidate pool from vector search
 quantize = "float32"       # "float32" (default) or "int8" (1 byte/dim, ~4x smaller, tiny recall cost)
 fts_fast_path = true       # skip the vector scan when FTS5 alone fills the result set (all-term AND match)
 recency_half_life_days = 0 # recency weighting in RRF: 0 = disabled; e.g. 30 halves an old hit's score per month
+reranker_model = ""        # optional cross-encoder re-ranker applied to the final
+                           # recalled set: e.g. "BAAI/bge-reranker-base" (MIT,
+                           # English) or "jinaai/jina-reranker-v2-base-multilingual"
+                           # (CC-BY-NC, ~1.1 GB). Empty = disabled (default).
+                           # Loads lazily via fastembed on first search.
 
 [research]
 answer_first = true      # skip live DISCOVER when the existing vault already
@@ -181,8 +202,17 @@ backoff_seconds = 1.5          # exponential backoff base
 
 [chunking]
 max_tokens = 512
-overlap_tokens = 50
-strategy = "heading"             # heading or paragraph
+overlap_tokens = 50                  # sliding-window overlap between chunks: N tokens
+                                     # of the previous chunk reopen the next one so
+                                     # boundary-split sentences stay in context (CJK-aware)
+strategy = "heading"                 # heading, paragraph, or plugin.<name> for a
+                                     # plugin chunker (throws back to the build-in
+                                     # pipeline on any plugin failure)
+
+[plugins]
+enabled = true                       # discover entry-point plugins (hoardcore.parsers,
+                                     # .fetchers, .providers, .chunkers). Safe to leave
+                                     # on with zero plugins installed.
 
 [cache]
 ttl_seconds = 86400              # 24 hours
@@ -191,26 +221,32 @@ ttl_seconds = 86400              # 24 hours
 class ConfigManager:
     CONFIG_PATH = "hoardcore.toml"
     _instance = None
-    _config: dict[str, Any] = {}
 
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+    def __new__(cls, config_path: str | None = None):
+        # Singleton ONLY on the default path. A per-instance config_path must
+        # build a fresh, independent instance so callers can point at a
+        # non-default file without shared-state contamination (D2).
+        if config_path is None:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+            return cls._instance
+        return super().__new__(cls)
 
-    def __init__(self):
+    def __init__(self, config_path: str | None = None):
         if not hasattr(self, '_initialized'):
+            self._config: dict[str, Any] = {}
+            self.config_path = config_path or self.CONFIG_PATH
             self._load()
             self._initialized = True
 
     def _load(self) -> None:
-        if not os.path.exists(self.CONFIG_PATH):
-            logger.info(f"Creating default config: {self.CONFIG_PATH}")
-            with open(self.CONFIG_PATH, 'w', encoding='utf-8') as f:
+        if not os.path.exists(self.config_path):
+            logger.info(f"Creating default config: {self.config_path}")
+            with open(self.config_path, 'w', encoding='utf-8') as f:
                 f.write(DEFAULT_CONFIG.strip())
 
         try:
-            with open(self.CONFIG_PATH, 'rb') as f:
+            with open(self.config_path, 'rb') as f:
                 self._config = tomllib.load(f)
         except Exception as e:
             logger.warning(f"Config parse error: {e}. Using defaults.")
@@ -228,7 +264,7 @@ class ConfigManager:
     def _defaults(self) -> dict[str, Any]:
         return {
             "general": {"timeout_seconds": 30, "max_retries": 2, "user_agent": "HoardCore/5.0"},
-            "network": {"default_strategy": "aggressive", "enable_preflight": True},
+            "network": {"default_strategy": "aggressive", "enable_preflight": True, "ssrf_protection": True},
             "auth": {"cookie_string": ""},
             "solver": {"enabled": False, "url": "http://localhost:8191/v1", "solver_timeout": 60},
             "storage": {"root_dir": "hoardcore_data", "artifacts_dir": "artifacts", "artifacts_by_day": True, "save_binary": True, "save_raw_html": False, "page_size": 16384},
@@ -236,10 +272,11 @@ class ConfigManager:
             "crawler": {"respect_robots": True, "sitemap_limit": 500, "parallel_workers": 5},
             "indexer": {"enable_fts": True, "search_limit": 20, "parallel": False,
                         "near_dedup": False, "near_dedup_threshold": 3},
-            "embeddings": {"enabled": True, "mode": "dense", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 256, "mrl_dims": 0, "hybrid_search": True, "top_k": 40, "conf_high_abs": 0.025, "conf_low_abs": 0.020, "quantize": "float32", "fts_fast_path": True, "recency_half_life_days": 0},
+            "embeddings": {"enabled": True, "mode": "dense", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 256, "mrl_dims": 0, "hybrid_search": True, "top_k": 40, "conf_high_abs": 0.025, "conf_low_abs": 0.020, "quantize": "float32", "fts_fast_path": True, "recency_half_life_days": 0, "reranker_model": ""},
             "research": {"answer_first": True, "filter_low": True},
             "discovery": {"enabled": True, "provider": "duckduckgo_html", "max_results": 10, "top_rank": 6, "max_retries": 2, "backoff_seconds": 1.5},
             "chunking": {"max_tokens": 512, "overlap_tokens": 50, "strategy": "heading"},
+            "plugins": {"enabled": True},
             "cache": {"ttl_seconds": 86400}
         }
 
@@ -389,6 +426,22 @@ class EmbeddingsEngine:
     def bytes_per_dim(self) -> int:
         """On-disk bytes per embedding dimension (4 for float32, 1 for int8)."""
         return 1 if (self.mode == 'dense' and self.quantize == 'int8') else 4
+
+    def fingerprint(self) -> str:
+        """Cache-safe fingerprint of the embedding configuration.
+
+        The content-addressable vector cache (chunk_vectors_ca) is keyed by
+        content hash; without this fingerprint a chunk embedded under an old
+        model / dimension / mrl / quantize could be served to the current
+        configuration. The fingerprint captures every knob that changes the
+        stored bytes (mode, stored dim, mrl truncation, quantize, and the
+        dense model name), so a cache hit is only ever served when it was
+        built with today's embedding settings (A9).
+        """
+        model = str(self.config.get('embeddings.dense_model', 'BAAI/bge-small-en-v1.5'))
+        parts = "|".join((self.mode, str(self.dim), self.quantize,
+                          str(self.mrl_dims), model))
+        return hashlib.blake2b(parts.encode("utf-8"), digest_size=8).hexdigest()
 
     def _load_dense(self) -> int:
         """Lazily import fastembed and load the ONNX-quantized model.
@@ -566,6 +619,14 @@ CHUNK_BATCH_SIZE     = 50
 PIPELINE_QUEUE_SIZE  = 20
 WORKER_THREADS       = int(os.environ.get("HC_WORKERS", "4"))
 
+# Schema versioning (G3): PRAGMA user_version is the source of truth.
+# 0 = legacy unversioned vault (pre-0.9.0 inline migrations still run), which
+# gets stamped to _SCHEMA_VERSION on open. Future schema changes bump the
+# constant and append a (description, DDL) entry to _SCHEMA_MIGRATIONS — never
+# edit a shipped migration, append the next one.
+_SCHEMA_VERSION = 1
+_SCHEMA_MIGRATIONS: dict[int, tuple[str, str]] = {}
+
 class ConnectionPool:
     """Reusable bounded pool of SQLite connections.
 
@@ -624,9 +685,11 @@ class ConnectionPool:
 class VaultManager:
     """Handles SQLite FTS indexing and filesystem storage."""
 
-    def __init__(self, config: ConfigManager, vault_name: str | None = None):
+    def __init__(self, config: ConfigManager, vault_name: str | None = None,
+                 event_bus: EventBus | None = None):
         self.config = config
         self.vault_name = vault_name
+        self.bus = event_bus
         root_dir = config.get('storage.root_dir', 'hoardcore_data')
         if vault_name:
             # Guard against path traversal: a vault name must be a single
@@ -650,6 +713,12 @@ class VaultManager:
         self._pool = ConnectionPool(self.db_path, CONNECTION_POOL_SIZE, self.page_size)
         self._init_db()
         self.backfill_vectors()
+
+        # Lazy-loaded cross-encoder reranker (embeddings.reranker_model).
+        self._reranker = None
+        # Brute-force vector-scan cache (numpy matmul): keyed on the vault's
+        # vector count so a rebuild happens exactly when a new row lands.
+        self._vec_mat_cache: dict[str, Any] = {"count": None}
 
     @contextmanager
     def _db(self) -> Iterator[tuple[sqlite3.Connection, sqlite3.Cursor]]:
@@ -791,12 +860,21 @@ class VaultManager:
 
             # Content-addressable vector cache: identical chunks share one
             # embedding, so cross-document duplicate text is embedded once.
+            # embed_fp stores the embedding-config fingerprint that built the
+            # vector; a cache entry is only served when its fingerprint matches
+            # the current embedding settings (model/dim/mrl/quantize), so a
+            # stale cross-model vector can never be reused (A9).
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS chunk_vectors_ca (
                     chunk_hash TEXT PRIMARY KEY,
-                    vector BLOB
+                    vector BLOB,
+                    embed_fp TEXT
                 )
             """)
+            _ca_cols = [c[1] for c in cursor.execute(
+                "PRAGMA table_info(chunk_vectors_ca)").fetchall()]
+            if 'embed_fp' not in _ca_cols:
+                cursor.execute("ALTER TABLE chunk_vectors_ca ADD COLUMN embed_fp TEXT")
 
             # Near-duplicate index (optional, indexer.near_dedup): a 64-bit
             # simhash per stored chunk. Exact content handling stays in
@@ -827,6 +905,39 @@ class VaultManager:
                 "CREATE INDEX IF NOT EXISTS idx_chunks_simhash_bucket "
                 "ON chunks_simhash(bucket)"
             )
+
+            # --- Schema versioning (G3) ---
+            # PRAGMA user_version is the single source of truth. 0 marks a
+            # legacy (pre-0.9.0) vault: the inline migrations above already
+            # brought the schema current, so stamp it to baseline. Newer
+            # versions run the numbered migrations in order — each migration
+            # is appended to _SCHEMA_MIGRATIONS, never edited, and the version
+            # bump commits atomically with the DDL (SQLite DDL is
+            # transactional).
+            current_ver = cursor.execute("PRAGMA user_version").fetchone()[0]
+            if current_ver == 0:
+                cursor.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+                logger.info(f"Vault stamped baseline schema version {_SCHEMA_VERSION}.")
+            elif current_ver < _SCHEMA_VERSION:
+                for target in range(current_ver + 1, _SCHEMA_VERSION + 1):
+                    migration = _SCHEMA_MIGRATIONS.get(target)
+                    if migration is None:
+                        raise sqlite3.OperationalError(
+                            f"Missing schema migration for version {target}"
+                        )
+                    description, statements = migration
+                    logger.info(f"Applying schema migration {target}: {description}")
+                    for statement in (s.strip() for s in statements.split(";") if s.strip()):
+                        cursor.execute(statement)
+                    cursor.execute(f"PRAGMA user_version = {target}")
+            elif current_ver > _SCHEMA_VERSION:
+                logger.error(
+                    f"Vault schema version {current_ver} is newer than this build "
+                    f"supports ({_SCHEMA_VERSION}); refusing to open it."
+                )
+                raise sqlite3.OperationalError(
+                    f"vault schema v{current_ver} > supported v{_SCHEMA_VERSION}"
+                )
 
     def _get_domain_folder(self, url: str) -> str:
         parsed = urlparse(url)
@@ -1080,16 +1191,22 @@ class VaultManager:
                             (rowid, url, vec),
                         )
 
+        if self.bus is not None:
+            self.bus.emit("document.ingested", url=url, version=version,
+                          chunks=len(chunks))
         logger.info(f"Indexed {len(chunks)} chunks for {url} (v{version})")
 
     def _embed_chunk(self, cursor: sqlite3.Cursor, c_hash: str, text: str) -> bytes | None:
         """Return a vector for *text*, reusing a cached one for an identical
-        chunk hash. Runs on the caller's connection (no nested pool acquire).
-        Returns None if embedding fails (non-fatal)."""
+        chunk hash AND the current embedding fingerprint. Runs on the caller's
+        connection (no nested pool acquire). Returns None if embedding fails
+        (non-fatal)."""
+        embed_fp = self.embeddings.fingerprint()
         try:
             cursor.execute(
-                "SELECT vector FROM chunk_vectors_ca WHERE chunk_hash = ?",
-                (c_hash,),
+                "SELECT vector FROM chunk_vectors_ca "
+                "WHERE chunk_hash = ? AND embed_fp = ?",
+                (c_hash, embed_fp),
             )
             row = cursor.fetchone()
             if row is not None and row[0] is not None:
@@ -1099,8 +1216,9 @@ class VaultManager:
                 # Stale format (dim/model/quantize changed since the chunk was
                 # last embedded): fall through and recompute so a cached vector
                 # can never silently mismatch the current embedding config (A9).
-        except Exception:
-            pass
+        except Exception as e:
+            # Best-effort cache probe: a broken query must not stall ingest.
+            logger.debug(f"CA cache lookup failed for {c_hash[:16]}: {e}")
         try:
             vec = self.embeddings.vectorize(text)
         except Exception as e:  # embedding failures must not block indexing
@@ -1109,10 +1227,13 @@ class VaultManager:
         if vec:
             with suppress(Exception):
                 cursor.execute(
-                    "INSERT OR REPLACE INTO chunk_vectors_ca (chunk_hash, vector) "
-                    "VALUES (?, ?)",
-                    (c_hash, vec),
+                    "INSERT OR REPLACE INTO chunk_vectors_ca "
+                    "(chunk_hash, vector, embed_fp) VALUES (?, ?, ?)",
+                    (c_hash, vec, embed_fp),
                 )
+                if self.bus is not None:
+                    self.bus.emit("chunk.embedded", chunk_hash=c_hash,
+                                  vector_dim=self.embeddings.dim)
         return vec
 
     def backfill_vectors(self) -> int:
@@ -1159,8 +1280,25 @@ class VaultManager:
                 return 0
 
         # Select chunks that are missing a vector OR carry a wrong-dimension one.
+        # Streams in batches (fetchmany) instead of loading the whole table,
+        # committing per batch so a long backfill is resumable (B5) and never
+        # pins a giant write transaction.
         count = 0
+        embed_fp = self.embeddings.fingerprint()
         with self._db() as (_conn, cursor):
+            if stale_dim:
+                # Any content-addressable vector built by a different embedding
+                # setting can never be served again; drop it so the next embed
+                # recomputes fresh instead of lazily expiring one row at a time.
+                cursor.execute(
+                    "DELETE FROM chunk_vectors_ca WHERE embed_fp IS NULL OR embed_fp != ?",
+                    (embed_fp,),
+                )
+                if cursor.rowcount:
+                    logger.info(
+                        f"Cleared {cursor.rowcount} stale CA cache entries "
+                        f"(embedding config changed)."
+                    )
             cursor.execute(f"""
                 SELECT c.rowid, c.url, c.text
                 FROM chunks_fts c
@@ -1168,18 +1306,22 @@ class VaultManager:
                 WHERE v.chunk_rowid IS NULL
                    OR length(v.vector) != {expected_bytes}
             """)
-            rows = cursor.fetchall()
-            for rowid, url, text in rows:
-                try:
-                    vec = self.embeddings.vectorize(text)
-                except Exception as e:
-                    logger.warning(f"Backfill embedding failed {url}: {e}")
-                    continue
-                cursor.execute(
-                    "INSERT OR REPLACE INTO chunk_vectors (chunk_rowid, url, vector) VALUES (?, ?, ?)",
-                    (rowid, url, vec)
-                )
-                count += 1
+            while True:
+                rows = cursor.fetchmany(1000)
+                if not rows:
+                    break
+                for rowid, url, text in rows:
+                    try:
+                        vec = self.embeddings.vectorize(text)
+                    except Exception as e:
+                        logger.warning(f"Backfill embedding failed {url}: {e}")
+                        continue
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO chunk_vectors (chunk_rowid, url, vector) VALUES (?, ?, ?)",
+                        (rowid, url, vec)
+                    )
+                    count += 1
+                _conn.commit()
         if count:
             logger.info(f"Backfilled {count} chunk embeddings.")
         return count
@@ -1198,16 +1340,17 @@ class VaultManager:
 
         # Phase 1: for each URL, the total FTS chunk count must equal the sum of
         # the declared chunk counts across all of that URL's document versions
-        # (WORM means one URL may span several version rows).
+        # (WORM means one URL may span several version rows). Two GROUP BY
+        # queries joined as dicts — not a COUNT query per URL (B4 N+1).
         with self._db() as (_conn, cursor):
-            cursor.execute(
+            declared_by_url = dict(cursor.execute(
                 "SELECT url, SUM(total_chunks) FROM documents GROUP BY url"
-            )
-            for url, declared_total in cursor.fetchall():
-                cursor.execute(
-                    "SELECT COUNT(*) FROM chunks_fts WHERE url = ?", (url,)
-                )
-                fts_count = cursor.fetchone()[0]
+            ).fetchall())
+            actual_by_url = dict(cursor.execute(
+                "SELECT url, COUNT(*) FROM chunks_fts GROUP BY url"
+            ).fetchall())
+            for url, declared_total in declared_by_url.items():
+                fts_count = actual_by_url.get(url, 0)
                 checks += 1
                 if fts_count != declared_total:
                     logger.error(
@@ -1420,6 +1563,9 @@ class VaultManager:
                     )
         if error_holder:
             logger.warning(f"{len(error_holder)} embedding errors during parallel ingest.")
+        if self.bus is not None:
+            self.bus.emit("document.ingested", url=url, version=version,
+                          chunks=len(chunks), parallel=True)
         logger.info(f"Indexed {len(chunks)} chunks for {url} (v{version}, parallel)")
 
     @staticmethod
@@ -1489,9 +1635,131 @@ class VaultManager:
 
         return results
 
+    def _vector_scan(self, cursor: sqlite3.Cursor, qvec: bytes,
+                     top_k: int, domain: str | None) -> list[tuple[float, int, str]]:
+        """Brute-force cosine over the whole vector table in one numpy matmul.
+
+        All stored vectors are loaded into a single contiguous float32 buffer
+        and dotted with the query vector — BLAS/LAPACK speed instead of a
+        per-row Python cosine loop, which is ~15x slower on a 100k-row vault
+        (H2.11, B2: one fetchall, one buffer, no per-row Python). The matrix
+        is cached keyed on (row count, byte width) so repeated searches on an
+        unchanged vault skip the reload. Falls back to the per-row cosine path
+        when numpy is absent or a payload is malformed.
+        """
+        vec_where = ""
+        vec_params: list[Any] = []
+        if domain:
+            vec_where = " WHERE url LIKE ?"
+            vec_params.append(f'%{domain}%')
+        cursor.execute(
+            "SELECT chunk_rowid, url, vector FROM chunk_vectors" + vec_where,
+            vec_params,
+        )
+        rows = cursor.fetchall()
+        if not rows or not qvec:
+            return []
+
+        expected_bytes = self._vector_dim * self.embeddings.bytes_per_dim
+        mat: Any = None
+        rids: list[int] = []
+        urls: list[str] = []
+        # Only the unfiltered full-table scan can reuse the cached matrix.
+        if domain is None and self._vec_mat_cache.get("count") == len(rows) \
+                and self._vec_mat_cache.get("expected") == expected_bytes:
+            mat = self._vec_mat_cache["mat"]
+            rids = self._vec_mat_cache["rids"]
+            urls = self._vec_mat_cache["urls"]
+        elif _np is not None:
+            rids = [r[0] for r in rows]
+            urls = [r[1] for r in rows]
+            blobs = [r[2] for r in rows]
+            well_formed = all(isinstance(b, (bytes, bytearray))
+                              and len(b) == expected_bytes for b in blobs)
+            if well_formed:
+                try:
+                    if self.embeddings.bytes_per_dim == 1:
+                        arr = _np.frombuffer(b"".join(blobs), dtype=_np.int8)
+                        arr = arr.astype(_np.float32) / 127.0
+                    else:
+                        arr = _np.frombuffer(b"".join(blobs), dtype=_np.float32)
+                    mat = arr.reshape(-1, self._vector_dim)
+                    if domain is None:
+                        self._vec_mat_cache.update(
+                            count=len(rows), expected=expected_bytes,
+                            mat=mat, rids=rids, urls=urls,
+                        )
+                except ValueError:
+                    mat = None
+
+        if mat is not None:
+            try:
+                if self.embeddings.bytes_per_dim == 1:
+                    q = _np.frombuffer(qvec, dtype=_np.int8).astype(_np.float32) / 127.0
+                else:
+                    q = _np.frombuffer(qvec, dtype=_np.float32)
+                sims = mat @ q
+                if len(sims) == len(rids):
+                    k = min(top_k, len(sims))
+                    if k <= 0:
+                        return []
+                    # argpartition is O(N) for the top-k, then a tiny sort.
+                    idx = _np.argpartition(-sims, k - 1)[:k]
+                    idx = idx[_np.argsort(-sims[idx])]
+                    return [(float(sims[i]), rids[i], urls[i]) for i in idx]
+            except (ValueError, TypeError):
+                pass  # malformed query payload -> fall through to per-row
+
+        # Fallback: per-row cosine (numpy absent, or malformed payloads).
+        scored: list[tuple[float, int, str]] = []
+        for rid, u, blob in rows:
+            s = EmbeddingsEngine.cosine(qvec, blob, self._vector_dim)
+            scored.append((s, rid, u))
+        scored.sort(key=lambda t: t[0], reverse=True)
+        return scored[:top_k]
+
+    def _rerank(self, query: str, chunks: list[Chunk]) -> list[Chunk]:
+        """Optionally re-order a recalled set with a cross-encoder reranker.
+
+        Gated on `embeddings.reranker_model` (empty = disabled, the default).
+        Loaded lazily via fastembed's TextCrossEncoder and cached on the
+        instance. Any load/run failure degrades to the input order (a reranker
+        is an enhancement, never a recall gate).
+        """
+        model_name = str(self.config.get('embeddings.reranker_model', '') or '')
+        if not model_name or len(chunks) < 2:
+            return chunks
+        try:
+            if self._reranker is None:
+                from fastembed.rerank.cross_encoder import TextCrossEncoder
+                self._reranker = TextCrossEncoder(model_name)
+            docs = [c.text for c in chunks]
+            ranked = list(self._reranker.rerank(query, docs))
+            score_by_idx: dict[int, float] = {}
+            for item in ranked:
+                if isinstance(item, tuple):
+                    idx, score = item[0], item[1]
+                else:
+                    idx, score = item.index, item.score
+                score_by_idx[idx] = float(score)
+            ordered = sorted(range(len(chunks)),
+                             key=lambda i: score_by_idx.get(i, 0.0),
+                             reverse=True)
+            reranked = [chunks[i] for i in ordered]
+            for pos, orig_idx in enumerate(ordered):
+                reranked[pos].metadata['rerank_score'] = score_by_idx.get(orig_idx, 0.0)
+            return reranked
+        except Exception as e:
+            logger.warning(f"Reranker unavailable ({e}); keeping original order.")
+            return chunks
+
     def _search_hybrid(self, query: str, limit: int, domain: str | None) -> list[Chunk]:
         """Fuse FTS5 keyword ranks and vector-similarity ranks via Reciprocal
-        Rank Fusion (RRF). Returns Chunks best matching the query."""
+        Rank Fusion (RRF). Returns Chunks best matching the query.
+
+        Reads the FTS candidate pool in a SINGLE query (fetching the full rows
+        once and stashing them by rowid) instead of a second rowid-IN round
+        trip for the fast path and the fused result set (B3)."""
         if not query or not query.strip():
             return []
         k = 60  # RRF constant
@@ -1499,7 +1767,7 @@ class VaultManager:
         vec_pool = self.config.get('embeddings.top_k', 40)
 
         with self._db() as (_conn, cursor):
-            # --- FTS candidate list (rowid -> rank score) ---
+            # --- FTS candidate list: one query, rows stashed by rowid ---
             fts_match = self._fts_query(query)
             fts_where = "chunks_fts MATCH ?"
             fts_params: list[Any] = [fts_match]
@@ -1510,14 +1778,19 @@ class VaultManager:
             # semantic content the embedding model can match: run the vector
             # scan alone instead of returning [] (A6).
             fts_rows: list[tuple[int, str]] = []
+            row_by_id: dict[int, tuple[str, str, str, str]] = {}
             if fts_match:
                 cursor.execute(f"""
-                    SELECT rowid, url FROM chunks_fts
+                    SELECT rowid, url, header_path, text, metadata_json
+                    FROM chunks_fts
                     WHERE {fts_where}
                     ORDER BY rank
                     LIMIT ?
                 """, (*fts_params, fts_pool))
-                fts_rows = cursor.fetchall()
+                full_rows = cursor.fetchall()
+                fts_rows = [(rid, url) for rid, url, _hp, _text, _mj in full_rows]
+                row_by_id = {rid: (url, hp, text, mj)
+                             for rid, url, hp, text, mj in full_rows}
 
             # --- FTS5 strong-signal fast path (P1.1) ---
             # When the FTS5 AND-match alone fills the requested result set, the
@@ -1553,49 +1826,27 @@ class VaultManager:
                         return 0.5 ** (age / half_life)
 
                     selected.sort(key=lambda t: (_decay(t[1]), t[0]), reverse=True)
-                fast_ids = [rid for rid, _ in selected]
-                if fast_ids:
-                    placeholders = ",".join("?" * len(fast_ids))
-                    order_map = {rid: i for i, rid in enumerate(fast_ids)}
-                    cursor.execute(f"""
-                        SELECT rowid, url, header_path, text, metadata_json
-                        FROM chunks_fts WHERE rowid IN ({placeholders})
-                    """, fast_ids)
-                    fast_rows = cursor.fetchall()
-                    fast_rows.sort(key=lambda r: order_map.get(r[0], 9999))
-                    results: list[Chunk] = []
-                    for _rid, url, _hp, text, meta_json in fast_rows:
-                        meta = json.loads(meta_json)
-                        meta['source_url'] = url
-                        meta['retrieval'] = 'fts_fast'
-                        meta['hybrid_score'] = None
-                        # Confidence band is deliberately 'medium', not 'high':
-                        # the vector scan was skipped, so semantic closeness is
-                        # unverified. 'high' is reserved for hybrid hits that
-                        # matched BOTH the keyword AND vector lists (see the
-                        # confidence-band derivation below).
-                        meta['confidence'] = 'medium'
-                        results.append(Chunk(text=text, metadata=meta))
-                    return results
+                results: list[Chunk] = []
+                for rid, url in selected:
+                    url, _hp, text, meta_json = row_by_id[rid]
+                    meta = json.loads(meta_json)
+                    meta['source_url'] = url
+                    meta['retrieval'] = 'fts_fast'
+                    meta['hybrid_score'] = None
+                    # Confidence band is deliberately 'medium', not 'high':
+                    # the vector scan was skipped, so semantic closeness is
+                    # unverified. 'high' is reserved for hybrid hits that
+                    # matched BOTH the keyword AND vector lists (see the
+                    # confidence-band derivation below).
+                    meta['confidence'] = 'medium'
+                    results.append(Chunk(text=text, metadata=meta))
+                return results
 
-            # --- vector candidate list (brute force; fine for a hoard vault) ---
+            # --- vector candidate list (one numpy matmul over the whole table) ---
             scored: list[tuple[float, int, str]] = []
             if vec_pool > 0:
                 qvec = self.embeddings.vectorize(query)
-                vec_where = ""
-                vec_params: list[Any] = []
-                if domain:
-                    vec_where = " WHERE url LIKE ?"
-                    vec_params.append(f'%{domain}%')
-                cursor.execute(
-                    "SELECT chunk_rowid, url, vector FROM chunk_vectors" + vec_where,
-                    vec_params
-                )
-                for rid, u, blob in cursor.fetchall():
-                    s = EmbeddingsEngine.cosine(qvec, blob, self._vector_dim)
-                    scored.append((s, rid, u))
-                scored.sort(key=lambda t: t[0], reverse=True)
-                scored = scored[:vec_pool]
+                scored = self._vector_scan(cursor, qvec, vec_pool, domain)
 
             # --- RRF fuse ---
             rrf: dict[int, float] = {}
@@ -1634,9 +1885,9 @@ class VaultManager:
             if not rrf:
                 return []
 
-            fused = sorted(rrf.items(), key=lambda kv: kv[1], reverse=True)[:max(limit, 0)]
+            fused = sorted(rrf.items(), key=lambda kv: kv[1], reverse=True)
             order = fused[:limit] if limit > 0 else fused
-            ids = [rid for rid, _ in (fused[:limit] if limit > 0 else fused)]
+            ids = [rid for rid, _ in order]
 
             # --- Confidence bands ---
             # Confidence is derived from how strong the fused evidence is, not
@@ -1662,21 +1913,32 @@ class VaultManager:
 
             results: list[Chunk] = []
             if ids:
-                placeholders = ",".join("?" * len(ids))
-                order_map = {rid: i for i, (rid, _) in enumerate(order)}
-                cursor.execute(f"""
-                    SELECT rowid, url, header_path, text, metadata_json
-                    FROM chunks_fts WHERE rowid IN ({placeholders})
-                """, ids)
-                rows = cursor.fetchall()
-                rows.sort(key=lambda r: order_map.get(r[0], 9999))
-                for rid, url, _hp, text, meta_json in rows:
+                # Fetch only the rows the single FTS query did not already
+                # return (vector-only hits), then assemble in RRF order (B3).
+                missing = [rid for rid in ids if rid not in row_by_id]
+                fetched_by_id: dict[int, tuple[str, str, str, str]] = {}
+                if missing:
+                    placeholders = ",".join("?" * len(missing))
+                    cursor.execute(f"""
+                        SELECT rowid, url, header_path, text, metadata_json
+                        FROM chunks_fts WHERE rowid IN ({placeholders})
+                    """, missing)
+                    fetched_by_id = {rid: (url, hp, text, mj)
+                                     for rid, url, hp, text, mj in cursor.fetchall()}
+                for rid in ids:
+                    row = row_by_id.get(rid) or fetched_by_id.get(rid)
+                    if row is None:
+                        continue
+                    url, _hp, text, meta_json = row
                     meta = json.loads(meta_json)
                     meta['hybrid_score'] = rrf.get(rid, 0.0)
                     meta['confidence'] = conf_by_rid.get(rid, "low")
                     meta['source_url'] = url
                     meta['retrieval'] = 'hybrid'
                     results.append(Chunk(text=text, metadata=meta))
+            # Optional cross-encoder re-ranking of the final recalled set.
+            if results and self.config.get('embeddings.reranker_model', ''):
+                results = self._rerank(query, results)
             return results
 
     def document_exists(self, url: str, ttl_seconds: int) -> bool:
@@ -1716,6 +1978,13 @@ class VaultManager:
 class NetworkFetcher:
     """Executes explicit strategy chain with pre-flight check."""
 
+    # Hostnames that must never be fetched regardless of how they resolve:
+    # cloud metadata endpoints are the classic SSRF prize. `.internal` /
+    # `.local` are private-DNS TLDs for resolver search domains / mDNS.
+    _SSRF_BLOCKED_HOSTS = frozenset({
+        "metadata.google.internal", "metadata.google", "localhost",
+    })
+
     def __init__(self, config: ConfigManager):
         self.config = config
         self._cookie_string = config.get('auth.cookie_string', '')
@@ -1726,6 +1995,70 @@ class NetworkFetcher:
         self._timeout = config.get('general.timeout_seconds', 30)
         self._max_retries = config.get('general.max_retries', 2)
         self._enable_preflight = config.get('network.enable_preflight', True)
+        # SSRF protection (network.ssrf_protection): refuse non-http(s) and
+        # non-public fetch targets, and re-validate every redirect hop. Default
+        # on; disable only on trusted isolated networks.
+        self._ssrf_protected = bool(config.get('network.ssrf_protection', False))
+        # Plugin fetchers (hoardcore.fetchers entry points), appended to the
+        # strategy fallback chain (G1). Signature: async fn(url) -> tuple or
+        # None, or a plain callable returning (text|None, binary|None, ctype,
+        # status).
+        self.plugin_fetchers: dict[str, Any] = {}
+
+    @staticmethod
+    def _is_public_ip(ip_text: str) -> bool:
+        """True if *ip_text* is a routable public address.
+
+        `is_global` already excludes private, loopback, link-local (incl. the
+        169.254.x.x cloud-metadata ranges), CGNAT 100.64.0.0/10, multicast,
+        reserved and unspecified space. IPv4-mapped IPv6 addresses (the
+        `::ffff:169.254.169.254` encoding trick) are normalized to their IPv4
+        form first, because `is_global` on the mapped form can consult the
+        wrong table.
+        """
+        try:
+            ip = ipaddress.ip_address(ip_text)
+        except ValueError:
+            return False
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ipaddress.ip_address(ip.ipv4_mapped)
+        return ip.is_global
+
+    @staticmethod
+    def validate_url_target(url: str) -> bool:
+        """SSRF gate for a fetch target: scheme + host allowlist, resolve-then-
+        validate, with a blocklist backstop for metadata/DNS-special names.
+
+        Every resolved address must be public (a host that resolves even ONE
+        internal address is refused). An unresolvable host is allowed through —
+        it cannot reach anything, and the subsequent real fetch will fail on
+        its own. DNS rebinding (public IP at check time, internal at fetch
+        time) is the residual risk, mitigated here by validating the final URL
+        after any redirect chain; full connection-time pinning is a server-mode
+        hardening (not needed for the single-user CLI threat model).
+        """
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return False
+        if (parsed.scheme or "").lower() not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return False
+        if host in NetworkFetcher._SSRF_BLOCKED_HOSTS:
+            return False
+        if host.endswith(".internal") or host.endswith(".local"):
+            return False
+        try:
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+        except (socket.gaierror, OSError):
+            # Cannot resolve -> cannot reach anything -> allow (fetch fails).
+            return True
+        except (OverflowError, ValueError):
+            return False
+        return all(NetworkFetcher._is_public_ip(info[4][0]) for info in infos)
 
     def _parse_cookies(self) -> dict[str, str]:
         cookies = {}
@@ -1741,6 +2074,9 @@ class NetworkFetcher:
     async def preflight(self, url: str) -> bool:
         if not self._enable_preflight or not self._parse_cookies():
             return True
+        if self._ssrf_protected and not self.validate_url_target(url):
+            logger.warning(f"Preflight: SSRF guard refused target {url}")
+            return False
 
         try:
             async with aiohttp.ClientSession() as session, session.head(
@@ -1766,28 +2102,51 @@ class NetworkFetcher:
             return False
 
     async def _fetch_aiohttp(self, url: str) -> tuple[str | None, bytes | None, str, int | None]:
-        """Attempt 1: Standard aiohttp. Returns (text, binary, content_type, status)."""
+        """Attempt 1: Standard aiohttp. Returns (text, binary, content_type, status).
+
+        Redirects are followed MANUALLY (`allow_redirects=False` + resolving
+        each `Location`) so every hop is re-validated against the SSRF gate
+        before it is fetched — a redirect into a private/metadata address is
+        refused instead of silently followed (C1).
+        """
         cookies = self._parse_cookies()
         headers = {'User-Agent': self._user_agent}
         connector = TCPConnector(force_close=True, enable_cleanup_closed=True, ttl_dns_cache=300)
         timeout = ClientTimeout(total=self._timeout)
 
         try:
-            async with aiohttp.ClientSession(connector=connector, headers=headers) as session, session.get(
-                url, cookies=cookies, timeout=timeout, allow_redirects=True
-            ) as resp:
-                content_type = resp.headers.get('Content-Type', 'text/plain').split(';')[0].strip()
-                if resp.status == 200:
-                    if 'text' in content_type:
-                        return await resp.text(), None, content_type, resp.status
-                    else:
-                        return None, await resp.read(), content_type, resp.status
-                elif resp.status == 403:
-                    logger.warning("aiohttp: 403 Blocked.")
-                    return None, None, content_type, resp.status
-                else:
-                    logger.warning(f"aiohttp: Status {resp.status}")
-                    return None, None, content_type, resp.status
+            async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
+                current = url
+                for _ in range(6):  # initial request + up to 5 redirect hops
+                    if self._ssrf_protected and not self.validate_url_target(current):
+                        logger.warning(f"aiohttp: SSRF guard refused target {current}")
+                        return None, None, 'text/html', 403
+                    async with session.get(
+                        current, cookies=cookies, timeout=timeout, allow_redirects=False
+                    ) as resp:
+                        if resp.status in (301, 302, 303, 307, 308):
+                            location = resp.headers.get('Location')
+                            if not location:
+                                return None, None, '', resp.status
+                            try:
+                                current = str(resp.url.join(location))
+                            except ValueError:
+                                return None, None, '', resp.status
+                            continue
+                        content_type = resp.headers.get('Content-Type', 'text/plain').split(';')[0].strip()
+                        if resp.status == 200:
+                            if 'text' in content_type:
+                                return await resp.text(), None, content_type, resp.status
+                            else:
+                                return None, await resp.read(), content_type, resp.status
+                        elif resp.status == 403:
+                            logger.warning("aiohttp: 403 Blocked.")
+                            return None, None, content_type, resp.status
+                        else:
+                            logger.warning(f"aiohttp: Status {resp.status}")
+                            return None, None, content_type, resp.status
+                logger.warning("aiohttp: redirect limit exceeded")
+                return None, None, '', None
         except Exception as e:
             logger.debug(f"aiohttp failed: {e}")
             return None, None, '', None
@@ -1808,6 +2167,13 @@ class NetworkFetcher:
                 )
                 return resp
             resp = await asyncio.to_thread(_sync_fetch)
+
+            # curl follows redirects internally; re-validate the FINAL URL so a
+            # redirect chain into an internal address is never accepted (C1).
+            final_url = str(getattr(resp, 'url', url) or url)
+            if self._ssrf_protected and not self.validate_url_target(final_url):
+                logger.warning(f"curl_cffi: SSRF guard refused final URL {final_url}")
+                return None, None, 'text/html', 403
 
             content_type = resp.headers.get('Content-Type', 'text/plain').split(';')[0].strip()
             if resp.status_code == 200:
@@ -1851,6 +2217,12 @@ class NetworkFetcher:
                     return None, None, '', None
                 solution = data.get("solution", {})
                 if solution.get("status") == 200:
+                    # FlareSolverr reports the post-redirect final URL; refuse
+                    # a chain that landed on an internal address (C1).
+                    final_url = str(solution.get('url') or url)
+                    if self._ssrf_protected and not self.validate_url_target(final_url):
+                        logger.warning(f"FlareSolverr: SSRF guard refused final URL {final_url}")
+                        return None, None, 'text/html', 403
                     content_type = solution.get('headers', {}).get('Content-Type', 'text/html').split(';')[0]
                     response = solution.get('response', '')
                     if 'text' in content_type:
@@ -1883,6 +2255,12 @@ class NetworkFetcher:
         and other error bodies instead of indexing them as content.
         """
         logger.info(f"Fetching {url} with strategy: {strategy}")
+
+        # SSRF entry gate: refuse non-http(s) / non-public targets before any
+        # strategy or preflight touches them (C1).
+        if self._ssrf_protected and not self.validate_url_target(url):
+            logger.warning(f"SSRF guard refused fetch target: {url}")
+            raise RuntimeError("SSRF_BLOCKED")
 
         # Preflight validation
         if (self._enable_preflight and self._parse_cookies()
@@ -1923,9 +2301,35 @@ class NetworkFetcher:
                 await self._fetch_flaresolverr(url))
             if text is not None or binary is not None:
                 return text, binary, ctype, status
+            text, binary, ctype, status = self._normalize_fetch(
+                await self._try_plugin_fetchers(url))
+            if text is not None or binary is not None:
+                return text, binary, ctype, status
             raise RuntimeError("FETCH_FAILED")
 
         raise RuntimeError("FETCH_FAILED")
+
+    async def _try_plugin_fetchers(self, url: str) -> tuple[str | None, bytes | None, str, int | None] | None:
+        """Try registered plugin fetchers in order (G1).
+
+        Returns "NOTHING" normalization-fodder: None means every plugin either
+        raised, returned None, or returned an all-None tuple — so the strategy
+        chain can move on without confusing a None for a successful fetch.
+        """
+        for name, fn in self.plugin_fetchers.items():
+            try:
+                out = fn(url)
+                if asyncio.iscoroutine(out):
+                    out = await out
+                if out is None:
+                    continue
+                text, binary, ctype, status = self._normalize_fetch(out)
+                if text is not None or binary is not None:
+                    logger.info(f"Plugin fetcher '{name}' succeeded for {url}")
+                    return text, binary, ctype, status
+            except Exception as e:
+                logger.warning(f"Plugin fetcher '{name}' failed for {url}: {e}")
+        return None, None, 'text/html', None
 
 # =============================================================================
 # 5. DOCUMENT PARSERS (Universal)
@@ -1941,6 +2345,13 @@ class DocumentParser:
     _epub = None
     _ocr_engine = None
     _ocr_engine_ready = False
+    # Plugin parsers keyed by content type (hoardcore.parsers entry points).
+    _plugin_parsers: dict[str, Any] = {}
+
+    @classmethod
+    def register_parser(cls, content_type: str, fn: Any) -> None:
+        """Register a plugin parser for an (otherwise unknown) content type."""
+        cls._plugin_parsers[content_type] = fn
 
     @classmethod
     def _import_binary_parsers(cls) -> None:
@@ -2118,9 +2529,12 @@ class DocumentParser:
 
     @staticmethod
     async def clean_html(html: str, url: str) -> tuple[str, dict[str, Any]]:
-        """Clean HTML using trafilatura + readability fallback."""
-        results = {}
+        """Clean HTML, trafilatura-first with a readability fallback (B8).
 
+        Trafilatura alone produces quality extraction ~90% of the time and is
+        cheaper, so readability is only spawned when trafilatura's yield is
+        too small (< 100 chars) instead of always running both in parallel.
+        """
         def _extract_trafilatura():
             return trafilatura.extract(
                 html,
@@ -2134,13 +2548,20 @@ class DocumentParser:
             doc = Document(html)
             return doc.summary()
 
-        traf_task = asyncio.to_thread(_extract_trafilatura)
-        read_task = asyncio.to_thread(_extract_readability)
-
         try:
-            traf_md, read_html = await asyncio.gather(traf_task, read_task)
-            results["trafilatura"] = traf_md
+            traf_md = await asyncio.to_thread(_extract_trafilatura)
+        except Exception as e:
+            logger.warning(f"trafilatura extraction failed: {e}")
+            traf_md = ""
 
+        # Trafilatura-first: accept its output whenever it cleared the bar.
+        if len(traf_md) > 100:
+            return traf_md, {"parser": "trafilatura"}
+
+        # Only a weak trafilatura yield pays for the readability pass.
+        read_md = ""
+        try:
+            read_html = await asyncio.to_thread(_extract_readability)
             if read_html:
                 # Rough conversion to markdown-ish text
                 clean = re.sub(r'<script[^>]*>.*?</script>', '', read_html, flags=re.DOTALL | re.IGNORECASE)
@@ -2152,27 +2573,21 @@ class DocumentParser:
                 import html as html_parser
                 clean = html_parser.unescape(clean)
                 lines = [line.strip() for line in clean.split('\n') if line.strip()]
-                results["readability"] = '\n\n'.join(lines)
-            else:
-                results["readability"] = ""
+                read_md = '\n\n'.join(lines)
         except Exception as e:
-            logger.warning(f"HTML extraction failed: {e}")
-            results = {"trafilatura": "", "readability": ""}
+            logger.warning(f"readability extraction failed: {e}")
 
-        # Choose best
-        if len(results.get("trafilatura", "")) > 100:
-            return results["trafilatura"], {"parser": "trafilatura"}
-        elif len(results.get("readability", "")) > 100:
-            return results["readability"], {"parser": "readability"}
-        else:
-            # Fallback: strip everything
-            body_match = re.search(r'<body[^>]*>(.*?)</body>', html, re.DOTALL | re.IGNORECASE)
-            body = body_match.group(1) if body_match else html
-            body = re.sub(r'<script[^>]*>.*?</script>', '', body, flags=re.DOTALL | re.IGNORECASE)
-            body = re.sub(r'<style[^>]*>.*?</style>', '', body, flags=re.DOTALL | re.IGNORECASE)
-            body = re.sub(r'<[^>]+>', ' ', body)
-            body = re.sub(r'\s+', ' ', body).strip()
-            return body, {"parser": "fallback"}
+        if len(read_md) > 100:
+            return read_md, {"parser": "readability"}
+
+        # Fallback: strip everything
+        body_match = re.search(r'<body[^>]*>(.*?)</body>', html, re.DOTALL | re.IGNORECASE)
+        body = body_match.group(1) if body_match else html
+        body = re.sub(r'<script[^>]*>.*?</script>', '', body, flags=re.DOTALL | re.IGNORECASE)
+        body = re.sub(r'<style[^>]*>.*?</style>', '', body, flags=re.DOTALL | re.IGNORECASE)
+        body = re.sub(r'<[^>]+>', ' ', body)
+        body = re.sub(r'\s+', ' ', body).strip()
+        return body, {"parser": "fallback"}
 
     @staticmethod
     async def parse_binary(content_type: str, binary: bytes) -> tuple[str, dict[str, Any]]:
@@ -2187,16 +2602,34 @@ class DocumentParser:
         if parser:
             return await parser(binary)
         else:
-            # Unknown binary, try to decode as text
+            # Unknown binary: consult plugin parsers keyed by content type,
+            # then try to decode as text.
+            plugin = DocumentParser._plugin_parsers.get(content_type)
+            if plugin is not None:
+                try:
+                    text, meta = plugin(binary)
+                    return text, dict(meta or {})
+                except Exception as e:
+                    logger.warning(f"Plugin parser {content_type!r} failed: {e}")
             try:
                 text = binary.decode('utf-8', errors='ignore')
                 return text, {"parser": "binary_as_text"}
-            except Exception:
-                return "", {"parser": "unknown_binary", "error": "Cannot parse"}
+            except Exception as e:
+                # Surface the real error instead of a silent generic one (D1).
+                return "", {"parser": "unknown_binary", "error": f"Cannot parse: {e}"}
 
 # =============================================================================
 # 6. SEMANTIC CHUNKER
 # =============================================================================
+
+# CJK scripts (Chinese/Japanese/Korean incl. full-width/ideographic punctuation)
+# tokenize much denser than Latin: ~1-1.5 chars per token vs ~4 for English.
+# Used by the chunker so CJK-heavy docs don't get chunks 4x over budget (A14).
+_CJK_RE = re.compile(
+    r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\u31f0-\u31ff"
+    r"\uac00-\ud7af\u3000-\u303f\uff00-\uffef]"
+)
+
 
 class SemanticChunker:
     """Splits text into semantic chunks respecting headers."""
@@ -2204,15 +2637,78 @@ class SemanticChunker:
     def __init__(self, config: ConfigManager):
         self.config = config
         self.max_tokens = config.get('chunking.max_tokens', 512)
+        self.overlap_tokens = int(config.get('chunking.overlap_tokens', 0) or 0)
         self.strategy = config.get('chunking.strategy', 'heading')
+        # Plugin chunkers (hoardcore.chunkers entry points), selected by
+        # setting chunking.strategy = "plugin.<name>".
+        self._plugins: dict[str, Any] = {}
+
+    def register_plugin(self, name: str, fn: Any) -> None:
+        """Register an entry-point chunker under *name* (G1)."""
+        self._plugins[name] = fn
 
     @staticmethod
     def _estimate_tokens(text: str) -> int:
-        return len(text) // 4
+        """CJK-aware token estimate (A14).
+
+        English ~= 4 chars/token; CJK scripts average ~1-1.5 chars per token,
+        so a naive `len // 4` badly underestimates Chinese/Japanese/Korean
+        chunks. CJK chars count a full token each — conservative, i.e. it
+        over-estimates tokens and yields marginally *smaller* chunks, the safe
+        failure direction for a chunker. Non-CJK chars keep the ~4 chars/token
+        rule (which includes whitespace, as before).
+        """
+        if not text:
+            return 0
+        cjk = len(_CJK_RE.findall(text))
+        return cjk + (len(text) - cjk) // 4
+
+    @staticmethod
+    def _overlap_tail(text: str, overlap_tokens: int) -> str:
+        """Trailing slice of *text* worth ~overlap_tokens using the CJK model.
+
+        Walks the text backwards accumulating tokens (1 per CJK char, 0.25 per
+        other char) until the budget is spent, then returns that tail. The
+        previous chunk's tail becomes the next chunk's opening so sentences
+        split across the boundary stay laterally searchable/contextual (A13).
+        """
+        if overlap_tokens <= 0 or not text:
+            return ""
+        budget = float(overlap_tokens)
+        i = len(text)
+        while i > 0 and budget > 0:
+            i -= 1
+            budget -= 1.0 if _CJK_RE.match(text[i]) else 0.25
+        tail = text[i:].lstrip("\n")
+        # Don't return a tail that is nothing but text itself re-pasted whole
+        # when overlap budget exceeds the chunk length.
+        return tail if len(tail) < len(text) else ""
 
     async def chunk(self, markdown: str, url: str, parser_meta: dict[str, Any]) -> list[Chunk]:
         if not markdown:
             return [Chunk(text="[Empty content]", metadata={"source": url, "empty": True})]
+
+        # Plugin chunker: chunking.strategy = "plugin.<name>" (G1). On any
+        # failure we fall through to the built-in pipeline rather than abort.
+        if self.strategy.startswith("plugin."):
+            name = self.strategy[len("plugin."):]
+            fn = self._plugins.get(name)
+            if fn is not None:
+                try:
+                    out = fn(markdown, url, parser_meta)
+                    if asyncio.iscoroutine(out):
+                        out = await out
+                    if isinstance(out, (list, tuple)) and out and all(
+                        isinstance(c, Chunk) for c in out
+                    ):
+                        return list(out)
+                    logger.warning(
+                        f"Plugin chunker '{name}' returned non-Chunk output; "
+                        "falling back to built-in."
+                    )
+                except Exception as e:
+                    logger.warning(f"Plugin chunker '{name}' failed ({e}); "
+                                   "falling back to built-in.")
 
         # If source is a binary (PDF/DOCX), use paragraph strategy
         if parser_meta.get('parser') in ['pymupdf', 'pymupdf+ocr', 'python-docx', 'ebooklib']:
@@ -2228,7 +2724,7 @@ class SemanticChunker:
         def get_header_path() -> str:
             return " > ".join([h[1] for h in header_stack])
 
-        def flush_chunk():
+        def flush_chunk(carry_overlap: bool = False):
             nonlocal current_chunk_lines
             if not current_chunk_lines:
                 return
@@ -2242,7 +2738,14 @@ class SemanticChunker:
                         "parser": parser_meta.get('parser', 'unknown')
                     }
                 ))
-            current_chunk_lines = []
+            if carry_overlap and self.overlap_tokens > 0:
+                # Sliding-window overlap (A13): the token-capped flush hands
+                # its trailing ~overlap_tokens ahead as the next chunk's head,
+                # so a sentence broken at the boundary still begins in-context.
+                tail = SemanticChunker._overlap_tail(text, self.overlap_tokens)
+                current_chunk_lines = [line for line in tail.split('\n') if line] if tail else []
+            else:
+                current_chunk_lines = []
 
         for line in lines:
             stripped = line.strip()
@@ -2263,7 +2766,7 @@ class SemanticChunker:
             current_chunk_lines.append(line)
 
             if self._estimate_tokens('\n'.join(current_chunk_lines)) > self.max_tokens:
-                flush_chunk()
+                flush_chunk(carry_overlap=True)
 
         flush_chunk()
 
@@ -2384,6 +2887,7 @@ class WebSearchProvider:
         self.fetcher = fetcher
         self.max_retries = int(config.get('discovery.max_retries', 2))
         self.backoff_base = float(config.get('discovery.backoff_seconds', 1.5))
+        self.plugin_providers: dict[str, Any] = {}
 
     @staticmethod
     def _clean_title(raw: str) -> str:
@@ -2485,6 +2989,117 @@ class WebSearchProvider:
 
 
 # =============================================================================
+# 8.5 EVENT BUS & PLUGIN SYSTEM
+# =============================================================================
+
+
+class EventBus:
+    """Tiny publish/subscribe bus for lifecycle hooks (G2).
+
+    Handlers are best-effort: an exception in one never propagates into the
+    ingest/search path that triggered it. Emitted events today:
+      'document.ingested'   (url, version, chunks[, parallel])
+      'chunk.embedded'      (chunk_hash, vector_dim)
+      'discovery.completed' (query, urls)
+      'search.completed'    (query, n_results[, domain])
+    """
+
+    def __init__(self) -> None:
+        self._handlers: dict[str, list[Any]] = {}
+
+    def on(self, event: str, handler: Any | None = None):
+        """Register *handler* for *event*; also usable as a decorator:
+        ``@bus.on('document.ingested')``."""
+        if handler is None:
+            def _decorate(fn: Any) -> Any:
+                self._handlers.setdefault(event, []).append(fn)
+                return fn
+            return _decorate
+        self._handlers.setdefault(event, []).append(handler)
+        return handler
+
+    def emit(self, event: str, **kwargs: Any) -> None:
+        for fn in self._handlers.get(event, []):
+            try:
+                fn(**kwargs)
+            except Exception as e:
+                logger.warning(f"Event handler '{event}' raised: {e}")
+
+    def handlers(self, event: str) -> list[Any]:
+        return list(self._handlers.get(event, []))
+
+
+class PluginManager:
+    """Discovers third-party plugins via importlib.metadata entry points (G1).
+
+    One group per extension point, following packaging's "Creating and
+    discovering plugins" model (the same architecture virtualenv uses):
+
+      hoardcore.parsers    -> binary parsers, keyed by content type
+      hoardcore.fetchers   -> extra fetch strategies appended to the chain
+      hoardcore.providers  -> extra discovery backends (fallback chain)
+      hoardcore.chunkers   -> custom chunkers, selected by chunking.strategy
+
+    An installed distribution advertises, e.g.::
+
+        [project.entry-points."hoardcore.parsers"]
+        myparser = "mylib:parser_entry"
+
+    A broken plugin can never kill startup: every load()/registration is
+    wrapped and logged. Entry points only resolve for *installed*
+    distributions, so built-ins remain the fallback for repo-source runs.
+    """
+
+    GROUPS = ("hoardcore.parsers", "hoardcore.fetchers",
+              "hoardcore.providers", "hoardcore.chunkers")
+
+    def __init__(self, config: ConfigManager):
+        self.config = config
+        self.enabled = bool(config.get('plugins.enabled', True))
+        self.parsers: dict[str, Any] = {}
+        self.fetchers: dict[str, Any] = {}
+        self.providers: dict[str, Any] = {}
+        self.chunkers: dict[str, Any] = {}
+        self._discovered = False
+
+    def discover(self) -> PluginManager:
+        if self._discovered:
+            return self
+        self._discovered = True
+        if not self.enabled:
+            return self
+        targets = {
+            "hoardcore.parsers": self.parsers,
+            "hoardcore.fetchers": self.fetchers,
+            "hoardcore.providers": self.providers,
+            "hoardcore.chunkers": self.chunkers,
+        }
+        try:
+            eps = importlib.metadata.entry_points()
+            for group in self.GROUPS:
+                try:
+                    selected = eps.select(group=group)
+                except (AttributeError, TypeError):
+                    # Python < 3.10 returned a dict; keep the project 3.10+.
+                    selected = eps.get(group, [])
+                for ep in selected:
+                    try:
+                        targets[group][ep.name] = ep.load()
+                    except Exception as e:
+                        logger.warning(
+                            f"Plugin {ep.name} ({group}) failed to load: {e}"
+                        )
+        except Exception as e:
+            logger.warning(f"Plugin discovery failed: {e}")
+        total = sum(len(t) for t in targets.values())
+        if total:
+            counts = {g.split('.')[-1]: len(t)
+                      for g, t in targets.items() if t}
+            logger.info(f"Loaded plugin(s): {counts}")
+        return self
+
+
+# =============================================================================
 # 9. MAIN ORCHESTRATOR
 # =============================================================================
 
@@ -2493,15 +3108,53 @@ class HoardCore:
 
     def __init__(self, vault_name: str | None = None):
         self.config = ConfigManager()
-        self.vault = VaultManager(self.config, vault_name)
+        self.bus = EventBus()
+        self.plugins = PluginManager(self.config).discover()
+        self.vault = VaultManager(self.config, vault_name, event_bus=self.bus)
         self.vault_name = self.vault.vault_name
         self.fetcher = NetworkFetcher(self.config)
         self.parser = DocumentParser()
         self.chunker = SemanticChunker(self.config)
         self.crawler = CrawlerPlanner(self.config)
         self.discovery = WebSearchProvider(self.config, self.fetcher)
+        self._register_plugins()
         self.save_binary = self.config.get('storage.save_binary', True)
         self.save_raw_html = self.config.get('storage.save_raw_html', False)
+
+    def _register_plugins(self) -> None:
+        """Wire discovered entry-point plugins into the pipeline (G1).
+
+        - parsers   -> DocumentParser keyed by content type
+        - chunkers  -> SemanticChunker, selectable via chunking.strategy
+        - providers -> WebSearchProvider fallback chain
+        - fetchers  -> NetworkFetcher fallback chain
+        All religiously failure-tolerant: a bad plugin degrades nothing.
+        """
+        # Parsers: accept either dict {content_type: fn} or a callable with a
+        # .content_type attribute.
+        for name, obj in self.plugins.parsers.items():
+            try:
+                if isinstance(obj, dict):
+                    for ct, fn in obj.items():
+                        DocumentParser.register_parser(str(ct), fn)
+                elif callable(obj) and getattr(obj, "content_type", None):
+                    DocumentParser.register_parser(str(obj.content_type), obj)
+                else:
+                    logger.warning(
+                        f"Parser plugin {name}: expected a dict or a callable "
+                        "with .content_type"
+                    )
+            except Exception as e:
+                logger.warning(f"Parser plugin {name} failed to register: {e}")
+
+        for name, fn in self.plugins.chunkers.items():
+            try:
+                self.chunker.register_plugin(name, fn)
+            except Exception as e:
+                logger.warning(f"Chunker plugin {name} failed to register: {e}")
+
+        self.discovery.plugin_providers.update(self.plugins.providers)
+        self.fetcher.plugin_fetchers.update(self.plugins.fetchers)
 
     @property
     def artifacts_dir(self) -> str:
@@ -3043,6 +3696,8 @@ class HoardCore:
             elif mode == 'hybrid':
                 hybrid = True
             chunks = self.vault.search_vault(query, limit, domain=domain, hybrid=hybrid)
+            self.bus.emit("search.completed", query=query,
+                          n_results=len(chunks), domain=domain)
             return [c.to_dict() for c in chunks]
 
         elif action == "ingest":
@@ -3114,12 +3769,15 @@ class HoardCore:
 
         results = await self.discovery.search(query, max_results=limit, strategy=strategy)
         if not results:
+            self.bus.emit("discovery.completed", query=query, urls=[])
             return [{
                 "text": f"No URLs discovered for query: {query!r}.",
                 "metadata": {"source": "discovery", "error": True, "query": query}
             }]
 
         logger.info(f"Discovered {len(results)} URLs for query: {query!r}")
+        self.bus.emit("discovery.completed", query=query,
+                      urls=[r.url for r in results])
 
         # rank-biased ingest: take the top-N results (configurable)
         targets = [r.url for r in results[:cfg_top]]

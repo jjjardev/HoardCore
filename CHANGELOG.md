@@ -3,6 +3,77 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-08-15
+
+### Added
+- **Entry-point plugin system.** `PluginManager` discovers third-party
+  extensions via `importlib.metadata` entry points across four groups:
+  `hoardcore.parsers`, `hoardcore.fetchers`, `hoardcore.providers`, and
+  `hoardcore.chunkers`. Parser plugins are keyed by content type; fetcher and
+  provider plugins append to the strategy/discovery fallback chains; chunker
+  plugins are selected by `chunking.strategy = "plugin.<name>"` (any plugin
+  failure falls back to the built-in pipeline). Gated by `plugins.enabled`.
+- **Lifecycle event bus.** `EventBus` publishes `document.ingested`,
+  `chunk.embedded`, `discovery.completed`, and `search.completed`; handlers
+  register via `bus.on('event', fn)` or `@bus.on('event')`, and an exception in
+  one handler never blocks the triggering path.
+- **SSRF protection** (`network.ssrf_protection`, default `true`). Fetch
+  targets are resolved and checked that every address is public before use,
+  non-http(s) and block-listed hosts (cloud-metadata, DNS-special names) are
+  refused, and redirect chains are re-validated after each hop (aiohttp
+  `allow_redirects=False` manual loop; final-URL check for curl/FlareSolverr).
+  Disable only on trusted isolated networks.
+- **Schema versioning.** Vaults record `PRAGMA user_version` so future schema
+  migrations run deterministically instead of by ad-hoc DDL.
+- **Embedding fingerprinting.** `EmbeddingsEngine.fingerprint()` folds the model
+  name/dim/quantize into a cache key; `chunk_vectors` gains an `embed_fp`
+  column so stale cross-model vectors are never served and backfill knows
+  exactly which rows to rebuild.
+- **Reranker hook** (`embeddings.reranker_model`). An optional cross-encoder
+  re-ranks the final recalled set via fastembed's `TextCrossEncoder`, loaded
+  lazily, cached per instance, and degrading to input order on any failure.
+- **CJK-aware chunking.** Token estimates count CJK characters as ~1 token each
+  and `overlap_tokens` now drives a sliding-window tail overlap so
+  boundary-split sentences stay in context.
+- **Numpy matrix-vector scan with cache.** `_vector_scan` loads the whole
+  vector table into one contiguous float32 buffer and dots it with the query
+  (`argpartition` for top-k), caching the matrix keyed on row count/width for
+  unchanged vaults; falls back to per-row cosine when numpy is absent.
+- **Backfill as batch transactions** (1000 rows per commit) with stale-row
+  cleanup when the embedding dimension changes.
+
+### Changed
+- **`clean_html` is trafilatura-first.** `trafilatura` is the default extractor;
+  `readability-lxml` is used only when trafilatura yields < 100 characters.
+- **`parse_binary` error surface.** Unknown binary types report the real decode
+  exception under `metadata.error` instead of a silent generic message.
+- **`verify_vault` N+1 eliminated.** Two `GROUP BY` passes replace one query per
+  chunk row.
+- **Config manager is instance-scoped** for non-default paths, fixing state
+  bleed between separately-constructed managers.
+- **Version bumped to 0.9.0** (pyproject, module `__version__`, config banner).
+
+### Fixed
+- **Discovery N+1 on the search path** (config `discovery.*` honored per
+  provider attempt).
+
+### Not implemented (deliberately deferred)
+- **`sqlite-vec` (vec0) was NOT adopted** despite the audit listing it. The
+  libsql `vec0` virtual table is a *brute-force exact scan*, not an ANN index —
+  its advertised gains are storage/compression wins, not asymptotic search
+  speed — and the production-grade HNSW variant is still marked alpha. For the
+  single-user CLI threat model, the in-process numpy matrix–vector scan (plus
+  the count-keyed cache and FTS fast path) already delivers the same or better
+  recall at the vault sizes HoardCore targets, without a new native dependency
+  or a second columnar copy of the vectors. Revisit when a stable HNSW
+  (e.g. DiskANN) ships in a SQLite-compatible form.
+- **Multi-user / multi-server mode was NOT built.** HoardCore remains a
+  single-user, single-writer CLI tool: the SQLite vault is not wired for
+  concurrent writers, and the WebSearchProvider/EventBus are in-process only.
+  Nothing in this release introduces a server surface; `network.ssrf_protection`
+  hardens the *fetching* side in case the module is ever embedded in a server
+  context, but the vault + CLI remain explicitly single-tenant by design.
+
 ## [0.8.4] - 2026-08-15
 
 ### Added

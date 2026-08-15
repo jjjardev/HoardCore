@@ -4,7 +4,7 @@ Research toolkit for AI agents — give your agent a memory it can prove.
 
 Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo/Mojeek web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
 
-![Version](https://img.shields.io/badge/version-0.8.6-blue)
+![Version](https://img.shields.io/badge/version-0.9.0-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -332,6 +332,20 @@ The pipeline for each document:
 4. **Chunk** — semantic splitting respecting headers (or paragraphs for binaries).
 5. **Store** — chunks persisted to FTS5, mirrored as markdown + chunks JSON under `hoardcore_data/`, and embeddings backfilled.
 
+### SSRF Protection
+
+Fetch targets are validated before any request and after every redirect hop: non-`http(s)` schemes, private/LAN/loopback/link-local (incl. `169.254.x.x` cloud-metadata) addresses, and DNS-special names are refused unless `network.ssrf_protection` is set to `false` (default `true`) for a trusted isolated network.
+
+### Plugin System & Event Bus
+
+Third-party extensions drop in via `importlib.metadata` entry points — no monkey-patching:
+- `hoardcore.parsers` → binary parsers keyed by content type
+- `hoardcore.fetchers` → extra fetch strategies appended to the strategy chain
+- `hoardcore.providers` → extra discovery backends (fallback chain)
+- `hoardcore.chunkers` → custom chunkers, selected by `chunking.strategy = "plugin.<name>"`
+
+Any plugin that fails to load, throws, or returns bad output is skipped with a warning — a broken plugin never aborts a crawl. A glossing `hoardcore.EventBus` publishes lifecycle hooks (`document.ingested`, `chunk.embedded`, `discovery.completed`, `search.completed`) for observability or automation.
+
 ### Hybrid Retrieval
 
 `search` fuses two candidate lists via Reciprocal Rank Fusion (RRF):
@@ -345,6 +359,8 @@ The pipeline for each document:
 **Confidence bands.** Every hybrid hit is tagged `high`, `medium`, or `low`. A hit is `high` if it matched *both* the keyword (FTS5) and vector lists, or if its absolute fused score is strong; otherwise it scales by absolute score (`conf_high_abs` / `conf_low_abs`). This discriminates weak, vector-only result sets from strong keyword+vector ones — unlike a ratio-to-top score, which stays high even for weak queries. The band is attached to chunk metadata and printed in grounding-context output (e.g. `score 0.0325 | high`). A low-confidence hit signals a weak match that should be **re-verified before being tagged `[V]`** — or demoted to `[E]`. FTS fast-path hits (which skip the vector scan) are tagged `medium`, since semantic closeness is unverified.
 
 Empty and whitespace-only queries return `[]` instead of raising. A punctuation-only query (no FTS tokens) still runs the vector scan in hybrid mode — the embedding model can match semantic content even when keywords are absent — while the FTS-only (`fast`) path returns `[]`.
+
+The dense vector scan is a single numpy matrix–vector product over the whole vector table (`argpartition` for top-k, cached when the table is unchanged) instead of a per-row Python loop. Optionally, `embeddings.reranker_model` runs a cross-encoder over the final recalled set, loaded lazily and degrading to input order on any failure.
 
 Queries are sanitized: operator characters (`" ( ) * ^ : -`) are stripped and tokens quoted, so free-text input cannot alter query semantics or raise FTS syntax errors.
 
@@ -455,17 +471,18 @@ Created automatically on first run. Key sections:
 | Section | Notable keys |
 |---|---|
 | `[general]` | `timeout_seconds`, `max_retries`, `user_agent` |
-| `[network]` | `default_strategy` (`fast`/`balanced`/`aggressive`), `enable_preflight` |
+| `[network]` | `default_strategy` (`fast`/`balanced`/`aggressive`), `enable_preflight`, `ssrf_protection` (block private/LAN/non-http(s) targets + re-validate redirects, default true) |
 | `[auth]` | `cookie_string` (e.g. `cf_clearance=...; session=...`) |
 | `[solver]` | `enabled`, `url`, `solver_timeout` |
 | `[storage]` | `root_dir`, `artifacts_dir`, `artifacts_by_day`, `save_binary`, `save_raw_html`, `page_size` (16 KB default) |
 | `[parsers]` | `enable_pdf`, `enable_docx`, `enable_epub`, `extract_pdf_tables` |
 | `[crawler]` | `respect_robots`, `sitemap_limit`, `parallel_workers` |
 | `[indexer]` | `enable_fts`, `search_limit`, `parallel` (threaded ingest, default off), `near_dedup` (simhash dup filter, default off), `near_dedup_threshold` |
-| `[embeddings]` | `enabled`, `mode` (`sparse`/`dense`), `dense_model`, `dim`, `mrl_dims` (Matryoshka truncation, 0 = full), `hybrid_search`, `top_k`, `quantize`, `fts_fast_path`, `recency_half_life_days`, `conf_high_abs`, `conf_low_abs` |
+| `[embeddings]` | `enabled`, `mode` (`sparse`/`dense`), `dense_model`, `dim`, `mrl_dims` (Matryoshka truncation, 0 = full), `hybrid_search`, `top_k`, `quantize`, `fts_fast_path`, `recency_half_life_days`, `conf_high_abs`, `conf_low_abs`, `reranker_model` (optional cross-encoder re-ranker) |
 | `[discovery]` | `provider`, `top_rank`, `max_retries`, `backoff_seconds` |
 | `[research]` | `answer_first` (memory-first routing, default true), `filter_low` (drop low-confidence chunks at EMIT, default true) |
-| `[chunking]` | `max_tokens`, `overlap_tokens`, `strategy` |
+| `[chunking]` | `max_tokens`, `overlap_tokens` (sliding window, CJK-aware), `strategy` (`heading` / `paragraph` / `plugin.<name>`) |
+| `[plugins]` | `enabled` (discover `hoardcore.*` entry-point plugins) |
 | `[cache]` | `ttl_seconds` |
 
 ---
