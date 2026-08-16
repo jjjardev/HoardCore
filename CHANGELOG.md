@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.9.6] - 2026-08-16
+## HoardCore v0.9.6
 
 ### Added
 - **In-repo reproducible research (`peel_anchor/`).** The deterministic-LCS
@@ -24,7 +24,7 @@ All notable changes to this project are documented here. This project adheres to
 - `hoardcore.py` engine code is unchanged in this release; the version bump
   tracks the README rewrite + committed research artifacts.
 
-## [0.9.5] - 2026-08-16
+## HoardCore v0.9.5
 
 ### Fixed
 - **Stats confidence probe sampled generic headers.** `confidence_distribution`
@@ -51,7 +51,7 @@ All notable changes to this project are documented here. This project adheres to
 ### Notes
 - Regression coverage for the probe-selection fix. Full suite green.
 
-## [0.9.4] - 2026-08-16
+## HoardCore v0.9.4
 
 ### Fixed
 - **Currency-token alignment in FTS.** The vault's `porter unicode61` tokenizer
@@ -77,7 +77,7 @@ All notable changes to this project are documented here. This project adheres to
 - Regression coverage: currency-token alignment, verbatim `$13` verification,
   and `keep_low` retention. Full suite green.
 
-## [0.9.3] - 2026-08-15
+## HoardCore v0.9.3
 
 ### Fixed
 - **Flat `medium` confidence on homogeneous vaults.** Hybrid-retrieval
@@ -102,7 +102,7 @@ All notable changes to this project are documented here. This project adheres to
   all-`medium`), and a small recall can only crown the top ~20% `high`. 111
   tests green.
 
-## [0.9.2] - 2026-08-15
+## HoardCore v0.9.2
 
 ### Added
 - **Typography-blind exact-phrasing verification.** `verify` now folds
@@ -129,7 +129,7 @@ All notable changes to this project are documented here. This project adheres to
 - **Doc/code drift on artifacts helpers** — the skill-documented module-level
   `citation_list`/`write_artifact`/`organize_artifacts_by_day` imports work.
 
-## [0.9.1] - 2026-08-15
+## HoardCore v0.9.1
 
 ### Fixed
 - **Docs accuracy audit.** Corrected false/outdated claims in `README.md` and
@@ -156,7 +156,7 @@ All notable changes to this project are documented here. This project adheres to
   sharpening the differentiator — citations machine-verified by CLI, not
   prompt-enforced.
 
-## [0.9.0] - 2026-08-15
+## HoardCore v0.9.0
 
 ### Added
 - **Entry-point plugin system.** `PluginManager` discovers third-party
@@ -227,7 +227,7 @@ All notable changes to this project are documented here. This project adheres to
   hardens the *fetching* side in case the module is ever embedded in a server
   context, but the vault + CLI remain explicitly single-tenant by design.
 
-## [0.8.4] - 2026-08-15
+## HoardCore v0.8.4
 
 ### Added
 - **Adaptive answer-first routing for `research`.** The agentic loop now queries
@@ -267,7 +267,7 @@ All notable changes to this project are documented here. This project adheres to
   forced clear so values always fit; hamming-distance comparisons are
   unaffected because every value is masked identically.
 
-## [0.8.3] - 2026-08-14
+## HoardCore v0.8.3
 
 ### Added
 - **Regression test for fast-path confidence (v0.8.2 test gap).** New
@@ -276,7 +276,7 @@ All notable changes to this project are documented here. This project adheres to
   semantic closeness is unverified) — closing the gap that would have let the
   dishonest `'high'` silently return. Test-only release; no behavior change.
 
-## [0.8.2] - 2026-08-14
+## HoardCore v0.8.2
 
 ### Changed
 - **Honest int8 positioning.** The v0.8.1 numpy rewrite upcasts int8 payloads
@@ -290,7 +290,7 @@ All notable changes to this project are documented here. This project adheres to
 - **`_decay` closure hoisted** out of the inner conditional in the recency
   rework, so it is defined once per call instead of per-branch (A3 robustness).
 
-## [0.8.1] - 2026-08-14
+## HoardCore v0.8.1
 
 ### Added
 - **Third-party codebase audit-driven patch** (v0.8.1). Implements the ten
@@ -349,7 +349,7 @@ All notable changes to this project are documented here. This project adheres to
   parallel ingest pipeline (E2), fast-path recency reordering (A3), and a
   subprocess CLI smoke suite (E9).
 
-## [0.8.0] - 2026-08-13
+## HoardCore v0.8.0
 
 ### Added
 - **16 KB SQLite page size for new vaults (`storage.page_size`, default 16384).**
@@ -381,7 +381,7 @@ All notable changes to this project are documented here. This project adheres to
   (`HCH_POOL_SIZE` → `HC_POOL_SIZE`, `HCH_WORKERS` → `HC_WORKERS`) — the
   toolkit is referred to simply as **HoardCore**.
 
-## [0.7.0] - 2026-08-13
+## HoardCore v0.7.0
 
 ### Added
 - **Per-topic vaults (`--vault NAME`).** A new CLI flag scopes the whole
@@ -405,7 +405,7 @@ All notable changes to this project are documented here. This project adheres to
 - Parallel ingestion now writes `content_hash` consistently with the sequential
   path (needed for vault integrity checks).
 
-## [0.6.0] - 2026-08-13
+## HoardCore v0.6.0
 
 ### Added
 - **Embedding model upgraded to `BAAI/bge-small-en-v1.5`** (384-dim, ~62 MTEB,
@@ -429,7 +429,7 @@ All notable changes to this project are documented here. This project adheres to
 - Vector storage now deduplicates across documents via the content-addressable
   hash, so re-ingesting similar pages no longer grows storage linearly.
 
-## [0.5.0] - 2026-08-13
+## HoardCore v0.5.0
 
 ### Added
 - **Dense retrieval is now the default (`[embeddings] mode = "dense"`).** Uses an
@@ -466,7 +466,7 @@ All notable changes to this project are documented here. This project adheres to
   0.032; weak vector-only sets near 0.016). Specific queries now score `high`;
   vague/off-topic queries score `medium`/`low`.
 
-## [0.4.0] - 2026-08-12
+## HoardCore v0.4.0
 
 ### Changed
 - **Repositioned: HoardCore is a research toolkit and memory protocol for AI
@@ -481,7 +481,7 @@ All notable changes to this project are documented here. This project adheres to
   agent follows." OpenCode is now described as one example of a harness, not the
   only one. Technical details unchanged.
 
-## [0.3.1] - 2026-08-11
+## HoardCore v0.3.1
 
 ### Fixed
 - **`research` lost the Source Links / Citations block (and could raise).** The
@@ -499,7 +499,7 @@ All notable changes to this project are documented here. This project adheres to
   `Makefile`, `pyproject.toml`, and `hoardcore.py` docstrings/comments. Kept the
   technically-true "retrieval needs no ML model / no embeddings model" facts.
 
-## [0.3.0] - 2026-08-10
+## HoardCore v0.3.0
 
 ### Rebrand: HoardCore-RAG (HCRAG) → HoardCore
 - Renamed from **HoardCore-RAG** to **HoardCore** — an *Agent Harness for
@@ -512,7 +512,7 @@ All notable changes to this project are documented here. This project adheres to
 - Added `CHANGELOG` release discipline: **v0.3.0** marks the rebrand and is
   shipped as a git tag + GitHub release.
 
-## [0.2.2] - 2026-08-09
+## HoardCore v0.2.2
 
 ### Fixed
 - **Sitemap crawler was effectively dead.** In `parse_sitemap` the `<loc>` XML
@@ -534,7 +534,7 @@ All notable changes to this project are documented here. This project adheres to
 - New `tests/test_crawler.py` suite (sitemap, robots, discovery — no network
   I/O) plus cache-hit and backfill regression tests. Suite is now **37 tests**.
 
-## [0.2.1] - 2026-08-07
+## HoardCore v0.2.1
 
 ### Changed
 - DeepResearch is now the **default research mode**. The bounded Hardcore
@@ -544,7 +544,7 @@ All notable changes to this project are documented here. This project adheres to
   → **DeepResearch** (depth presets are now `research`, `research deep`,
   `research exhaustive`, and the `x N` cap).
 
-## [0.2.0] - 2026-08-07
+## HoardCore v0.2.0
 
 ### Added
 - Autoresearch ("Hardcore Research Loop"): a bounded agent-research trigger in
@@ -567,7 +567,7 @@ All notable changes to this project are documented here. This project adheres to
   strategy was silently ignored and the config default was used, so
   `research --strategy aggressive` still fetched with the `balanced` chain.
 
-## [0.1.0] - 2026-08-07
+## HoardCore v0.1.0
 
 ### Added
 - Single-file ingestion engine (`hoardcore.py`): scrape, crawl, search, discover,
