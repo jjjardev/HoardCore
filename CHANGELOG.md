@@ -3,6 +3,16 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.9.7
+
+### Changed
+- **Changelog header format.** All release headers now read
+  `## HoardCore vX.Y.Z` (version name only, dropping the `[X.Y.Z] - date`
+  form) for consistent naming across the file.
+
+### Notes
+- Documentation-only; no `hoardcore.py` engine code changed.
+
 ## HoardCore v0.9.6
 
 ### Added
