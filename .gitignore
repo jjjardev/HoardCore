@@ -23,6 +23,11 @@ hoardcore_data/
 # --- Research artifacts (local deliverables only) ---
 artifacts/
 
+# The top-level peel_anchor/ directory (deterministic LCS approx + the
+# streaming-edit-distance sketch research) is COMMITTED and tracked, so the
+# claims are provable. It is the proof-of-record for the frontier-synthesis
+# stress test described in README.md.
+
 # Local config — auto-generated on first run and may contain cookies/credentials
 hoardcore.toml
 

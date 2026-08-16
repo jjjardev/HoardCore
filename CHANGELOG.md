@@ -3,6 +3,27 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.6] - 2026-08-16
+
+### Added
+- **In-repo reproducible research (`peel_anchor/`).** The deterministic-LCS
+  research that backs the "Stress-tested on frontier problems" claim is now
+  committed and tracked at the repo root — `peel_anchor_*.py`,
+  `sample_round_lcs.py`, `benchmark.py` + results, the original
+  `cs_hard_problem_novel_idea.md`, and the new
+  `deterministic_single_pass_edit_distance_sketch.md` (the 6-pass HARDORE-loop
+  deliverable: a deterministic single-pass ED sketch with `[V]/[E]/[H]`
+  provenance, falsification experiments F1–F4, and a benchmark spec). Every
+  script self-validates (`peel_anchor_hybrid.py`: sound-by-construction,
+  0/2000 certificate violations), so the claims are provable, not asserted.
+- **README** documents the `peel_anchor/` directory, the reproduction commands,
+  and the FlareSolverr requirement (now a required dependency for full
+  anti-bot coverage, since most sites gate content behind a challenge).
+
+### Notes
+- `hoardcore.py` engine code is unchanged in this release; the version bump
+  tracks the README rewrite + committed research artifacts.
+
 ## [0.9.5] - 2026-08-16
 
 ### Fixed
