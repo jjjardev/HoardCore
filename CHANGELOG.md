@@ -3,6 +3,19 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.9.8
+
+### Fixed
+- **CI lint on the committed `peel_anchor/` scripts.** The in-repo research
+  files failed `ruff check .` (42 errors: `zip()` without `strict=`, semicolon
+  statements, ambiguous `l` names, nested `if`s, unused variables, missing
+  trailing newlines). All fixed so the repo lints clean and CI passes.
+  Re-verified the scripts still validate (`peel_anchor_hybrid.py`:
+  0/2000 certificate violations) and all 118 tests pass.
+
+### Notes
+- Research-script lint fixes only; no `hoardcore.py` engine code changed.
+
 ## HoardCore v0.9.7
 
 ### Changed
