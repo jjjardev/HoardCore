@@ -73,6 +73,36 @@ def test_fts_query_strips_operators_and_returns_none_for_junk():
     assert hc.VaultManager._fts_query("   ") is None
 
 
+def test_fts_query_aligns_currency_tokens_to_index():
+    """A '$' directly before digits is indexed by unicode61 as the bare number,
+    so the FTS phrase must drop the '$' to match the index (e.g. '$13' -> '13').
+    `verify`'s raw-text LIKE still confirms the verbatim '$13' for [V]."""
+    import hoardcore as hc
+    assert hc.VaultManager._fts_query("coffee deficit of $13 million") == \
+        '"coffee" AND "deficit" AND "of" AND "13" AND "million"'
+    assert hc.VaultManager._fts_query("$1") == '"1"'
+    assert hc.VaultManager._fts_query("$21.3 billion") == '"21.3" AND "billion"'
+    # a '$' not followed by digits (e.g. a shell/dollar word) is left alone
+    assert hc.VaultManager._fts_query("dollar $ sign") == '"dollar" AND "$" AND "sign"'
+    assert hc._fts_token("$13") == "13"
+    assert hc._fts_token("plain") == "plain"
+
+
+def test_verify_claim_confirms_currency_figure(vault, make_chunk):
+    """A '$'-prefixed number present verbatim in stored text must verify, and
+    the FTS token alignment must not break the verbatim raw-text match."""
+    from hoardcore import HoardCore
+    vault.index_document(
+        "https://coffee.test/1",
+        [make_chunk("The Philippines has a coffee trade deficit of $13 million in 2022",
+                    header="Coffee", url="https://coffee.test/1")],
+        {})
+    hc_obj = HoardCore.__new__(HoardCore)
+    hc_obj.config = vault.config
+    hc_obj.vault = vault
+    assert hc_obj.verify_claim("The Philippines has a coffee trade deficit of $13 million in 2022") == "verified"
+
+
 def test_backfill_vectors_populates_missing(vault, make_chunk):
     vault.index_document("https://example.test/a", [make_chunk("some text to vectorize here", )], {})
     # force a gap: delete the vector row, then backfill recomputes it

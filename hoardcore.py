@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.9.3"
+__version__ = "0.9.4"
 
 import argparse
 import asyncio
@@ -380,15 +380,33 @@ def _nearest_phrase_probe(text: str, needle: str) -> tuple[float, int, int]:
     return (ratio, m.b, m.size)
 
 
+def _fts_token(token: str) -> str:
+    """Normalize a single query token for FTS MATCH, aligned with the index.
+
+    The vault uses the `porter unicode61` tokenizer, which treats currency
+    symbols as separators: `$13` is indexed as the token `13`, not `$13`. To
+    make a keyword/OR-fallback MATCH agree with the stored index, a `$` directly
+    followed by digits (e.g. `$13`, `$21.3`, `$1`) is reduced to its digit-only
+    form for the FTS phrase — while `verify`'s raw-text `LIKE` still confirms
+    the verbatim `$13` for `[V]` (see `normalize_claim`).
+    """
+    if "$" in token:
+        stripped = token.replace("$", "")
+        if stripped and stripped[0].isdigit():
+            return stripped
+    return token
+
+
 def _token_matches(cursor: sqlite3.Cursor, token: str) -> bool:
     """True if a single quoted FTS token matches at least one stored chunk.
 
     Used by the hybrid OR-fallback guard: it counts how many distinct query
     tokens are genuinely present in the corpus, so a long research question is
     rescued by the OR fallback only when it is actually topical (>=2 matching
-    tokens), never by a single coincidental word.
+    tokens), never by a single coincidental word. `$`+number tokens are aligned
+    to the index via `_fts_token`.
     """
-    q = f'"{token}"'
+    q = f'"{_fts_token(token)}"'
     try:
         cursor.execute("SELECT 1 FROM chunks_fts WHERE chunks_fts MATCH ? LIMIT 1", (q,))
         return cursor.fetchone() is not None
@@ -1711,7 +1729,7 @@ class VaultManager:
             cleaned = re.sub(r'["()*^:\-]', ' ', token)
             cleaned = ' '.join(cleaned.split())
             if cleaned:
-                tokens.append(f'"{cleaned}"')
+                tokens.append(f'"{_fts_token(cleaned)}"')
         if not tokens:
             return None
         return f' {op} '.join(tokens)
@@ -3479,7 +3497,8 @@ class HoardCore:
     async def research(self, question: str, out_path: str | None = None,
                        discover: int = 5, recall: int = 6,
                        strategy: str | None = None,
-                       answer_first: bool | None = None) -> str | None:
+                       answer_first: bool | None = None,
+                       keep_low: bool = False) -> str | None:
         """Agentic research workflow: DISCOVER -> INGEST -> RECALL -> EMIT.
 
         Live web-searches the question (via the configured discovery provider),
@@ -3505,15 +3524,21 @@ class HoardCore:
             answer_first = bool(self.config.get('research.answer_first', True))
 
         # [0/ANSWER-FIRST] memory check before touching the web.
-        memory_chunks: list[Chunk] = self.vault.search_vault(
+        raw_memory: list[Chunk] = self.vault.search_vault(
             question, limit=recall, hybrid=True)
-        memory_chunks = self._drop_low_confidence(memory_chunks)
+        memory_chunks = (raw_memory if keep_low
+                         else self._drop_low_confidence(raw_memory))
         answered = (answer_first and memory_chunks and any(
             c.metadata.get('confidence') == 'high' for c in memory_chunks))
 
         if answered:
             print("\n[0/ANSWER-FIRST] memory answers the question; skipping DISCOVER", flush=True)
             chunks: list[Chunk] = memory_chunks
+            dropped_low: list[str] = ([] if keep_low else [
+                c.metadata.get('source_url', '?')
+                for c in raw_memory
+                if c.metadata.get('confidence') == 'low'
+            ])
         else:
             # --discover N controls the hunt breadth; --discover 0 is an
             # explicit "recall-only" run (never touch the web). Omitted
@@ -3525,8 +3550,16 @@ class HoardCore:
                 await self._discover_and_ingest(question, discover, strategy, force_refresh=False)
 
             print(f"\n[2/RECALL] hybrid-retrieving top {recall} chunks", flush=True)
-            chunks = self.vault.search_vault(question, limit=recall, hybrid=True)
-            chunks = self._drop_low_confidence(chunks)
+            raw_chunks = self.vault.search_vault(question, limit=recall, hybrid=True)
+            chunks = raw_chunks if keep_low else self._drop_low_confidence(raw_chunks)
+            # Track how many low-confidence hits filter_low removed, so the
+            # grounding file explains the count honestly instead of looking
+            # like an under-filled recall. (No-op when keep_low is set.)
+            dropped_low = ([] if keep_low else [
+                c.metadata.get('source_url', '?')
+                for c in raw_chunks
+                if c.metadata.get('confidence') == 'low'
+            ])
             if not chunks:
                 print("  -> no chunks retrieved")
                 return None
@@ -3541,15 +3574,25 @@ class HoardCore:
                 f.write("> Answer-first recall: live DISCOVER was skipped "
                         "(existing high-confidence memory hit).\n\n")
             f.write(f"## Retrieved sources ({len(chunks)})\n\n")
+            if dropped_low:
+                f.write(f"> Note: `filter_low` (research.filter_low) dropped "
+                        f"{len(dropped_low)} low-confidence hit(s) from the raw "
+                        f"recall before EMIT; they are excluded below.\n\n")
             seen: set = set()
             for i, c in enumerate(chunks, 1):
                 src = c.metadata.get("source_url", "?")
                 seen.add(src)
-                f.write(f"### [{i}] {src}  (score {c.metadata.get('hybrid_score', 0):.4f} | {c.metadata.get('confidence', 'n/a')})\n")
+                score = c.metadata.get("hybrid_score")
+                score_s = f"{score:.4f}" if score is not None else "n/a"
+                f.write(f"### [{i}] {src}  (score {score_s} | {c.metadata.get('confidence', 'n/a')})\n")
                 f.write(f"{c.text}\n\n")
             f.write(f"## Distinct sources ingested: {len(seen)}\n")
             for s in sorted(seen):
                 f.write(f" - {s}\n")
+            if dropped_low:
+                f.write("## Low-confidence hits filtered at EMIT\n")
+                for s in sorted(set(dropped_low)):
+                    f.write(f" - {s}\n")
             f.write(self.citation_list(sorted(seen)))
 
         abs_path = os.path.abspath(out_path)
@@ -4169,6 +4212,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-answer-first", action="store_true",
                         help="With --action research: always run live DISCOVER, "
                              "even if the existing vault has a high-confidence answer.")
+    parser.add_argument("--keep-low", action="store_true",
+                        help="With --action research: retain low-confidence hits "
+                             "in the grounding context (skip filter_low) — for "
+                             "exhaustive/deep hunts that want the full evidence tail.")
+    parser.add_argument("--claim-file", default=None,
+                        help="With --action verify: read the claim from this file "
+                             "instead of --claim. Keeps characters like '$' intact "
+                             "(bash would otherwise expand '$13' to empty).")
     return parser
 
 
@@ -4204,12 +4255,20 @@ async def main(argv: list[str] | None = None) -> None:
         written = await scraper.research(query, out_path=out_path,
                                          discover=discover or 5, recall=recall,
                                          strategy=strategy,
-                                         answer_first=not args.no_answer_first)
+                                         answer_first=not args.no_answer_first,
+                                         keep_low=args.keep_low)
         sys.exit(0 if written else 1)
 
     if action == "verify":
+        if args.claim_file:
+            try:
+                with open(args.claim_file, encoding="utf-8") as cf:
+                    claim = cf.read().strip()
+            except OSError as e:
+                print(f"  ⚠️  cannot read --claim-file: {e}", file=sys.stderr)
+                sys.exit(2)
         if not claim:
-            print("  ⚠️  --claim required for --action verify", file=sys.stderr)
+            print("  ⚠️  --claim (or --claim-file) required for --action verify", file=sys.stderr)
             sys.exit(2)
         result = scraper.verify_claim(claim)
         print(f"VERIFY: {result.upper()}")

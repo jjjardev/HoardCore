@@ -3,6 +3,32 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-08-16
+
+### Fixed
+- **Currency-token alignment in FTS.** The vault's `porter unicode61` tokenizer
+  treats `$` as a separator, so `$13` is indexed as the bare token `13` — but
+  `_fts_query` built phrases that kept the `$`, so FTS keyword/OR-fallback
+  matching could silently miss currency figures even when their text was
+  stored. `_fts_token` now reduces a `$` directly followed by digits
+  (e.g. `$13`, `$21.3`, `$1`) to its digit-only form for the FTS phrase, so the
+  keyword signal and the OR-fallback guard agree with the index. `verify`'s
+  raw-text `LIKE` still confirms the verbatim `$13` for `[V]` (exact phrasing
+  preserved).
+
+### Added
+- **`--keep-low` for research.** By default `filter_low` still drops
+  low-confidence hits at EMIT (the documented hygiene), but exhaustive/deep
+  hunts that want the full evidence tail can pass `--keep-low` to retain
+  low-confidence chunks in the grounding context.
+- **`--claim-file` for verify.** Read the claim from a file instead of
+  `--claim`, so characters like `$` survive the shell intact (bash would
+  otherwise expand `$13` to empty). Also documented: escape `\$` in `--claim`.
+
+### Notes
+- Regression coverage: currency-token alignment, verbatim `$13` verification,
+  and `keep_low` retention. Full suite green.
+
 ## [0.9.3] - 2026-08-15
 
 ### Fixed

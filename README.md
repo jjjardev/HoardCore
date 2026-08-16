@@ -443,8 +443,10 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 | `--discover N` | Sources to discover first in `research` (default 5). |
 | `--recall N` | Chunks to retrieve in `research` (default 6). |
 | `--no-answer-first` | With `research`: always run live DISCOVER, even if the vault already has a high-confidence answer (default: `research.answer_first = true` skips it). |
+| `--keep-low` | With `research`: retain low-confidence hits in the grounding context (skip `filter_low`) — for exhaustive/deep hunts that want the full evidence tail. |
 | `--out PATH` | Output file for `research` (default day-sorted `artifacts/YYYY-MM-DD/grounding_context.md`). |
-| `--claim C` | Claim text to verify for the `verify` action. |
+| `--claim C` | Claim text to verify for the `verify` action. In shells, escape `$` as `\$` (bash expands `$13` to empty); or use `--claim-file` to read the claim from a file so `$` survives untouched. |
+| `--claim-file PATH` | With `verify`: read the claim from this file instead of `--claim` (preserves `$`, e.g. `$13`). |
 | `--vault NAME` | Scope the whole session to a per-topic vault (`hoardcore_data/NAME/`). |
 | `--mode MODE` | For `search`: `fast` (FTS-only) or `hybrid` (force vector+RRF). Default follows config. |
 | `--migrate` | With `check`: rebuild the vault at the configured `storage.page_size` (16 KB default) via `VACUUM INTO`. |

@@ -162,6 +162,13 @@ Use this to machine-check a claim against the vault before you tag it `[V]`.
   "400K+") and word order are still enforced. A `PARTIAL`/`UNVERIFIED` result
   is an instruction to re-express the claim in the source's own words; pass
   `--hint` to print the nearest vault phrase as a rewording target.
+- **Currency figures (`$` + number).** A claim like `"deficit of $13 million"`
+  verifies against its stored verbatim text. When calling the CLI from a shell,
+  either escape the `$` as `\$` (bash expands `$13` to empty) or pass
+  `--claim-file path` to read the claim from a file so `$` survives untouched.
+  FTS keyword/OR-fallback matching is tokenizer-aligned: `$13` is matched as
+  the index token `13`, while the verbatim `[V]` check still confirms the
+  literal `$13`.
 - **Exit codes (CI-wireable):** `0` = `VERIFIED` (the normalized claim appears
   verbatim in vault text, tested via a sliding 60-char window), `1` = `PARTIAL`
   (the top FTS5 hit is a strong all-term BM25 match — it measurably beats the
@@ -230,8 +237,13 @@ hybrid score, and confidence band.
   evidence should pass `--no-answer-first`.
 - **`filter_low`** (config, default true): at EMIT, confidence-`low` chunks are
   dropped from a recall set whenever stronger (non-low) chunks remain; a lone
-  low hit is still returned rather than nothing. Disable to keep exhaustive
-  evidence in the grounding file.
+  low hit is still returned rather than nothing. The grounding file notes any
+  drops transparently. Pass `--keep-low` to retain low-confidence hits in the
+  grounding context — for `deep`/`exhaustive` hunts that want the full evidence
+  tail. Note: low-confidence chunks are naturally rare at small `--recall N`
+  (the set-relative `low` band sits in the bottom ~half of the *returned*
+  set, below the shallow default recall), so their absence is expected, not a
+  fault.
 
 CLI form:
 

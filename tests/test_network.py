@@ -203,6 +203,64 @@ def test_research_discover_zero_is_recall_only(tmp_path, monkeypatch):
         assert "recall-only answer body" in f.read()
 
 
+def test_research_reports_filtered_low_confidence(tmp_path, monkeypatch):
+    """The grounding file must be transparent when `filter_low` drops
+    low-confidence hits: it should report the raw count dropped and list the
+    filtered sources, so a reduced chunk count reads as an intentional filter
+    rather than an under-filled recall."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+    scraper = hc.HoardCore()
+    scraper._discover_and_ingest = lambda *a, **k: None
+
+    low = hc.Chunk(
+        text="low relevance body",
+        metadata={"confidence": "low", "source_url": "https://low.test/1"})
+    high = hc.Chunk(
+        text="high relevance body",
+        metadata={"confidence": "high", "source_url": "https://high.test/1"})
+    scraper.vault.search_vault = lambda *a, **k: [high, low]
+
+    out = os.path.join(str(tmp_path), "grounding.md")
+    path = asyncio.run(scraper.research("q", out_path=out, discover=0, recall=3,
+                                        answer_first=False))
+    assert path is not None
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    # the low hit is excluded from retrieved sources, but its filtering is noted
+    assert "low relevance body" not in content
+    assert "filter_low" in content and "low-confidence hit(s)" in content
+    assert "https://low.test/1" in content  # listed as a filtered source
+
+
+def test_research_keep_low_retains_low_confidence(tmp_path, monkeypatch):
+    """`keep_low=True` must bypass filter_low and retain low-confidence hits in
+    the grounding file (the opt-in for exhaustive/deep hunts)."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+    scraper = hc.HoardCore()
+    scraper._discover_and_ingest = lambda *a, **k: None
+
+    low = hc.Chunk(
+        text="low relevance body",
+        metadata={"confidence": "low", "source_url": "https://low.test/1"})
+    high = hc.Chunk(
+        text="high relevance body",
+        metadata={"confidence": "high", "source_url": "https://high.test/1"})
+    scraper.vault.search_vault = lambda *a, **k: [high, low]
+
+    out = os.path.join(str(tmp_path), "grounding.md")
+    path = asyncio.run(scraper.research("q", out_path=out, discover=0, recall=3,
+                                        answer_first=False, keep_low=True))
+    assert path is not None
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    # the low hit is retained as evidence (not filtered)
+    assert "low relevance body" in content
+    assert "filter_low" not in content
+    assert "https://low.test/1" in content
+
+
 def test_process_document_skips_ad_tracking_url(tmp_path, monkeypatch):
     """Even if an ad URL reaches the pipeline, it must be refused before any
     fetch or index happens (the crawler-level regression)."""
