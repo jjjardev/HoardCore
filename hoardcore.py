@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.9.4"
+__version__ = "0.9.5"
 
 import argparse
 import asyncio
@@ -1508,21 +1508,39 @@ class VaultManager:
 
         Confidence is computed at retrieval time (it is query-relative), so it
         cannot be read from stored rows. This samples how the vault's own
-        content actually ranks: probe queries are derived from the most common
-        header phrases, so the histogram reveals "all-medium" flatness (the
-        sign of a mis-tuned band) versus a healthy high/medium/low spread.
+        content actually ranks, so the histogram reveals "all-medium" flatness
+        (the sign of a mis-tuned band) versus a healthy high/medium/low spread.
+
+        Probe queries are the most *distinctive* header segments — the deepest,
+        longest portion of each header path (e.g. the "… > Yield by region"
+        tail, preferring multi-word segments). Generic single-word headers
+        ("Production", "Farmers") are avoided: they match too broadly to be
+        keyword-backed, so probing them would report a misleading all-medium
+        distribution even when real topical queries spread normally.
         """
         import random
         with self._db() as (_conn, cursor):
             rows = cursor.execute(
                 "SELECT header_path FROM chunks_ca "
                 "WHERE header_path IS NOT NULL AND trim(header_path) != '' "
-                "LIMIT 40").fetchall()
-        phrases: list[str] = []
+                "LIMIT 200").fetchall()
+        # Split each header path and keep its deepest segment; rank by length
+        # (multi-word, specific) and drop generic single-word labels.
+        candidates: list[str] = []
+        seen: set[str] = set()
         for (hp,) in rows:
-            seg = hp.split(">")[-1].strip() if hp else ""
-            if seg and seg not in phrases:
-                phrases.append(seg)
+            segs = [s.strip() for s in hp.split(">") if s and s.strip()]
+            seg = segs[-1] if segs else ""
+            if not seg or seg in seen:
+                continue
+            seen.add(seg)
+            if seg.lower() in ("production", "farmers", "history", "introduction",
+                               "overview", "summary", "conclusion", "abstract"):
+                continue
+            candidates.append(seg)
+        # Prefer the longest (most specific, keyword-dense) segments.
+        candidates.sort(key=lambda s: len(s.split()), reverse=True)
+        phrases = candidates[: max(1, probes * 4)] or seen or ["crop"]
         if not phrases:
             return {"high": 0, "medium": 0, "low": 0}
         random.seed(0)
@@ -4182,9 +4200,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--claim", default=None,
-        help="Claim to verify verbatim against the vault "
-             "(exact phrasing; typographic variants like en/em dashes and "
-             "curly quotes are folded).",
+        help="Claim to verify verbatim against the vault. Exact phrasing "
+             "(typographic variants like en/em dashes and curly quotes are "
+             "folded, but '%%' vs 'percent' are NOT). In shells, escape '$' as "
+             "\\$ (bash expands $13 to empty) or use --claim-file.",
     )
     parser.add_argument(
         "--hint", action="store_true",

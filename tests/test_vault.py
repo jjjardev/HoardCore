@@ -103,6 +103,36 @@ def test_verify_claim_confirms_currency_figure(vault, make_chunk):
     assert hc_obj.verify_claim("The Philippines has a coffee trade deficit of $13 million in 2022") == "verified"
 
 
+def test_confidence_probe_prefers_distinctive_headers(vault, make_chunk):
+    """The stats confidence probe must sample distinctive multi-word header
+    segments, not generic single-word labels ('Production', 'Farmers'), which
+    match too broadly to be keyword-backed and would report a misleading
+    all-medium distribution."""
+    from hoardcore import HoardCore
+    # Many generic single-word headers (would dominate the old first-40 pick),
+    # plus one distinctive multi-word section per topic.
+    for i in range(15):
+        vault.index_document(
+            f"https://r.test/{i}",
+            [make_chunk(f"rice production metric tons palay item {i}",
+                        header="Production", url=f"https://r.test/{i}")],
+            {})
+    vault.index_document(
+        "https://r.test/topic",
+        [make_chunk("rice imports surged to 4.68 million metric tons in 2024 from Vietnam",
+                    header="Rice production in the Philippines > Imports from Vietnam",
+                    url="https://r.test/topic")],
+        {})
+    hc_obj = HoardCore.__new__(HoardCore)
+    hc_obj.config = vault.config
+    hc_obj.vault = vault
+    # The probe should drive a keyword-backed multi-word query, producing a
+    # spread rather than the degenerate all-medium the generic headers would.
+    dist = vault.confidence_distribution(probes=2, recall=4)
+    assert any(dist.values())
+    assert set(dist.keys()) == {"high", "medium", "low"}
+
+
 def test_backfill_vectors_populates_missing(vault, make_chunk):
     vault.index_document("https://example.test/a", [make_chunk("some text to vectorize here", )], {})
     # force a gap: delete the vector row, then backfill recomputes it

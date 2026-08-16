@@ -3,6 +3,33 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] - 2026-08-16
+
+### Fixed
+- **Stats confidence probe sampled generic headers.** `confidence_distribution`
+  (used by `--action stats`) took the first 40 header phrases, which on some
+  vaults are generic single-word labels (`Production`, `Farmers`, `History`) —
+  those match too broadly to be keyword-backed, so the probe reported a
+  misleading all-`medium` distribution even when real topical recalls spread
+  normally. The probe now prefers the deepest, longest (multi-word,
+  keyword-dense) header segments and skips generic labels, so the histogram
+  reflects genuine retrieval health.
+- **`--help` crash on `%` in help text.** The `--claim` help contained a
+  literal `%`, which argparse's `%-formatting` tried to interpret as a format
+  character, raising `ValueError` on `--help`. Escaped as `%%`.
+
+### Added
+- **Fresh-agent "Read First" guidance.** A new prominent block at the top of
+  `skill.md` documents the by-design behaviors that can look like bugs to a
+  new agent session — `PARTIAL`/`UNVERIFIED` means reword, `%` vs "percent"
+  are distinct tokens, `$` needs `--claim-file`/escaping in shells,
+  set-relative confidence, `filter_low` drops, and grounding counts below
+  `--recall N`. The `--claim` CLI help now carries the same warnings, so a
+  fresh agent reading either `skill.md` or `--help` is not misled.
+
+### Notes
+- Regression coverage for the probe-selection fix. Full suite green.
+
 ## [0.9.4] - 2026-08-16
 
 ### Fixed
