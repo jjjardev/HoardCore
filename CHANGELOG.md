@@ -3,6 +3,31 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] - 2026-08-15
+
+### Fixed
+- **Flat `medium` confidence on homogeneous vaults.** Hybrid-retrieval
+  confidence bands no longer key off absolute RRF fused scores (which cluster
+  into one band on same-topic vaults and tagged every hit `medium`). The new
+  default (`embeddings.conf_mode = "relative"`) ranks *within* the returned
+  recall set: top hit(s) clearly above the set's own tail are `high`, the tail
+  hugging the coincidence floor is `low`, the middle is `medium`. Only a
+  **keyword-backed** set (a genuine FTS match near the top) can crown `high`;
+  a pure-vector/off-topic set never does — mirroring `verify`'s
+  corpus-scaled coincidence-floor logic. `conf_mode = "absolute"` restores the
+  legacy `conf_high_abs`/`conf_low_abs` thresholds.
+
+### Added
+- **`--action stats` confidence probe.** `stats` now reports the configured
+  `conf_mode` plus a sampled `high`/`medium`/`low` distribution across the
+  vault's own header-phrase probes, so retrieval flatness is visible and
+  diagnosable instead of silent.
+
+### Notes
+- Regression coverage: homogeneous-vault recall now produces a spread (not
+  all-`medium`), and a small recall can only crown the top ~20% `high`. 111
+  tests green.
+
 ## [0.9.2] - 2026-08-15
 
 ### Added

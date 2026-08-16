@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.9.2"
+__version__ = "0.9.3"
 
 import argparse
 import asyncio
@@ -276,7 +276,7 @@ class ConfigManager:
             "crawler": {"respect_robots": True, "sitemap_limit": 500, "parallel_workers": 5},
             "indexer": {"enable_fts": True, "search_limit": 20, "parallel": False,
                         "near_dedup": False, "near_dedup_threshold": 3},
-            "embeddings": {"enabled": True, "mode": "dense", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 256, "mrl_dims": 0, "hybrid_search": True, "top_k": 40, "conf_high_abs": 0.025, "conf_low_abs": 0.020, "quantize": "float32", "fts_fast_path": True, "recency_half_life_days": 0, "reranker_model": ""},
+            "embeddings": {"enabled": True, "mode": "dense", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 256, "mrl_dims": 0, "hybrid_search": True, "top_k": 40, "conf_mode": "relative", "conf_high_abs": 0.025, "conf_low_abs": 0.020, "quantize": "float32", "fts_fast_path": True, "recency_half_life_days": 0, "reranker_model": ""},
             "research": {"answer_first": True, "filter_low": True},
             "discovery": {"enabled": True, "provider": "duckduckgo_html", "max_results": 10, "top_rank": 6, "max_retries": 2, "backoff_seconds": 1.5},
             "chunking": {"max_tokens": 512, "overlap_tokens": 50, "strategy": "heading"},
@@ -352,18 +352,6 @@ def is_ad_tracking_url(url: str) -> bool:
 
 def normalize_claim(text: str) -> str:
     """Normalize a claim for verbatim matching: fold *typographic* noise only.
-
-    `verify`'s exact-phrasing gate is deliberately strict — `[V]` is only
-    meaningful if a claim appears verbatim in stored text. But strictness must
-    not extend to render artifacts: en/em dashes, curly quotes, NBSP and
-    full-width (NFKC) characters are typographic variants of the *same* claim,
-    not different ones. This folds exactly those equivalences:
-
-    - en/em/figure/horizontal-bar/minus dashes -> ASCII hyphen
-    - curly/smart quotes (single + double) -> ASCII quotes
-    - any whitespace run (incl. NBSP) -> single ASCII space
-    - NFKC full-width variants (e.g. U+FF0B fullwidth plus) -> ASCII
-
     It deliberately does NOT add/remove tokens: "400K" stays distinct from
     "400K+" and reordered words never match. Typography-blind, semantics-strict.
     """
@@ -390,6 +378,22 @@ def _nearest_phrase_probe(text: str, needle: str) -> tuple[float, int, int]:
         0, len(needle), 0, len(hay))
     ratio = (2.0 * m.size) / (len(needle) + len(hay)) if (len(needle) + len(hay)) else 0.0
     return (ratio, m.b, m.size)
+
+
+def _token_matches(cursor: sqlite3.Cursor, token: str) -> bool:
+    """True if a single quoted FTS token matches at least one stored chunk.
+
+    Used by the hybrid OR-fallback guard: it counts how many distinct query
+    tokens are genuinely present in the corpus, so a long research question is
+    rescued by the OR fallback only when it is actually topical (>=2 matching
+    tokens), never by a single coincidental word.
+    """
+    q = f'"{token}"'
+    try:
+        cursor.execute("SELECT 1 FROM chunks_fts WHERE chunks_fts MATCH ? LIMIT 1", (q,))
+        return cursor.fetchone() is not None
+    except sqlite3.OperationalError:
+        return False
 
 
 def _simhash_bucket_patterns(k: int) -> list[int]:
@@ -1473,11 +1477,44 @@ class VaultManager:
             "vectors": vectors,
             "dim": dim,
             "mode": str(getattr(self.embeddings, "mode", "")),
+            "conf_mode": str(self.config.get('embeddings.conf_mode', 'relative')),
             "schema_version": schema_version,
             "page_size": page_size,
             "db_bytes": db_bytes,
             "preferred_name": self.vault_name,
         }
+
+    def confidence_distribution(self, probes: int = 4, recall: int = 6) -> dict[str, int]:
+        """Run a handful of diagnostic probes through the real hybrid search and
+        aggregate the resulting confidence bands.
+
+        Confidence is computed at retrieval time (it is query-relative), so it
+        cannot be read from stored rows. This samples how the vault's own
+        content actually ranks: probe queries are derived from the most common
+        header phrases, so the histogram reveals "all-medium" flatness (the
+        sign of a mis-tuned band) versus a healthy high/medium/low spread.
+        """
+        import random
+        with self._db() as (_conn, cursor):
+            rows = cursor.execute(
+                "SELECT header_path FROM chunks_ca "
+                "WHERE header_path IS NOT NULL AND trim(header_path) != '' "
+                "LIMIT 40").fetchall()
+        phrases: list[str] = []
+        for (hp,) in rows:
+            seg = hp.split(">")[-1].strip() if hp else ""
+            if seg and seg not in phrases:
+                phrases.append(seg)
+        if not phrases:
+            return {"high": 0, "medium": 0, "low": 0}
+        random.seed(0)
+        chosen = phrases[: max(1, probes)]
+        counts: dict[str, int] = {"high": 0, "medium": 0, "low": 0}
+        for q in chosen:
+            for chunk in self.search_vault(q, limit=recall, hybrid=True):
+                counts[chunk.metadata.get("confidence", "low")] = \
+                    counts.get(chunk.metadata.get("confidence", "low"), 0) + 1
+        return counts
 
     def migrate_page_size(self, target: int | None = None) -> bool:
         """Rewrite the vault DB at a different SQLite page size via `VACUUM INTO`.
@@ -1655,13 +1692,19 @@ class VaultManager:
         logger.info(f"Indexed {len(chunks)} chunks for {url} (v{version}, parallel)")
 
     @staticmethod
-    def _fts_query(query: str) -> str | None:
+    def _fts_query(query: str, op: str = "AND") -> str | None:
         """Build a safe FTS5 MATCH expression from a raw user query.
 
         Wraps each whitespace token as a quoted phrase so FTS operators
         (quotes, parentheses, *, ^, :, -) in user input cannot alter the
         query semantics or raise syntax errors. Returns None if the query
         contains no usable tokens (e.g. empty, punctuation-only).
+
+        `op` joins the quoted tokens: "AND" requires every token (strict, used
+        for the fts_fast strong-signal gate and exact recall), "OR" matches any
+        token (lenient fallback so a long research question with a couple of
+        absent terms still surfaces keyword-backed candidates instead of
+        collapsing to a pure-vector search).
         """
         tokens = []
         for token in re.findall(r'\S+', query):
@@ -1669,7 +1712,9 @@ class VaultManager:
             cleaned = ' '.join(cleaned.split())
             if cleaned:
                 tokens.append(f'"{cleaned}"')
-        return ' AND '.join(tokens) or None
+        if not tokens:
+            return None
+        return f' {op} '.join(tokens)
 
     def search_vault(self, query: str, limit: int = 20, domain: str | None = None,
                      hybrid: bool | None = None) -> list[Chunk]:
@@ -1928,6 +1973,38 @@ class VaultManager:
                     results.append(Chunk(text=text, metadata=meta))
                 return results
 
+            # --- OR-fallback for keyword-backed candidates (A-OR) ---
+            # A long research question whose strict AND-match is empty (any one
+            # absent term zeroes the whole AND) would otherwise fall through to
+            # a pure-vector search, tagging every hit 'medium' because no FTS
+            # keyword match exists to back a 'high'. Retry with an any-token OR
+            # so the RRF set is keyword-backed again and confidence can spread.
+            # The fallback only rescues genuinely topical queries: it requires
+            # at least two distinct query tokens to match the corpus, so a
+            # single coincidental token (e.g. one stray "marketplace" in an
+            # otherwise off-topic query) does NOT fake a keyword-backed set.
+            if not fts_rows and fts_match and ' AND ' in fts_match:
+                distinct = sum(
+                    1 for _t in re.findall(r'\S+', query)
+                    if (cand := re.sub(r'["()*^:\-]', ' ', _t).strip())
+                    and _token_matches(cursor, cand)
+                )
+                if distinct >= 2:
+                    or_match = self._fts_query(query, op="OR")
+                    if or_match:
+                        cursor.execute("""
+                            SELECT rowid, url, header_path, text, metadata_json
+                            FROM chunks_fts
+                            WHERE chunks_fts MATCH ?
+                            ORDER BY rank
+                            LIMIT ?
+                        """, (or_match, fts_pool))
+                        or_rows = cursor.fetchall()
+                        if or_rows:
+                            fts_rows = [(rid, url) for rid, url, _hp, _t, _m in or_rows]
+                            row_by_id = {rid: (url, hp, text, mj)
+                                         for rid, url, hp, text, mj in or_rows}
+
             # --- vector candidate list (one numpy matmul over the whole table) ---
             scored: list[tuple[float, int, str]] = []
             if vec_pool > 0:
@@ -1978,24 +2055,58 @@ class VaultManager:
             # --- Confidence bands ---
             # Confidence is derived from how strong the fused evidence is, not
             # just ratio-to-top (which stays ~0.9 even for weak queries because
-            # RRF scores cluster). Two signals:
-            #   1. Whether the hit matched BOTH the FTS5 keyword list AND the
-            #      vector list ("high" — terms present AND semantically close).
-            #   2. The absolute top fused score: a strong result set tops out
-            #      near 2/(k+1) ~= 0.032 (both lists agreed on #1), whereas a
-            #      weak result set (vector-only, no keyword match) tops out near
-            #      1/(k+1) ~= 0.016. Thresholds are set against this.
-            conf_high_abs = float(self.config.get('embeddings.conf_high_abs', 0.025))
-            conf_low_abs = float(self.config.get('embeddings.conf_low_abs', 0.020))
+            # RRF scores cluster). RRF scores are rank-bucketed, so on a
+            # homogeneous vault the absolute fused scores cluster into one band
+            # and leave every hit "medium" — the failure the set-relative mode
+            # fixes. Two modes:
+            #   "relative" (default): confidence is ordinal WITHIN the returned
+            #      set. The top hit(s) that clearly clear the set's own tail are
+            #      "high"; hits hugging the coincidence floor are "low"; the
+            #      middle is "medium". A flat homogeneous recall set therefore
+            #      produces a spread, not all-"medium". Only a keyword-backed
+            #      set (a genuine FTS match near the top) can crown "high" —
+            #      a pure-vector/off-topic set never does, matching verify's
+            #      corpus-scaled coincidence-floor logic.
+            #   "absolute" (legacy): old thresholds conf_high_abs/conf_low_abs
+            #      on the raw fused score (matched both lists, or score above
+            #      an absolute ceiling).
+            conf_mode = str(self.config.get('embeddings.conf_mode', 'relative')).lower()
             conf_by_rid: dict[int, str] = {}
-            for rid, score in order:
-                matched_both = rid in fts_rids and rid in vec_rids
-                if matched_both or score >= conf_high_abs:
-                    conf_by_rid[rid] = "high"
-                elif score >= conf_low_abs:
-                    conf_by_rid[rid] = "medium"
-                else:
-                    conf_by_rid[rid] = "low"
+            if conf_mode == 'absolute':
+                conf_high_abs = float(self.config.get('embeddings.conf_high_abs', 0.025))
+                conf_low_abs = float(self.config.get('embeddings.conf_low_abs', 0.020))
+                for rid, score in order:
+                    matched_both = rid in fts_rids and rid in vec_rids
+                    if matched_both or score >= conf_high_abs:
+                        conf_by_rid[rid] = "high"
+                    elif score >= conf_low_abs:
+                        conf_by_rid[rid] = "medium"
+                    else:
+                        conf_by_rid[rid] = "low"
+            elif order:
+                n = len(order)
+                top_score = order[0][1]
+                tail_score = order[-1][1]
+                spread = max(top_score - tail_score, 1e-9)
+                # Keyword-backed: a real FTS match sits near the top. A set
+                # whose top hits are vector-only (off-topic / keyword-free) can
+                # never be "high".
+                top_half = order[:max(1, (n + 1) // 2)]
+                keyword_backed = any(rid in fts_rids for rid, _score in top_half)
+                # Only the top ~20% of the set may be "high"; only the bottom
+                # ~half (hugging the coincidence floor) may be "low".
+                n_high = max(1, (n * 2) // 10 + (1 if n % 10 >= 5 else 0))
+                n_low = max(1, n // 2)
+                for idx, (rid, score) in enumerate(order):
+                    matched_both = rid in fts_rids and rid in vec_rids
+                    rel = (score - tail_score) / spread
+                    if (matched_both and idx == 0) or (
+                            keyword_backed and rel >= 0.66 and idx < n_high):
+                        conf_by_rid[rid] = "high"
+                    elif rel <= 0.10 and idx >= n_low:
+                        conf_by_rid[rid] = "low"
+                    else:
+                        conf_by_rid[rid] = "medium"
 
             results: list[Chunk] = []
             if ids:
@@ -4128,9 +4239,17 @@ async def main(argv: list[str] | None = None) -> None:
         print(f"  Chunks:     {st['chunks']}")
         print(f"  Vectors:    {st['vectors']}")
         print(f"  Embedding:  {st['mode']}, dim {st['dim']}")
+        print(f"  Conf mode:  {st['conf_mode']}")
         print(f"  Schema:     v{st['schema_version']} | page {st['page_size']} B")
         mb = st['db_bytes'] / (1024 * 1024)
         print(f"  DB size:    {mb:.1f} MiB")
+        try:
+            dist = scraper.vault.confidence_distribution()
+            if any(dist.values()):
+                print(f"  Conf probe: high {dist['high']} | medium {dist['medium']} | low {dist['low']} "
+                      "(sampled, set-relative)")
+        except Exception as e:
+            logger.debug(f"confidence probe skipped: {e}")
         sys.exit(0)
 
     result = await scraper.fetch(

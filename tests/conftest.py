@@ -34,7 +34,7 @@ class TempConfig:
             "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "extract_pdf_tables": True, "enable_pdf_ocr": True},
             "crawler": {"respect_robots": False, "sitemap_limit": 500, "parallel_workers": 2},
             "indexer": {"enable_fts": True, "search_limit": 20, "near_dedup": False, "near_dedup_threshold": 3},
-            "embeddings": {"enabled": True, "mode": "sparse", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 64, "mrl_dims": 0, "hybrid_search": True, "top_k": 40, "conf_high_abs": 0.025, "conf_low_abs": 0.013},
+            "embeddings": {"enabled": True, "mode": "sparse", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 64, "mrl_dims": 0, "hybrid_search": True, "top_k": 40, "conf_mode": "relative", "conf_high_abs": 0.025, "conf_low_abs": 0.013},
             "discovery": {"enabled": True, "max_results": 10, "top_rank": 6, "max_retries": 1, "backoff_seconds": 0.05},
             "research": {"answer_first": True, "filter_low": True},
             "chunking": {"max_tokens": 512, "overlap_tokens": 50, "strategy": "heading"},

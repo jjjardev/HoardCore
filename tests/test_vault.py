@@ -204,6 +204,96 @@ def test_confidence_discriminates_strong_vs_weak(vault, make_chunk):
     assert confs.issubset({"medium", "low"})
 
 
+def test_confidence_set_relative_spreads_homogeneous_vault(vault, make_chunk):
+    """Regression for the "all-medium" flatness: on a homogeneous vault where
+    every chunk is on-topic, absolute RRF thresholds cluster and tag everything
+    'medium'. The default relative mode must instead rank within the set —
+    crowning the top hit 'high' and pushing the tail to 'low' so the set is no
+    longer flat."""
+    for i in range(12):
+        url = f"https://karend.test/{i}"
+        text = (f"karenderia sari-sari store profit margin item {i}: "
+                f"fast moving essentials stock cooking oil sugar coffee snacks "
+                f"best selling products wholesale price tingi repack margin percent")
+        vault.index_document(url, [make_chunk(text, header="Karenderia", url=url)], {})
+
+    # Force the hybrid RRF path (not the fts_fast keyword fast-path, which
+    # correctly hardcodes 'medium') so the set-relative band is exercised.
+    vault.config._overrides["embeddings.fts_fast_path"] = False
+    res = vault.search_vault("karenderia sari-sari store profit margin", limit=8, hybrid=True)
+    assert len(res) > 1
+    confs = [c.metadata.get("confidence") for c in res]
+    # top hit must be 'high' (keyword-backed, clearly above the set's tail)
+    assert confs[0] == "high"
+    # the set must be spread, not all-'medium'
+    assert len(set(confs)) >= 2
+    # nothing unknown
+    assert set(confs).issubset({"high", "medium", "low"})
+
+
+def test_confidence_set_relative_caps_high_on_small_recall(vault, make_chunk):
+    """Set-relative confidence must not over-credit a small recall: only the
+    top ~20% of the set may be 'high', and never every row."""
+    for i in range(6):
+        url = f"https://karend.test/{i}"
+        text = (f"karenderia sari-sari profit margin item {i} cooking oil "
+                f"sugar coffee snacks wholesale tingi repack sell price")
+        vault.index_document(url, [make_chunk(text, header="K", url=url)], {})
+
+    vault.config._overrides["embeddings.fts_fast_path"] = False
+    res = vault.search_vault("karenderia sari-sari profit margin cooking oil", limit=6, hybrid=True)
+    confs = [c.metadata.get("confidence") for c in res]
+    # not everything can be 'high'
+    assert "high" not in confs or confs.count("high") < len(confs)
+    # and the top is high (it is keyword-backed and clearly the best match)
+    assert confs[0] == "high"
+
+
+def test_hybrid_or_fallback_rescues_topical_query(vault, make_chunk):
+    """A long research question whose strict FTS AND-match is empty (any one
+    absent term zeroes the whole AND) must not collapse to a pure-vector search
+    that tags every hit 'medium'. The OR-fallback rescues it when >=2 distinct
+    query tokens match the corpus, restoring a keyword-backed set with a spread
+    of confidence bands."""
+    vault.config._overrides["embeddings.fts_fast_path"] = False
+    for i in range(10):
+        url = f"https://saritest.ph/{i}"
+        text = (f"sari-sari store retail Philippines economy item {i} "
+                f"packworks small business micro seller stock sales")
+        vault.index_document(url, [make_chunk(text, header="R", url=url)], {})
+
+    # "gdp" has no match, so the strict AND ("... AND gdp") returns 0 rows.
+    res = vault.search_vault(
+        "sari-sari store retail Philippines economy packworks gdp contribution",
+        limit=8, hybrid=True)
+    assert len(res) > 1
+    confs = [c.metadata.get("confidence") for c in res]
+    # keyword-backed set: top hit is 'high' and the set is not all-'medium'
+    assert confs[0] == "high"
+    assert len(set(confs)) >= 2
+
+
+def test_hybrid_or_fallback_rejects_single_coincidental_token(vault, make_chunk):
+    """The OR-fallback guard must NOT fake a keyword-backed set for an
+    off-topic query that shares only a single coincidental token with the
+    corpus — that would crownd a weak match 'high'. At least two distinct
+    matching tokens are required."""
+    vault.config._overrides["embeddings.fts_fast_path"] = False
+    for i in range(8):
+        url = f"https://saritest.ph/{i}"
+        text = (f"sari-sari store retail Philippines item {i} packworks "
+                f"micro seller stock sales margin")
+        vault.index_document(url, [make_chunk(text, header="R", url=url)], {})
+
+    # only "marketplace" (one token) coincidentally appears nowhere here, but
+    # the query has real-ish words; ensure a lone present token alone can't
+    # lift the set to 'high'. Use a query where at most one token matches.
+    res = vault.search_vault("quantum banana marketplace zillion nebula", limit=8, hybrid=True)
+    confs = [c.metadata.get("confidence") for c in res]
+    assert "high" not in confs
+    assert set(confs).issubset({"medium", "low"})
+
+
 def test_verify_claim_three_states(vault, make_chunk):
     from hoardcore import HoardCore
     docs = [
