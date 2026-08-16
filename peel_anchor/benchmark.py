@@ -15,9 +15,10 @@ import os
 import random
 import time
 
-from peel_anchor_lcs import is_subsequence as is_subseq, lcs_len_exact, peel_anchor_lcs
-from sample_round_lcs import rotated_dp_exact, sample_and_round_lcs
 from peel_anchor_hybrid import peel_anchor_hybrid, peel_anchor_hybrid_multipass
+from peel_anchor_lcs import is_subsequence as is_subseq
+from peel_anchor_lcs import lcs_len_exact, peel_anchor_lcs
+from sample_round_lcs import sample_and_round_lcs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "benchmark_results.json")
@@ -90,9 +91,9 @@ def exp_C_banded_smoothed():
                 "n": n, "mutation_p": p,
                 "avg_exact": round(sum(exacts) / len(exacts), 2),
                 "avg_approx": round(sum(appxs) / len(appxs), 2),
-                "avg_ratio": round(sum(ap / ex for ap, ex in zip(appxs, exacts)
+                "avg_ratio": round(sum(ap / ex for ap, ex in zip(appxs, exacts, strict=True)
                                      ) / len(exacts), 4),
-                "min_ratio": round(min(ap / ex for ap, ex in zip(appxs, exacts)), 4),
+                "min_ratio": round(min(ap / ex for ap, ex in zip(appxs, exacts, strict=True)), 4),
             })
     return rows
 
@@ -142,10 +143,7 @@ def exp_E_sample_round():
     rows = []
     for n in (32, 64, 128):
         for p in (0.02, 0.10, None):
-            if p is None:
-                kind = "random"
-            else:
-                kind = f"p{p:g}"
+            kind = "random" if p is None else f"p{p:g}"
             exacts, certs, srs, ros = [], [], [], []
             for _ in range(20):
                 a = "".join(random.choice("abcdefghijklmnop") for _ in range(n))
@@ -173,13 +171,13 @@ def exp_E_sample_round():
                 "avg_exact": round(sum(exacts) / len(exacts), 2),
                 "avg_certifier": round(sum(certs) / len(certs), 2),
                 "avg_cert_ratio": round(
-                    sum(c / e for c, e in zip(certs, exacts)) / len(exacts), 4),
+                    sum(c / e for c, e in zip(certs, exacts, strict=True)) / len(exacts), 4),
                 "avg_sample_round": round(sum(srs) / len(srs), 2),
                 "avg_sr_ratio": round(
-                    sum(s / e for s, e in zip(srs, exacts)) / len(exacts), 4),
+                    sum(s / e for s, e in zip(srs, exacts, strict=True)) / len(exacts), 4),
                 "avg_round_only": round(sum(ros) / len(ros), 2),
                 "avg_ro_ratio": round(
-                    sum(s / e for s, e in zip(ros, exacts)) / len(exacts), 4),
+                    sum(s / e for s, e in zip(ros, exacts, strict=True)) / len(exacts), 4),
             })
     return rows
 
@@ -224,28 +222,31 @@ def exp_F_peel_anchor():
                 if hyb["lcs"] and not (is_subseq(hyb["lcs"], a)
                                        and is_subseq(hyb["lcs"], b)):
                     raise RuntimeError("hybrid lcs not a common subsequence")
-                exacts.append(ex); certs.append(cert)
-                srs.append(sr); ros.append(ro)
-                hybs.append(hyb["length"]); hyb_r.append(hyb["reweighted"])
+                exacts.append(ex)
+                certs.append(cert)
+                srs.append(sr)
+                ros.append(ro)
+                hybs.append(hyb["length"])
+                hyb_r.append(hyb["reweighted"])
                 hyb_act.append(len(hyb["active"]))
             rows.append({
                 "case": kind, "n": n,
                 "avg_exact": round(sum(exacts) / len(exacts), 2),
                 "avg_certifier": round(sum(certs) / len(certs), 2),
                 "avg_cert_ratio": round(
-                    sum(c / e for c, e in zip(certs, exacts)) / len(exacts), 4),
+                    sum(c / e for c, e in zip(certs, exacts, strict=True)) / len(exacts), 4),
                 "avg_sample_round": round(sum(srs) / len(srs), 2),
                 "avg_sr_ratio": round(
-                    sum(s / e for s, e in zip(srs, exacts)) / len(exacts), 4),
+                    sum(s / e for s, e in zip(srs, exacts, strict=True)) / len(exacts), 4),
                 "avg_round_only": round(sum(ros) / len(ros), 2),
                 "avg_ro_ratio": round(
-                    sum(s / e for s, e in zip(ros, exacts)) / len(exacts), 4),
+                    sum(s / e for s, e in zip(ros, exacts, strict=True)) / len(exacts), 4),
                 "avg_hybrid": round(sum(hybs) / len(hybs), 2),
                 "avg_hyb_ratio": round(
-                    sum(h / e for h, e in zip(hybs, exacts)) / len(exacts), 4),
+                    sum(h / e for h, e in zip(hybs, exacts, strict=True)) / len(exacts), 4),
                 "avg_hyb_reweighted": round(sum(hyb_r) / len(hyb_r), 2),
                 "avg_hyb_rw_ratio": round(
-                    sum(r / e for r, e in zip(hyb_r, exacts)) / len(exacts), 4),
+                    sum(r / e for r, e in zip(hyb_r, exacts, strict=True)) / len(exacts), 4),
                 "avg_active_scales": round(sum(hyb_act) / len(hyb_act), 2),
             })
     return rows

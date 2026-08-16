@@ -164,27 +164,27 @@
   "exp_B_runtime": [
     {
       "n": 200,
-      "approx_sec": 0.00047
+      "approx_sec": 0.00031
     },
     {
       "n": 400,
-      "approx_sec": 0.00086
+      "approx_sec": 0.00066
     },
     {
       "n": 800,
-      "approx_sec": 0.00218
+      "approx_sec": 0.00216
     },
     {
       "n": 1600,
-      "approx_sec": 0.00496
+      "approx_sec": 0.00271
     },
     {
       "n": 3200,
-      "approx_sec": 0.00973
+      "approx_sec": 0.00719
     },
     {
       "n": 6400,
-      "approx_sec": 0.01986
+      "approx_sec": 0.0157
     }
   ],
   "exp_C_banded_smoothed": [

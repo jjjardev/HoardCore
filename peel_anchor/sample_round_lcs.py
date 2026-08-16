@@ -24,7 +24,6 @@ x-axis via per-interval sampling) is exercised at practical sizes, not proven.
 
 import math
 import random
-from bisect import bisect_left
 
 
 # LCS grid: a match consumes 2 rotated columns (a 2-column horizontal jump),
@@ -75,10 +74,7 @@ def rotated_dp_exact(a, b):
             if (x - 2, y) in f:
                 u = (x - 2 + n - y) // 2
                 v = (x - 2 + y - n) // 2
-                if 0 <= u < n and 0 <= v < n:
-                    w = 1 if a[u] == b[v] else 0
-                else:
-                    w = 0
+                w = (1 if a[u] == b[v] else 0) if 0 <= u < n and 0 <= v < n else 0
                 if w:
                     best = max(best, f[(x - 2, y)] + w)
             if best != NEG:
@@ -103,9 +99,8 @@ def _band_dp(a, b, xl, xr, yl, yr):
             if (x - 2, y) in f:
                 u = (x - 2 + n - y) // 2
                 v = (x - 2 + y - n) // 2
-                if 0 <= u < n and 0 <= v < n and (x - 2 + n - y) % 2 == 0:
-                    if a[u] == b[v]:
-                        best = max(best, f[(x - 2, y)] + 1)
+                if 0 <= u < n and 0 <= v < n and (x - 2 + n - y) % 2 == 0 and a[u] == b[v]:
+                    best = max(best, f[(x - 2, y)] + 1)
             if best != NEG:
                 f[(x, y)] = best
     val = f.get((xr, yr), NEG)
@@ -148,8 +143,6 @@ def sample_and_round_lcs(a, b, M=4, active_p=0.5, B=8, seed=1,
         if scale == S:
             return True  # top scale always active: sanity connectivity
         return rng.random() < active_p
-
-    NEG = -10**9
 
     def one_round(rng):
         def rec(xl, yl, xr, yr, scale, top):

@@ -14,9 +14,9 @@ here; it is out of scope for a tiny self-contained benchmark. This file gives
 the deterministic anchor-selection machinery that scheme would consume.
 """
 
+import random
 from bisect import bisect_left
 from collections import Counter
-import random
 
 # ---------------------------------------------------------------------------
 # Exact LCS (O(n^2) DP), for correctness baseline
@@ -37,7 +37,9 @@ def lcs_len_exact(a, b):
     out = []
     while i > 0 and j > 0:
         if a[i - 1] == b[j - 1]:
-            out.append(a[i - 1]); i -= 1; j -= 1
+            out.append(a[i - 1])
+            i -= 1
+            j -= 1
         elif dp[i - 1][j] >= dp[i][j - 1]:
             i -= 1
         else:

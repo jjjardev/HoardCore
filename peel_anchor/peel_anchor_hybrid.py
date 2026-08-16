@@ -45,7 +45,6 @@ from peel_anchor_lcs import (
 )
 from sample_round_lcs import _width_cap
 
-
 # ---------------------------------------------------------------------------
 # Peel certificate -> deterministic signals
 # ---------------------------------------------------------------------------
@@ -59,7 +58,7 @@ def peel_ranks(b, rank):
     removed = [False] * len(b_list)
     it = 0
     while True:
-        alive = [c for c, r in zip(b_list, removed) if not r]
+        alive = [c for c, r in zip(b_list, removed, strict=True) if not r]
         if not alive:
             break
         peel = lds_greedy(alive, rank)
@@ -67,7 +66,7 @@ def peel_ranks(b, rank):
             break
         it += 1
         peel_set = set(peel)
-        for idx, (ch, r) in enumerate(zip(b_list, removed)):
+        for idx, (ch, r) in enumerate(zip(b_list, removed, strict=True)):
             if not r and ch in peel_set:
                 peel_id[idx] = it
                 removed[idx] = True
@@ -101,20 +100,20 @@ def prefix(seq):
     return p
 
 
-def interval_sum(pref, l, r):
-    return pref[r] - pref[l]
+def interval_sum(pref, left, r):
+    return pref[r] - pref[left]
 
 
-def deviation_of_interval(mass, l, r, M):
+def deviation_of_interval(mass, left, r, M):
     """Tree-total-deviation term of the mass signal on [l,r]: sum_i |sub_i - mean|."""
-    total = sum(mass[l:r])
-    w = r - l
+    total = sum(mass[left:r])
+    w = r - left
     if w == 0:
         return 0.0
     dev = 0.0
     for i in range(M):
-        sl = l + i * w // M
-        sr = l + (i + 1) * w // M
+        sl = left + i * w // M
+        sr = left + (i + 1) * w // M
         sub = sum(mass[sl:sr])
         dev += abs(sub - total / M)
     return dev
@@ -131,11 +130,11 @@ def scale_deviations(mass, M, S):
         if width <= 0:
             width = 1
         tot = 0.0
-        l = 0
-        while l < n2:
-            r = min(l + width, n2)
-            tot += deviation_of_interval(mass, l, r, M)
-            l = r
+        lo = 0
+        while lo < n2:
+            r = min(lo + width, n2)
+            tot += deviation_of_interval(mass, lo, r, M)
+            lo = r
         out[s] = tot
     return out
 
@@ -161,7 +160,7 @@ def deterministic_active_scales(scale_dev, S, n_peels):
     return active
 
 
-def deterministic_subintervals(pref, l, r, M, keep_frac=0.5):
+def deterministic_subintervals(pref, left, r, M, keep_frac=0.5):
     """Keep the largest-deviation sub-intervals of [l,r], a deterministic
     fraction of M (default exactly M/2 -> the half-majority the 2026 paper
     samples at random). Ranking by |sub - mean| of the peel-weighted signal.
@@ -170,12 +169,12 @@ def deterministic_subintervals(pref, l, r, M, keep_frac=0.5):
     k = max(1, int(round(M * keep_frac)))
     if k >= M:
         return list(range(M))
-    total = interval_sum(pref, l, r)
-    w = r - l
+    total = interval_sum(pref, left, r)
+    w = r - left
     devs = []
     for i in range(M):
-        sl = l + i * w // M
-        sr = l + (i + 1) * w // M
+        sl = left + i * w // M
+        sr = left + (i + 1) * w // M
         sub = interval_sum(pref, sl, sr)
         devs.append((abs(sub - total / M), i))
     devs.sort(reverse=True)
@@ -201,15 +200,17 @@ def _band_dp_pairs(a, b, xl, xr, yl, yr):
             best = NEG
             bp = None
             if (x - 1, y - 1) in f and f[(x - 1, y - 1)] > best:
-                best = f[(x - 1, y - 1)]; bp = ((x - 1, y - 1), None)
+                best = f[(x - 1, y - 1)]
+                bp = ((x - 1, y - 1), None)
             if (x - 1, y + 1) in f and f[(x - 1, y + 1)] > best:
-                best = f[(x - 1, y + 1)]; bp = ((x - 1, y + 1), None)
+                best = f[(x - 1, y + 1)]
+                bp = ((x - 1, y + 1), None)
             if (x - 2, y) in f:
                 u = (x - 2 + n - y) // 2
                 v = (x - 2 + y - n) // 2
-                if 0 <= u < n and 0 <= v < n and (x - 2 + n - y) % 2 == 0:
-                    if a[u] == b[v] and f[(x - 2, y)] + 1 > best:
-                        best = f[(x - 2, y)] + 1; bp = ((x - 2, y), (u, v))
+                if 0 <= u < n and 0 <= v < n and (x - 2 + n - y) % 2 == 0 and a[u] == b[v] and f[(x - 2, y)] + 1 > best:
+                    best = f[(x - 2, y)] + 1
+                    bp = ((x - 2, y), (u, v))
             if best != NEG:
                 f[(x, y)] = best
                 parent[(x, y)] = bp
@@ -529,7 +530,6 @@ def _certificate_test(n_samples=N_SAMPLES, n_min=6, n_max=26, M=4, B=4,
             a = "".join(random.choice("abcdefgh"[:k]) for _ in range(n))
             b = "".join(random.choice("abcdefgh"[:k]) for _ in range(n))
         res = certified_peel_anchor(a, b, M=M, B=B, keep_frac=0.5, mode=mode)
-        L = res["exact"]
         gap = res["gap"]
         C = res["cert"]["C"]
         tot += 1
@@ -627,12 +627,12 @@ def _peel_symbol_orders(b, rank_a, n_peels):
     removed = [False] * len(b_list)
     orders = []
     for _ in range(max(n_peels, 0)):
-        alive = [c for c, r in zip(b_list, removed) if not r]
+        alive = [c for c, r in zip(b_list, removed, strict=True) if not r]
         peel = lds_greedy(alive, rank_a)
         if not peel:
             break
         peel_set = set(peel)
-        orders.append([c for c in peel])
+        orders.append(list(peel))
         for idx, ch in enumerate(b_list):
             if not removed[idx] and ch in peel_set:
                 removed[idx] = True
