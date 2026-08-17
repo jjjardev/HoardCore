@@ -18,6 +18,9 @@ If a result looks wrong, check here before "fixing" anything — these are by-de
 5. **`filter_low` drops `low` at EMIT** (research) by design; grounding notes it. Use `--keep-low` for full evidence tail.
 6. **Grounding may show < `--recall N` chunks** — that's `filter_low`, not under-fill; the file says so.
 7. **Confidence is query-relative** — same chunk can band differently per query. Correct.
+8. **`--mode hybrid` can still return `fts_fast`** — with `embeddings.fts_fast_path=true` (default), a `search --mode hybrid` short-circuits to the FTS-only fast path whenever FTS5 alone fills the result set (hits tagged `retrieval='fts_fast'`, not `'hybrid'`). That's a speed optimization, not a bug; set `fts_fast_path=false` to force the vector+RRF path.
+9. **Parallel ingest is opt-in via `--parallel`/config** — threaded ingest engages only for batches of **8+ chunks**. Force it per-run with `--parallel` (or force off with `--no-parallel`); default follows `indexer.parallel` in `hoardcore.toml` (off). On small batches it's a silent no-op (the sequential path is used).
+10. **`filter_low` can drop a high-authority source** — confidence is set-relative *within the recall sample*, so a thin official/primary source (few chunks) can band `low` and vanish from the EMIT grounding set while a richer aggregator page dominates. Use `--keep-low` or a larger `--recall`, or domain-pin with `search`.
 
 ## DeepResearch (default for open-ended questions)
 
@@ -160,6 +163,7 @@ Sources, doc versions, chunks, vectors, embedding dim/mode, schema version, page
 - **Text-only**: cannot see images/video (downloads as binary blobs).
 - **Quality**: `quality_score` < ~0.1 → likely scanned/garbled.
 - **SSRF protection on** (`network.ssrf_protection=true`): refuses private/LAN/loopback/non-http(s). The aiohttp leg re-validates every redirect hop; the curl_cffi/FlareSolverr fallbacks (which follow redirects internally) re-validate the post-redirect final URL. Ask before disabling for internal targets.
+- **Fetch chain concurrency (`balanced`/`aggressive`):** aiohttp and curl_cffi run concurrently; the first leg returning content wins. A curl_cffi `200` beats an aiohttp anti-bot `404`/`403` body (the 404-disguise is rescued, not junk-filtered), so a protected page may take one or two legs, not a full serialized walk. FlareSolverr is the serialized terminal leg.
 - **Plugins**: `hoardcore.*` entry-point plugins auto-discovered (`plugins.enabled`); chunker via `chunking.strategy = "plugin.<name>"`. Lifecycle hooks on `hoardcore.EventBus`.
 - **Dependencies**: Python 3.11+; on failure run `make install`.
 

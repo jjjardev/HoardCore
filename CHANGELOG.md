@@ -3,6 +3,49 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.10.2
+
+### Added
+- **`--parallel` / `--no-parallel` CLI flag.** Threaded ingest could previously
+  only be toggled via the `indexer.parallel` config value. It can now be forced
+  per-run from the CLI (`--parallel` on, `--no-parallel` off). The override is
+  in-memory only (never written to `hoardcore.toml`) and engages the parallel
+  reader→embed→write pipeline for batches of 8+ chunks; smaller batches fall
+  through to the sequential path (silent no-op). Uses
+  `argparse.BooleanOptionalAction` so both forms are accepted.
+
+### Fixed
+- **Anti-bot fetch latency.** The `balanced`/`aggressive` strategy chains ran
+  aiohttp → curl_cffi → FlareSolverr *serially*, so when aiohttp was
+  anti-bot-blocked you paid a full curl_cffi round-trip before FlareSolverr.
+  aiohttp and curl_cffi now run **concurrently** (`asyncio.gather`); the first
+  leg that returns content wins, and the anti-bot 404-disguise case is rescued
+  (a curl 200 beats an aiohttp 404 body). FlareSolverr remains a serialized
+  terminal leg. Both legs still SSRF-validate independently, so no security
+  semantics change.
+
+### Changed
+- **Docs made factual (`README.md`, `skill.md`, `fetch()` docstring).** The
+  `--mode hybrid` behavior is now described accurately: with
+  `embeddings.fts_fast_path=true` (default) `hybrid` still short-circuits to the
+  FTS fast path when FTS5 alone fills the result set (hits tagged
+  `retrieval='fts_fast'`). Added the `--parallel` flag to the README CLI table,
+  corrected the `skill.md` "Expected Behaviors" note that previously claimed
+  parallel ingest had no CLI flag, and documented the `--parallel`/`--no-parallel`
+  forms in the CLI help.
+
+### Tests
+- `tests/test_cli.py`: `test_cli_parallel_flag_parses_on_off` (parser yields
+  `True`/`False`/`None`) and `test_cli_parallel_flag_runs_check` (flag accepted
+  end-to-end through `main()`).
+- `tests/test_network.py`: `test_aggressive_picks_curl_when_aiohttp_soft404s`
+  (anti-bot 404 rescue) and `test_aggressive_runs_aiohttp_and_curl_concurrently`
+  (concurrent legs, neither skipped).
+
+### Notes
+- Full suite passes (143), ruff clean. `--parallel` verified live on a 119-chunk
+  Wikipedia page (343/343 vectors aligned after ingest).
+
 ## HoardCore v0.10.1
 
 ### Fixed

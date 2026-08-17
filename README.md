@@ -4,7 +4,7 @@ Research toolkit for AI agents — give your agent a memory it can prove.
 
 Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo/Mojeek web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
 
-![Version](https://img.shields.io/badge/version-0.10.1-blue)
+![Version](https://img.shields.io/badge/version-0.10.2-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -325,7 +325,7 @@ You: That page is behind Cloudflare. Get me the text of
 
 Agent: venv/bin/python hoardcore.py https://protected.example.com/article \
        --action scrape --strategy aggressive
-  -> aiohttp -> curl_cffi -> (FlareSolverr, required & running) until it succeeds
+  -> aiohttp ⟂ curl_cffi (concurrent) -> (FlareSolverr, required & running) until it succeeds
 ```
 
 **6. Academic frontier synthesis (cross-domain)**
@@ -388,7 +388,7 @@ Because dense retrieval runs on `onnxruntime` (no PyTorch, no GPU) and the `hoar
 
 The pipeline for each document:
 
-1. **Fetch** — tries the strategy chain (aiohttp → curl_cffi → FlareSolverr) until one returns content. With the default `aggressive` strategy, FlareSolverr is the terminal leg that clears Cloudflare-shaped challenges.
+1. **Fetch** — tries the strategy chain (aiohttp ⟂ curl_cffi concurrently → FlareSolverr) until one returns content. With the default `aggressive` strategy, FlareSolverr is the terminal leg that clears Cloudflare-shaped challenges.
 2. **Parse** — HTML via `trafilatura` + `readability` with a self-selecting-best fallback; PDF/DOCX/EPUB via lazy-loaded binaries; else raw-text strip. **Scanned PDFs:** pages with no extractable text are auto-OCRed via RapidOCR (optional `pip install .[ocr]`, fully local ONNX, no system deps); OCR'd pages are flagged in metadata (`parser: pymupdf+ocr`, `ocr_pages`).
 3. **Junk-filter** — boilerplate/redirect/404/captcha pages and near-empty extractions are detected and refused entry to the vault.
 4. **Chunk** — semantic splitting respecting headers (or paragraphs for binaries).
@@ -572,7 +572,8 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 | `--claim C` | Claim text to verify for the `verify` action. In shells, escape `$` as `\$` (bash expands `$13` to empty); or use `--claim-file` to read the claim from a file so `$` survives untouched. |
 | `--claim-file PATH` | With `verify`: read the claim from this file instead of `--claim` (preserves `$`, e.g. `$13`). |
 | `--vault NAME` | Scope the whole session to a per-topic vault (`hoardcore_data/NAME/`). |
-| `--mode MODE` | For `search`: `fast` (FTS-only) or `hybrid` (force vector+RRF). Default follows config. |
+| `--mode MODE` | For `search`: `fast` (FTS-only) or `hybrid` (vector+RRF). Default follows config. Note: with `embeddings.fts_fast_path=true` (default), `hybrid` still short-circuits to the FTS fast path whenever FTS5 alone fills the result set — hits are then tagged `retrieval='fts_fast'`, not `'hybrid'`. Set `fts_fast_path=false` to always force the vector+RRF path. |
+| `--parallel` / `--no-parallel` | Override threaded ingest for this run (in-memory only, not written to `hoardcore.toml`). Engages the parallel reader→embed→write pipeline for batches of 8+ chunks; default follows `indexer.parallel` (off). On smaller batches it is a silent no-op (sequential path). |
 | `--migrate` | With `check`: rebuild the vault at the configured `storage.page_size` (16 KB default) via `VACUUM INTO`. |
 | `--force` | Ignore the cache and re-fetch / re-index. |
 

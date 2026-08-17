@@ -141,3 +141,25 @@ def test_module_level_citation_list_is_exported():
     assert "## Source Links / Citations" in block
     assert "[#1] https://a.example/1" in block
     assert "[#2] https://b.example/2" in block
+
+
+def test_cli_parallel_flag_parses_on_off():
+    """--parallel / --no-parallel must be accepted (BooleanOptionalAction) and
+    yield True / False / None (unset), so a caller can force or force-off the
+    threaded ingest pipeline independently of config indexer.parallel."""
+    import hoardcore as hc
+    parser = hc._build_parser()
+    assert parser.parse_args(["_", "--parallel"]).parallel is True
+    assert parser.parse_args(["_", "--no-parallel"]).parallel is False
+    assert parser.parse_args(["_"]).parallel is None
+
+
+def test_cli_parallel_flag_runs_check(tmp_path):
+    """--parallel must be accepted end-to-end through main() without error.
+    `check` doesn't ingest (parallel is a no-op there), but it proves the flag
+    parses and reaches the engine config override cleanly."""
+    cwd = _isolated_toml(tmp_path)
+    res = _run("_", "--action", "check", "--parallel", cwd=cwd)
+    assert res.returncode == 0, res.stderr
+    res = _run("_", "--action", "check", "--no-parallel", cwd=cwd)
+    assert res.returncode == 0, res.stderr

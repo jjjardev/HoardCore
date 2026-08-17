@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.10.1"
+__version__ = "0.10.2"
 
 import argparse
 import asyncio
@@ -2568,23 +2568,22 @@ class NetworkFetcher:
             raise RuntimeError("FETCH_FAILED")
 
         elif strategy == "balanced":
-            text, binary, ctype, status = self._normalize_fetch(
-                await self._fetch_aiohttp(url))
-            if text is not None or binary is not None:
-                return text, binary, ctype, status
-            text, binary, ctype, status = self._normalize_fetch(
-                await self._fetch_curl_cffi(url))
+            # aiohttp and curl_cffi run CONCURRENTLY: when aiohttp is
+            # anti-bot-blocked, we don't wait a full serialized round-trip for
+            # curl_cffi to fail too — the first leg that returns content wins.
+            # Both legs SSRF-validate independently, so concurrency changes no
+            # security semantics (C1). FlareSolverr stays a serialized terminal.
+            aio, curl = await asyncio.gather(
+                self._fetch_aiohttp(url), self._fetch_curl_cffi(url))
+            text, binary, ctype, status = self._pick_fetch(aio, curl)
             if text is not None or binary is not None:
                 return text, binary, ctype, status
             raise RuntimeError("FETCH_FAILED")
 
         elif strategy == "aggressive":
-            text, binary, ctype, status = self._normalize_fetch(
-                await self._fetch_aiohttp(url))
-            if text is not None or binary is not None:
-                return text, binary, ctype, status
-            text, binary, ctype, status = self._normalize_fetch(
-                await self._fetch_curl_cffi(url))
+            aio, curl = await asyncio.gather(
+                self._fetch_aiohttp(url), self._fetch_curl_cffi(url))
+            text, binary, ctype, status = self._pick_fetch(aio, curl)
             if text is not None or binary is not None:
                 return text, binary, ctype, status
             text, binary, ctype, status = self._normalize_fetch(
@@ -2598,6 +2597,36 @@ class NetworkFetcher:
             raise RuntimeError("FETCH_FAILED")
 
         raise RuntimeError("FETCH_FAILED")
+
+    @staticmethod
+    def _pick_fetch(aio, curl):
+        """Pick the first leg that produced content, preferring aiohttp on a tie
+        (aiohttp's returned status is authoritative for soft-404 detection).
+        Tolerates legacy 3-tuples from test doubles by padding status=None."""
+        aio = NetworkFetcher._pad(aio)
+        curl = NetworkFetcher._pad(curl)
+        a_text, a_bin, a_ctype, a_status = aio
+        c_text, c_bin, c_ctype, c_status = curl
+        if (a_text is not None or a_bin is not None) and (
+                c_text is not None or c_bin is not None):
+            # Both succeeded: prefer the one with a 200; a 404/soft-block from
+            # one leg while the other returns 200 means the 200 is the truth.
+            if a_status == 200:
+                return aio
+            if c_status == 200:
+                return curl
+            return aio  # tie: aiohttp is authoritative
+        if a_text is not None or a_bin is not None:
+            return aio
+        return curl
+
+    @staticmethod
+    def _pad(result):
+        """Normalize a (text, binary, ctype) 3-tuple to a 4-tuple with
+        status=None (legacy test doubles and older legs)."""
+        if len(result) == 3:
+            return result[0], result[1], result[2], None
+        return result
 
     async def _try_plugin_fetchers(self, url: str) -> tuple[str | None, bytes | None, str, int | None] | None:
         """Try registered plugin fetchers in order (G1).
@@ -4118,7 +4147,10 @@ class HoardCore:
                 never sent to the fetcher).
             max_results: For "discover", how many top results to ingest; for
                 "search", the max chunks returned (falls back to config).
-            mode: For "search", "fast" (FTS-only) or "hybrid" (force vector+RFF).
+            mode: For "search", "fast" (FTS-only) or "hybrid" (vector+RRF). Note
+                that with embeddings.fts_fast_path=true (default), "hybrid" can
+                still return the FTS fast path when FTS5 alone fills the result
+                set (hits tagged retrieval='fts_fast').
 
         Returns:
             List of dicts with "text" and "metadata" for the LLM.
@@ -4364,6 +4396,12 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="With --action check: rebuild vault at 16 KB pages.")
     parser.add_argument("--mode", choices=["fast", "hybrid"], default=None,
                         help="Force search mode (FTS-only vs vector+RRF).")
+    parser.add_argument(
+        "--parallel", action=argparse.BooleanOptionalAction, default=None,
+        help="Override threaded ingest for this run (on/off). Engages the "
+             "parallel reader->embed->write pipeline for batches of 8+ chunks. "
+             "Defaults to config indexer.parallel (false).",
+    )
     parser.add_argument("--no-answer-first", action="store_true",
                         help="With --action research: always run live DISCOVER, "
                              "even if the existing vault has a high-confidence answer.")
@@ -4397,6 +4435,11 @@ async def main(argv: list[str] | None = None) -> None:
     mode = args.mode
 
     scraper = HoardCore(vault_name=vault_name)
+    # --parallel overrides config indexer.parallel for this run only (in-memory,
+    # never written to hoardcore.toml). Read after engine construction so the
+    # per-run override is authoritative.
+    if args.parallel is not None:
+        scraper.config._config.setdefault("indexer", {})["parallel"] = args.parallel
     print(f"\n🚀 HoardCore v{__version__}: Action={action}, URL={url}, Strategy={strategy or 'default'}")
     organized = scraper.organize_artifacts_by_day()
     if organized:

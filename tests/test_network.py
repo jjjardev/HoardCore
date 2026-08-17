@@ -659,3 +659,39 @@ def test_research_answer_first_disabled_runs_discovery(tmp_path, monkeypatch):
                                         answer_first=False))
     assert path is not None
     assert captured.get("ran") is True
+
+
+def test_aggressive_picks_curl_when_aiohttp_soft404s(tmp_path):
+    """Anti-bot disguise: aiohttp returns a 404 body, curl_cffi returns real
+    content with 200. Concurrency must pick the 200 (the anti-bot 404 is not
+    the truth), so the 404-disguised page is rescued instead of junk-filtered."""
+    f = _fetcher(tmp_path)
+    f._fetch_aiohttp = lambda u: _stub(("404 not found", None, "text/html", 404))
+    f._fetch_curl_cffi = lambda u: _stub(("real content", None, "text/html", 200))
+    f._fetch_flaresolverr = lambda u: _stub((None, None, "", None))
+    out = asyncio.run(f.fetch("http://x/", "aggressive"))
+    assert out[0] == "real content"
+    assert out[3] == 200
+
+
+def test_aggressive_runs_aiohttp_and_curl_concurrently(tmp_path):
+    """Latency fix: aiohttp + curl_cffi must both be invoked (concurrently) for
+    balanced/aggressive; the first leg with content wins. Verifies no leg is
+    skipped, so we never regress the curl_cffi fallback."""
+    f = _fetcher(tmp_path)
+    calls = {"aio": 0, "curl": 0}
+
+    async def _aio(u):
+        calls["aio"] += 1
+        return None, None, "", None
+
+    async def _curl(u):
+        calls["curl"] += 1
+        return "curl content", None, "text/html", 200
+
+    f._fetch_aiohttp = _aio
+    f._fetch_curl_cffi = _curl
+    f._fetch_flaresolverr = lambda u: _stub((None, None, "", None))
+    out = asyncio.run(f.fetch("http://x/", "aggressive"))
+    assert out[0] == "curl content"
+    assert calls["aio"] == 1 and calls["curl"] == 1
