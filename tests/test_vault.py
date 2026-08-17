@@ -199,30 +199,41 @@ def test_embeddings_lexical_similarity():
 
 
 def test_dense_model_default_is_bge(tmp_path):
-    """The default dense model is BAAI/bge-small-en-v1.5 (384-dim)."""
+    """The default dense model is BAAI/bge-small-en-v1.5 (384-dim).
+
+    Skips when the dense model can't actually load (no fastembed / offline /
+    model-download failure) — the fallback-to-sparse sibling covers that case.
+    Restores the ConfigManager singleton so ordering can't leak state."""
     from hoardcore import ConfigManager, EmbeddingsEngine
-    # Build a fresh engine with a clean config default (avoid shared-state
-    # mutation from other tests that pin sparse).
     cfg = ConfigManager()
-    cfg._config["embeddings"]["mode"] = "dense"
-    cfg._config["embeddings"]["mrl_dims"] = 0  # pin: user config may set 96+
-    eng = EmbeddingsEngine(cfg)
-    assert eng.mode == "dense"
-    assert eng.dim == 384
+    saved = dict(cfg._config["embeddings"])
+    try:
+        cfg._config["embeddings"]["mode"] = "dense"
+        cfg._config["embeddings"]["mrl_dims"] = 0  # pin: user config may set 96+
+        eng = EmbeddingsEngine(cfg)
+        if eng.mode != "dense":
+            pytest.skip("fastembed/dense model unavailable in this environment")
+        assert eng.dim == 384
+    finally:
+        cfg._config["embeddings"] = saved
 
 
 def test_dense_mode_falls_back_to_sparse_when_unavailable(tmp_path):
     """If mode=dense but fastembed is not installed, degrade to sparse."""
     from hoardcore import ConfigManager, EmbeddingsEngine
     cfg = ConfigManager()
-    cfg._config["embeddings"]["mode"] = "dense"
-    cfg._config["embeddings"]["dim"] = 256
-    cfg._config["embeddings"]["mrl_dims"] = 0  # pin: user config may set 96+
-    eng = EmbeddingsEngine(cfg)
-    # Either dense loaded (fastembed present) or fell back to sparse; never crash.
-    assert eng.dim in (256, 384)
-    vec = eng.vectorize("renewable energy solar")
-    assert len(vec) == eng.dim * 4
+    saved = dict(cfg._config["embeddings"])
+    try:
+        cfg._config["embeddings"]["mode"] = "dense"
+        cfg._config["embeddings"]["dim"] = 256
+        cfg._config["embeddings"]["mrl_dims"] = 0  # pin: user config may set 96+
+        eng = EmbeddingsEngine(cfg)
+        # Either dense loaded (fastembed present) or fell back to sparse; never crash.
+        assert eng.dim in (256, 384)
+        vec = eng.vectorize("renewable energy solar")
+        assert len(vec) == eng.dim * 4
+    finally:
+        cfg._config["embeddings"] = saved
 
 
 def test_hybrid_search_attaches_confidence(vault, make_chunk):
@@ -345,10 +356,10 @@ def test_hybrid_or_fallback_rejects_single_coincidental_token(vault, make_chunk)
                 f"micro seller stock sales margin")
         vault.index_document(url, [make_chunk(text, header="R", url=url)], {})
 
-    # only "marketplace" (one token) coincidentally appears nowhere here, but
-    # the query has real-ish words; ensure a lone present token alone can't
-    # lift the set to 'high'. Use a query where at most one token matches.
-    res = vault.search_vault("quantum banana marketplace zillion nebula", limit=8, hybrid=True)
+    # Only "stock" (one token) matches the corpus; the OR-fallback guard
+    # requires >= 2 distinct matching tokens, so a lone coincidental token
+    # must NOT lift the set to 'high' — a weak match must never be crowned.
+    res = vault.search_vault("quantum banana zillion nebula stock", limit=8, hybrid=True)
     confs = [c.metadata.get("confidence") for c in res]
     assert "high" not in confs
     assert set(confs).issubset({"medium", "low"})

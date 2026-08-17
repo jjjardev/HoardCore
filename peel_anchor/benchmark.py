@@ -99,9 +99,14 @@ def exp_C_banded_smoothed():
 
 
 def exp_D_anchor_aligned():
-    """Strings structured w.r.t. the anchor order: block-repetition and
-    increasing-cycle strings. The LIS-of-b-under-anchor candidate should
-    recover ~all of a large LCS (ratio -> 1)."""
+    """NEGATIVE result, reported as such. Strings structured w.r.t. the anchor
+    order (block-repetition cycles and head-exact tails) were expected to make
+    the LIS-of-b-under-anchor candidate recover ~all of a large LCS. Measured:
+    the peel-anchor candidate instead recovers only 0.09-0.23 of LCS on both
+    families (see benchmark_results.json exp_D_anchor_aligned) -- anchor
+    consistency alone does not align the candidate with the true LCS, so D is
+    a falsified hypothesis, not a mechanism. Kept in the suite so the negative
+    result stays visible."""
     rows = []
     # D1: block-repeated cycles  abcdeabcde... (anchor order=lcs order)
     for n in (100, 200, 400, 800):
@@ -191,8 +196,10 @@ def exp_F_peel_anchor():
     Columns: certifier (sound), random sample+round (sound via min-over-rounds),
     round-only (sound, no sub-sampling), and the deterministic hybrid. The hybrid
     reports *two* values:
-      - length:   max(certifier, concatenated kept-sub-path) -- a REAL common
-                  subsequence, provably <= exact (sound by construction);
+      - length:   the single coherent common subsequence the reconstructed path
+                  actually traces -- verified against both inputs, so provably
+                  <= exact (sound by construction). No max() glue: the Bug-2
+                  fix made the traced path itself the sound output.
       - reweighted: the deterministic reweighted estimator = the paper's
                   completeness ceiling (may exceed exact on a single pass; not
                   claimed sound, reported to show the machinery's headroom).

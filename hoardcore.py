@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HoardCore v0.9.2 - Research toolkit for AI agents: retrieval & deep research.
+HoardCore - Research toolkit for AI agents: retrieval & deep research.
 Ingests HTML, PDF, DOCX, EPUB, and TXT into a persistent, searchable SQLite Vault.
 Hybrid retrieval fuses FTS5 keyword search with vector search (RRF), a
 web-discovery action feeds the crawler from a live search query, and an
@@ -19,12 +19,13 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.9.10"
+__version__ = "0.10.0"
 
 import argparse
 import asyncio
 import hashlib
 import importlib.metadata
+import inspect
 import io
 import ipaddress
 import json
@@ -320,6 +321,9 @@ def hamming64(a: int, b: int) -> int:
 _SIMHASH_BUCKET_BITS = 16
 _SIMHASH_BUCKET_MASK = (1 << _SIMHASH_BUCKET_BITS) - 1
 _SIMHASH_PATTERN_CACHE: dict[int, list[int]] = {}
+# SQLite's default max bound variables is ~999; keep a headroom margin so
+# bucket probing never raises "too many SQL variables" on large thresholds.
+_MAX_SQL_VARIABLES = 900
 
 
 def is_ad_tracking_url(url: str) -> bool:
@@ -425,8 +429,9 @@ def _simhash_bucket_patterns(k: int) -> list[int]:
 
     Probe buckets for a candidate are `candidate_bucket ^ p` over these
     patterns; this set provably contains the bucket of any stored simhash
-    within hamming distance k. Maxing out at 2^16 patterns degrades gracefully
-    for thresholds >= 16 (falling back to a full-table scan, still correct).
+    within hamming distance k. For thresholds high enough that the pattern set
+    would blow past SQLite's bound-variable limit, callers must fall back to a
+    full-table scan (see _near_duplicate_candidates).
     """
     k = min(int(k), _SIMHASH_BUCKET_BITS)
     if k in _SIMHASH_PATTERN_CACHE:
@@ -738,6 +743,10 @@ class ConnectionPool:
                 conn.execute("SELECT 1")
                 return conn
             except sqlite3.Error:
+                # Discard the dead connection so its fd/WAL handles aren't
+                # leaked, and hand out a fresh one in its place (S5).
+                with suppress(Exception):
+                    conn.close()
                 return self._create_connection()
         except queue.Empty:
             return self._create_connection()
@@ -905,14 +914,13 @@ class VaultManager:
                 )
             """)
 
-            # Trigger to clean up FTS when documents are updated
-            cursor.execute("""
-                CREATE TRIGGER IF NOT EXISTS documents_after_delete
-                AFTER DELETE ON documents
-                BEGIN
-                    DELETE FROM chunks_fts WHERE url = OLD.url;
-                END;
-            """)
+            # No automatic cascade on document delete: chunks_fts rows carry no
+            # version column, so a URL-scoped DELETE would nuke every version's
+            # chunks on a single-row surgery (S6). Nothing in the normal flow
+            # deletes documents (WORM append-only), so the old URL-scoped
+            # trigger is dropped to remove that data-loss trap; users pruning
+            # rows by hand own the chunks accordingly.
+            cursor.execute("DROP TRIGGER IF EXISTS documents_after_delete")
 
             # Vector index for hybrid retrieval. chunk_rowid mirrors the implicit
             # rowid of chunks_fts rows so vector and FTS results can be fused.
@@ -1160,6 +1168,14 @@ class VaultManager:
         """
         base = sh & _SIMHASH_BUCKET_MASK
         probes = [base ^ p for p in _simhash_bucket_patterns(threshold)]
+        if len(probes) > _MAX_SQL_VARIABLES:
+            # Pattern count (sum of C(16,i)) explodes past SQLite's bound
+            # variable limit at threshold >= 4-5; degrade gracefully to a
+            # full-table scan, which stays correct (only slower).
+            rows = cursor.execute(
+                "SELECT simhash FROM chunks_simhash"
+            ).fetchall()
+            return [r[0] for r in rows]
         qmarks = ",".join("?" * len(probes))
         rows = cursor.execute(
             f"SELECT simhash FROM chunks_simhash WHERE bucket IN ({qmarks})",
@@ -1264,6 +1280,9 @@ class VaultManager:
                             "VALUES (?, ?, ?)",
                             (rowid, url, vec),
                         )
+
+        # chunk_vectors changed; drop the stale vector-scan matrix (S1).
+        self._vec_mat_cache.clear()
 
         if self.bus is not None:
             self.bus.emit("document.ingested", url=url, version=version,
@@ -1398,6 +1417,7 @@ class VaultManager:
                 _conn.commit()
         if count:
             logger.info(f"Backfilled {count} chunk embeddings.")
+            self._vec_mat_cache.clear()
         return count
 
     def verify_vault(self) -> bool:
@@ -1524,7 +1544,6 @@ class VaultManager:
         keyword-backed, so probing them would report a misleading all-medium
         distribution even when real topical queries spread normally.
         """
-        import random
         with self._db() as (_conn, cursor):
             rows = cursor.execute(
                 "SELECT header_path FROM chunks_ca "
@@ -1549,7 +1568,6 @@ class VaultManager:
         phrases = candidates[: max(1, probes * 4)] or seen or ["crop"]
         if not phrases:
             return {"high": 0, "medium": 0, "low": 0}
-        random.seed(0)
         chosen = phrases[: max(1, probes)]
         counts: dict[str, int] = {"high": 0, "medium": 0, "low": 0}
         for q in chosen:
@@ -1586,7 +1604,10 @@ class VaultManager:
             conn = sqlite3.connect(self.db_path, timeout=DB_TIMEOUT)
             try:
                 conn.execute(f"PRAGMA page_size = {target}")
-                conn.execute(f"VACUUM INTO '{tmp_path}'")
+                # Cannot parameterize VACUUM INTO's filename; escape any single
+                # quote in the path so a root_dir with one can't break the SQL.
+                escaped = tmp_path.replace("'", "''")
+                conn.execute(f"VACUUM INTO '{escaped}'")
             finally:
                 conn.close()
             with sqlite3.connect(tmp_path) as v:
@@ -1629,6 +1650,15 @@ class VaultManager:
             return
         if not self.config.get('indexer.parallel', False) or len(chunks) < 8:
             return self.index_document(url, chunks, meta)
+
+        # Filter near-duplicates BEFORE the embed pipeline. Vectors are
+        # keyed by position in *this* list, so dedup must not shrink the list
+        # between embedding and writing (B1: it used to, misaligning every
+        # vector after the first dropped chunk).
+        with self._db() as (_conn, cursor):
+            chunks = self._filter_near_dupes(cursor, url, chunks)
+        if not chunks:
+            return
 
         embed_ok = self.config.get('embeddings.enabled', True)
         work_q: queue.Queue = queue.Queue(maxsize=PIPELINE_QUEUE_SIZE)
@@ -1680,7 +1710,6 @@ class VaultManager:
         # Single writer thread commits the whole batch (dedup + vectors).
         with self._db() as (_conn, cursor):
             domain = urlparse(url).netloc
-            chunks = self._filter_near_dupes(cursor, url, chunks)
             content_hash = hashlib.blake2b(
                 "\n".join(c.text for c in chunks).encode("utf-8"),
                 digest_size=32,
@@ -1726,6 +1755,8 @@ class VaultManager:
                         "VALUES (?, ?, ?)",
                         (rowid, url, vec),
                     )
+        # chunk_vectors changed; drop the stale vector-scan matrix (S1).
+        self._vec_mat_cache.clear()
         if error_holder:
             logger.warning(f"{len(error_holder)} embedding errors during parallel ingest.")
         if self.bus is not None:
@@ -2191,6 +2222,9 @@ class VaultManager:
         if not row:
             return False
         fetched_at = row[0]
+        # ttl_seconds <= 0 means "never expire" (documented contract).
+        if ttl_seconds <= 0:
+            return True
         return (time.time() - fetched_at) < ttl_seconds
 
     def get_chunks_for_url(self, url: str) -> list[Chunk]:
@@ -2314,8 +2348,11 @@ class NetworkFetcher:
         if not self._enable_preflight or not self._parse_cookies():
             return True
         if self._ssrf_protected and not self.validate_url_target(url):
+            # A SSRF block is a security refusal, NOT a Cloudflare cookie
+            # expiry — propagate it under its own marker so the caller reports
+            # the right diagnostic (S4).
             logger.warning(f"Preflight: SSRF guard refused target {url}")
-            return False
+            raise RuntimeError("SSRF_BLOCKED")
 
         try:
             async with aiohttp.ClientSession() as session, session.head(
@@ -2679,30 +2716,32 @@ class DocumentParser:
             return "", {"parser": "failed", "error": "PyMuPDF not installed"}
         try:
             doc = DocumentParser._fitz.open(stream=binary, filetype="pdf")
-            text_parts = []
-            ocr_pages = 0
-            meta = {"page_count": doc.page_count, "parser": "pymupdf"}
+            try:
+                text_parts = []
+                ocr_pages = 0
+                meta = {"page_count": doc.page_count, "parser": "pymupdf"}
 
-            for page_num in range(doc.page_count):
-                page = doc.load_page(page_num)
-                text = page.get_text()
-                if text.strip():
-                    text_parts.append(f"## Page {page_num + 1}\n\n{text.strip()}")
-                    continue
-                # Scanned / image-only page: fall back to OCR when available.
-                ocr_text = DocumentParser._ocr_page(page)
-                if ocr_text:
-                    text_parts.append(f"## Page {page_num + 1} (ocr)\n\n{ocr_text}")
-                    ocr_pages += 1
-                else:
-                    text_parts.append(f"## Page {page_num + 1} (ocr: no text extracted)\n\n")
+                for page_num in range(doc.page_count):
+                    page = doc.load_page(page_num)
+                    text = page.get_text()
+                    if text.strip():
+                        text_parts.append(f"## Page {page_num + 1}\n\n{text.strip()}")
+                        continue
+                    # Scanned / image-only page: fall back to OCR when available.
+                    ocr_text = DocumentParser._ocr_page(page)
+                    if ocr_text:
+                        text_parts.append(f"## Page {page_num + 1} (ocr)\n\n{ocr_text}")
+                        ocr_pages += 1
+                    else:
+                        text_parts.append(f"## Page {page_num + 1} (ocr: no text extracted)\n\n")
 
-            doc.close()
-            if ocr_pages:
-                meta["parser"] = "pymupdf+ocr"
-                meta["ocr_pages"] = ocr_pages
-            full_text = "\n\n".join(text_parts)
-            return full_text, meta
+                if ocr_pages:
+                    meta["parser"] = "pymupdf+ocr"
+                    meta["ocr_pages"] = ocr_pages
+                full_text = "\n\n".join(text_parts)
+                return full_text, meta
+            finally:
+                doc.close()
         except Exception as e:
             logger.error(f"PDF parsing failed: {e}")
             return "", {"parser": "failed", "error": str(e)}
@@ -3042,7 +3081,13 @@ class CrawlerPlanner:
                 if resp.status == 200:
                     text = await resp.text()
                     sitemap_urls = re.findall(r'^Sitemap:\s*(.+)$', text, re.MULTILINE | re.IGNORECASE)
-                    return [url.strip() for url in sitemap_urls]
+                    parsed = [url.strip() for url in sitemap_urls]
+                    if parsed:
+                        return parsed
+                    # robots.txt exists but declares no Sitemap directives;
+                    # probe the conventional location before giving up.
+                    logger.info(f"{base_url} had no Sitemap: directive; "
+                                "falling back to /sitemap.xml.")
         except Exception as e:
             logger.warning(f"Failed to fetch robots.txt: {e}")
 
@@ -3223,6 +3268,31 @@ class WebSearchProvider:
                 return results
             logger.warning(f"Discovery provider '{label}' returned nothing; trying fallback.")
             last_results = results
+
+        # Plugin-provided discovery backends form the tail of the fallback
+        # chain (built-ins first). A plugin provider is a callable
+        # `search(query, max_results) -> list[SearchResult]`, optionally async.
+        for label, backend in self.plugin_providers.items():
+            try:
+                res = backend(query, max_results)
+                if inspect.isawaitable(res):
+                    res = await res
+                results = list(res or [])
+                if results:
+                    logger.info(
+                        f"Discovery plugin provider '{label}' returned "
+                        f"{len(results)} results."
+                    )
+                    return results
+                logger.warning(
+                    f"Discovery plugin provider '{label}' returned nothing; "
+                    "trying fallback."
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Discovery plugin provider '{label}' failed ({e}); "
+                    "trying fallback."
+                )
 
         return last_results
 
@@ -3983,7 +4053,7 @@ class HoardCore:
         logger.info(f"Discovered {len(discovered_urls)} URLs for crawling.")
 
         # Use semaphore to limit parallel workers
-        max_workers = self.config.get('crawler.parallel_workers', 5)
+        max_workers = max(1, self.config.get('crawler.parallel_workers', 5))
         semaphore = asyncio.Semaphore(max_workers)
 
         async def _crawl_one(single_url: str) -> list[Chunk]:
@@ -4097,7 +4167,7 @@ class HoardCore:
 
     async def _ingest_many(self, urls: list[str], strategy: str, force_refresh: bool) -> list[dict[str, Any]]:
         """Process an explicit list of URLs with a bounded-worker pool."""
-        max_workers = self.config.get('crawler.parallel_workers', 5)
+        max_workers = max(1, self.config.get('crawler.parallel_workers', 5))
         semaphore = asyncio.Semaphore(max_workers)
         results: list[dict[str, Any]] = []
 
@@ -4105,6 +4175,14 @@ class HoardCore:
             async with semaphore:
                 try:
                     chunks, meta = await self._process_document(target, strategy, force_refresh)
+                    if meta.get('cached'):
+                        # Cache hit: the pipeline fetched nothing, so serve the
+                        # vaulted chunks back (mirrors _scrape_single) instead
+                        # of silently reporting zero content for the URL.
+                        results.extend(
+                            c.to_dict() for c in self.vault.get_chunks_for_url(target)
+                        )
+                        return
                     if meta.get('error'):
                         if chunks:
                             results.append(chunks[-1].to_dict())
@@ -4340,7 +4418,7 @@ async def main(argv: list[str] | None = None) -> None:
         # can re-express the claim in the source's own words and re-run (the
         # exact-phrasing contract), instead of dead-ending.
         if args.hint and result != "verified":
-            hint = scraper.verify_hint(claim)
+            hint = scraper.verify_hint(claim, recall=args.recall or 5)
             if hint:
                 print(hint)
         # exit codes: 0=verified, 1=partial, 2=unverified (CI-wireable)
@@ -4374,12 +4452,32 @@ async def main(argv: list[str] | None = None) -> None:
             logger.debug(f"confidence probe skipped: {e}")
         sys.exit(0)
 
-    result = await scraper.fetch(
-        url, action=action, strategy=strategy,
-        query=query, force_refresh=force_refresh,
-        urls=urls,
-        max_results=max_results, mode=mode
-    )
+    try:
+        result = await scraper.fetch(
+            url, action=action, strategy=strategy,
+            query=query, force_refresh=force_refresh,
+            urls=urls,
+            max_results=max_results, mode=mode
+        )
+    except RuntimeError as e:
+        marker = str(e)
+        if marker == "SSRF_BLOCKED":
+            print("  ⛔ SSRF guard refused the target (private/LAN/loopback/"
+                  "non-http URL).", file=sys.stderr)
+            print("  Set network.ssrf_protection=false only for trusted internal "
+                  "targets.", file=sys.stderr)
+        elif marker == "CF_COOKIE_EXPIRED":
+            print("  ☁️  Cloudflare challenge not cleared by the current cookie "
+                  "string.", file=sys.stderr)
+            print("  Update auth.cookie_string in hoardcore.toml (or raise "
+                  "network.timeout_seconds) and retry.", file=sys.stderr)
+        elif marker == "FETCH_FAILED":
+            print("  ⚠️  Fetch chain exhausted (aiohttp →" +
+                  (" curl_cffi →" if CURL_AVAILABLE else "") +
+                  " FlareSolverr).", file=sys.stderr)
+        else:
+            print(f"  ⚠️  {e}", file=sys.stderr)
+        sys.exit(2)
 
     print("\n" + "=" * 80)
     print(f"✅ Done. Returned {len(result)} chunks.")

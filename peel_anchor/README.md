@@ -58,8 +58,10 @@ Faithful reproduction of the *LCS half* of arXiv:2603.29702:
   the paper rounds/samples only on active scales.
 - **Back-up soundness cap**: any interval estimate is capped at `(width)//2`
   (a match consumes 2 rotated columns), plus **min over independent rounds** —
-  the paper's "sound + complete + back-up" decomposition made concrete: unbiased
-  (complete) per round, min-of-rounds ≈ sound.
+  the paper's "sound + complete + back-up" decomposition made concrete, with
+  the honest caveat that the M/kept reweight makes per-round expectation equal
+  the keep-all value only *modulo* that cap (so "unbiased per round" is not
+  exact); min-of-rounds ≈ sound.
 - **`round_only` mode**: same rounding, but keep *all* sub-intervals (reweight 1). Isolates
   the quality of the straight-line rounding itself from sub-sampling variance.
 
@@ -70,13 +72,23 @@ Binary-alphabet ratios 0.63–0.69; larger alphabets degrade to ~0.2–0.3 (subl
 ratio guarantee, `[V]`-consistent). Never exceeds exact.
 
 ### B. Runtime (k=16 wall-clock)
-`200→0.19ms … 6400→4.93ms` — near-linear, vs exact DP intractable past ~10⁴.
+`200→0.31ms … 6400→15.7ms` (committed `exp_B_runtime`; a fresh run this session
+measured 200→0.42ms / 6400→14.7ms, so wall-clock varies a little) — near-linear,
+vs exact DP intractable past ~10⁴.
 
 ### C. Smoothed regime (b = a with p·n substitutions) — the certifier's weak spot
 | p | exact | certifier | ratio |
 |---|---|---|---|
 | 0.02 | 392.6 | 29.9 | 0.076 |
 | 0.10 | 365.4 | 29.8 | 0.082 |
+
+### D. Anchor-aligned inputs — a falsified hypothesis (honest negative)
+`[H]`, committed `exp_D_anchor_aligned`. Strings were structured *w.r.t.* the
+anchor order (block-repeated cycles and head-exact tails) to make the
+LIS-of-b-under-anchor candidate line up with a large true LCS. It does **not**:
+measured ratios are **0.09–0.23** (cycle_shift ≈ 0.20; head_exact 0.09–0.23),
+i.e. anchor consistency alone does not align the candidate with the real LCS.
+This hypothesis is recorded as falsified — the result is not a mechanism.
 
 ### E. Sample-and-round vs certifier vs exact (NEW, n=128)
 | case | exact | certifier | sample+round | round_only |
@@ -103,10 +115,10 @@ indicates.**
 
 Same trial grid as E (smoothed p, random; n=32/64/128; 20 trials each), four
 columns, all on identical strings — `[H]` numbers from `benchmark_results.json`.
-This table is the **post-fix** state: active scales are *peel-bounded*
-(`k = n_peels`, top scale pinned) and the sound value is the **reconstructed
-coherent common subsequence** the grid actually traces — no `max()` over
-independent bounds.
+This table is the **post-fix** state: active scales are *peel-tied*
+(`k = max(1, min(n_peels, S))`, top scale pinned — so `|active|` is `k` or
+`k+1`, never more) and the sound value is the **reconstructed coherent common
+subsequence** the grid actually traces — no `max()` over independent bounds.
 
 | case | n  | exact  | certifier | random-SR | round_only | **hybrid** | hybrid rw | active scales |
 |------|----|--------|-----------|-----------|-----------|------------|-----------|---------------|
@@ -129,13 +141,14 @@ here; the hybrid replaces the random sampler, not the concentration theorem).
 **What the reviewer's Bug-1/Bug-2 fixes changed (this pass):**
 
 - **Bug 1 (active-scale selection) fixed.** Previously `k_scales = S` activated
-  *every* scale; now `deterministic_active_scales` uses exactly `k = n_peels`
-  scales (top-k by peel-weighted deviation), with the top scale `S` pinned for
-  connectivity. Exp G shows the active-scales fraction **drops with n** (1.00 →
-  0.52–0.54 at n=256) on both random and smoothed strings while `n_peels` stays
+  *every* scale; now `deterministic_active_scales` uses `k = max(1, min(n_peels,
+  S))` scales (top-k by peel-weighted deviation), with the top scale `S` pinned
+  for connectivity — so `|active|` is `k` or `k+1`. Exp G shows the
+  active-scales fraction **drops with n** (1.00 → 0.52–0.54 at n=256) on both
+  random and smoothed strings while `n_peels` stays
   ~1.6–6.3 — i.e. rounding now happens only on peel-certified scales, giving
-  Claim B empirical content: **active scales are bounded by the peel-iteration
-  count.**
+  Claim B empirical content: **active scales are tied to (bounded by the
+  peel-iteration count + the pinned top scale).**
 - **Bug 2 (sound output) fixed.** The old `length = max(certifier, raw)` glue
   is gone. `_band_dp_pairs` backtracks the exact base-case path, the recursion
   concatenates the kept sub-intervals' matched pairs in grid order, and
@@ -169,14 +182,19 @@ vs n, on smoothed vs random strings (20 trials, alphabet 16) — `[H]`:
 | random| 256 | 1.70      | 2.7       | 5.0    | 0.540 |
 | smooth| 256 | 1.60      | 2.6       | 5.0    | 0.520 |
 
-Because `k = n_peels` now bounds the active scale count, the fraction of total
-scales that get rounded **falls with n** (1.00 → ~0.52 at n=256) on *both*
-regimes — i.e. straight-line rounding is confined to the peel-certified scales,
-and the scheme's work doesn't grow with the recursion depth the way activating
-every scale would. At these small `n`/`M`, `n_peels` is a small constant (1.6–6.3);
-the interesting asymptotic question (does it stay `o(log n)` on band-concentrated
-instances?) is out of reach of this benchmark but the lever it claims — active
-scales ≤ peel iterations — is now directly implemented and measured.
+Because `k = max(1, min(n_peels, S))` now ties the active scale count to the
+peel iterations, the fraction of total scales that get rounded **falls with n**
+(1.00 → ~0.52 at n=256) on *both* regimes — i.e. straight-line rounding is
+confined to the peel-certified scales, and the scheme's work doesn't grow with
+the recursion depth the way activating every scale would. **Honest caveat, from
+the table itself:** `avg_active` exceeds `avg_peels` in 6/8 rows — because the
+pinned top scale `S` adds one when it isn't already in the top-k, so `|active|`
+is `k` or `k+1`. The honest bound is **active ≤ peel-iterations + 1**, not
+active ≤ peel-iterations. At these small `n`/`M`, `n_peels` is a small constant
+(1.6–6.3); the interesting asymptotic question (does it stay `o(log n)` on
+band-concentrated instances?) is out of reach of this benchmark but the lever
+it claims — active scales tied to the peel-iteration count — is now directly
+implemented and measured.
 
 ### H. The deterministic sound-gap closure (keep_frac sweep)
 
@@ -261,9 +279,12 @@ Every term on the RHS is known at runtime (the width back-up cap doing double
 duty as a certificate — `[V]` object, `[H]` use). Validated:
 - `mode='provable'`: **0/2000 violations** across smooth/banded/random/
   small-alphabet instances (n=6–26, M=4, B=4).
-- `mode='widthcap'` (drop_cap only): **failed 54%** — proves the *second* term
-  (keep_slack, the anchor-line loss inside kept rectangles) is necessary: the
-  2026 rounding loses matches even where it recurses.
+- `mode='widthcap'` (drop_cap only): **also 0/2000 at the shipped grid settings,
+  but vacuously** — the width cap over-counts the dropped loss so badly that C
+  saturates at 1.0 and never separates failing from passing instances. An
+  earlier note claimed "fails ~54%"; that was not reproducible on this grid and
+  is retracted here. It does not cleanly isolate the *second* term's necessity
+  the way the older phrasing implied.
 - `mode='mass'` (peel-mass fraction): **failed 98%** — see 1.
 
 **Honest tightness caveat.** The certificate is *valid but loose*: C/gap
@@ -285,15 +306,15 @@ is now in place.
   the smoothed regime, and the rounding alone (round_only) reaches 0.62–0.64.
 - **Peel-Anchor hybrid (NEW, post-fix + closure)**: the *actual* bridge in the idea doc —
   active scales = top-k-by-deviation of the peel-weighted mass signal with
-  **k bounded by the Greedy-LDS peel-iteration count** (top scale pinned);
+  `k = max(1, min(n_peels, S))` (top scale pinned; so `|active| = k` or `k+1`);
   M/2 sub-intervals chosen by largest-deviation prefix-sum ranking; fully
   deterministic (same input → same output). The output is a **single coherent
   reconstructed common subsequence, verified against both inputs** (no `max()`
-  glue); **multi-pass** (one grid run per peel-derived anchor order) recovers the
-  singleton's weak cases (k=16: 0.08→0.42 random, 0.26→0.53 smooth); and the
-  **keep_frac control deterministically closes the sound gap** to **1.000 on the
-  smoothed regime at 0.9** while exceeding round_only's ceiling at 75% budget
-  (0.76 vs 0.63–0.75).
+  glue); **multi-pass** (one grid run per peel-derived anchor order) adds a
+  modest sound gain on the smoothed regime at the 0.5 budget (n=128: 0.458 →
+  0.512, committed `exp_H`); and the **keep_frac control deterministically
+  closes the sound gap** to **1.000 on the smoothed regime at 0.9** while
+  exceeding round_only's ceiling at 75% budget (0.76 vs 0.63–0.75).
 - **Per-instance certificate (Round 6, NEW)**: `certified_peel_anchor` returns an
   **online** `C` with `sound ≥ (1−C)·LCS`, computed without the exact answer. Two-sided
   result: the peel-mass deviation is a *selector but not a certificate* (98% of

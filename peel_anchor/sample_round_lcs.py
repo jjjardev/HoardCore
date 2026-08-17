@@ -119,11 +119,14 @@ def sample_and_round_lcs(a, b, M=4, active_p=0.5, B=8, seed=1,
     straight-line anchors on active scales and subsampling of sub-intervals.
 
     The estimator is *sound* (never exceeds exact LCS) by taking the minimum
-    over several independent subsampling rounds: each round is an unbiased
-    (M/kept-reweighted) estimate, and the minimum is an under-estimate with
-    inverse-exponential overestimate probability. This mirrors the paper's
-    "sound + complete + back-up" decomposition: min-rounds = (nearly) sound,
-    unbiasedness = (nearly) complete, and the width bound = back-up.
+    over several independent subsampling rounds. Per-round expectation (with the
+    M/kept reweight) equals the keep-all recursion's value, *modulo* the width
+    back-up cap, which clips the reweighted sum — so "unbiased per round" is
+    only true before that clip, and the minimum-of-rounds is a deliberately
+    biased-down under-estimate. This mirrors the paper's "sound + complete +
+    back-up" decomposition, with the honest caveat that the reweight is not
+    exact under the cap: min-rounds = (nearly) sound, reweighted expectation =
+    (nearly) complete, and the width bound = back-up.
 
     mode:
       - 'random': active scales chosen randomly (the paper's scheme).

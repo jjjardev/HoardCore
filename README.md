@@ -4,7 +4,7 @@ Research toolkit for AI agents — give your agent a memory it can prove.
 
 Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo/Mojeek web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
 
-![Version](https://img.shields.io/badge/version-0.9.9-blue)
+![Version](https://img.shields.io/badge/version-0.10.0-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -57,7 +57,7 @@ Key characteristics:
 - **Research workflow.** A single `research` action runs `DISCOVER → INGEST → RECALL → EMIT`, writing a grounding-context file into the `artifacts/` directory for direct injection into an LLM.
 - **Programmatic provenance audit.** A `verify` action re-checks a claim against the vault's stored text (verbatim, partial, or unverified) with CI-wireable exit codes, so the `[V]` tag is machine-checkable, not just prompt-enforced.
 - **Artifacts discipline.** Finished deliverables live in `artifacts/` with `[V]/[E]/[H]` provenance tags and numbered source links; a safe `write_artifact()` helper includes path-traversal protection, and deliverables are day-sorted into `artifacts/YYYY-MM-DD/`.
-- **SSRF protection on by default.** Fetch targets are validated before any request and after every redirect hop — non-`http(s)` schemes, private/LAN/loopback/link-local addresses, and DNS-special names are refused (`network.ssrf_protection`, default `true`).
+- **SSRF protection on by default.** Fetch targets are validated before any request (aiohttp re-validates every redirect hop; the curl_cffi/FlareSolverr fallbacks re-validate the post-redirect final URL) — non-`http(s)` schemes, private/LAN/loopback/link-local addresses, and DNS-special names are refused (`network.ssrf_protection`, default `true`).
 - **Plugin system & event bus.** Third-party parsers/fetchers/providers/chunkers drop in via `importlib.metadata` entry points, and a lifecycle `EventBus` publishes `document.ingested` / `chunk.embedded` / `discovery.completed` / `search.completed` hooks — a broken plugin never aborts a crawl.
 - **Self-verifying vault.** Content-addressed chunks (BLAKE2b), schema versioning (`PRAGMA user_version`), and embedding fingerprints (`embed_fp`) mean re-ingested content dedupes, stale vectors are never served, and `--action check` proves integrity with CI-wireable exit codes.
 - **MIT licensed.** Free to use, modify, and redistribute.
@@ -396,7 +396,7 @@ The pipeline for each document:
 
 ### SSRF Protection
 
-Fetch targets are validated before any request and after every redirect hop: non-`http(s)` schemes, private/LAN/loopback/link-local (incl. `169.254.x.x` cloud-metadata) addresses, and DNS-special names are refused unless `network.ssrf_protection` is set to `false` (default `true`) for a trusted isolated network.
+Fetch targets are validated before any request — non-`http(s)` schemes, private/LAN/loopback/link-local (incl. `169.254.x.x` cloud-metadata) addresses, and DNS-special names are refused unless `network.ssrf_protection` is set to `false` (default `true`) for a trusted isolated network. The aiohttp leg re-validates every redirect hop; the curl_cffi/FlareSolverr fallbacks follow redirects internally, so they re-validate the post-redirect final URL instead.
 
 ### Plugin System & Event Bus
 

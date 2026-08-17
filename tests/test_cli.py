@@ -19,6 +19,21 @@ def _run(*args, cwd=None):
     )
 
 
+def _isolated_toml(tmp_path, extra: str = ""):
+    """Write a sparse, temp-rooted hoardcore.toml so a CLI subprocess builds
+    its engine against an isolated vault instead of the repo's (dense-mode,
+    network-capable) config."""
+    (tmp_path / "hoardcore.toml").write_text(
+        f"[storage]\nroot_dir = '{tmp_path / 'data'}'\n\n"
+        "[embeddings]\nenabled = true\nmode = 'sparse'\ndim = 64\n"
+        "hybrid_search = true\n\n"
+        "[network]\ndefault_strategy = 'fast'\nenable_preflight = false\n\n"
+        f"{extra}",
+        encoding="utf-8",
+    )
+    return str(tmp_path)
+
+
 def test_cli_help_exits_zero():
     """`--help` must print usage and exit 0 (argparse)."""
     res = _run("--help")
@@ -35,16 +50,20 @@ def test_cli_rejects_unknown_flag():
     assert "usage" in (res.stderr + res.stdout).lower()
 
 
-def test_cli_verify_requires_claim():
-    """`--action verify` without --claim must exit 2 with a clear message."""
-    res = _run("_", "--action", "verify")
+def test_cli_verify_requires_claim(tmp_path):
+    """`--action verify` without --claim must exit 2 with a clear message.
+    Runs in an isolated temp root so the (dense, network-enabled) repo config
+    is never loaded into the subprocess engine."""
+    cwd = _isolated_toml(tmp_path)
+    res = _run("_", "--action", "verify", cwd=cwd)
     assert res.returncode == 2
     assert "--claim" in (res.stdout + res.stderr)
 
 
-def test_cli_research_requires_query():
+def test_cli_research_requires_query(tmp_path):
     """`--action research` without --query must exit 2, not run a bare loop."""
-    res = _run("_", "--action", "research")
+    cwd = _isolated_toml(tmp_path)
+    res = _run("_", "--action", "research", cwd=cwd)
     assert res.returncode == 2
 
 
@@ -85,11 +104,32 @@ def test_cli_stats_action_reports_vault_counts(tmp_path):
     assert "Sources:" in res.stdout
 
 
-def test_cli_verify_hint_flag_errors_without_claim():
+def test_cli_verify_hint_flag_errors_without_claim(tmp_path):
     """`--hint` still requires --claim (exit 2), not a silent no-op."""
-    res = _run("_", "--action", "verify", "--hint")
+    cwd = _isolated_toml(tmp_path)
+    res = _run("_", "--action", "verify", "--hint", cwd=cwd)
     assert res.returncode == 2
     assert "--claim" in (res.stdout + res.stderr)
+
+
+def test_cli_verify_unverified_exits_2(tmp_path):
+    """The CI-wireable verify contract: an unsupported claim must exit 2
+    (UNVERIFIED) from the CLI, not 0."""
+    cwd = _isolated_toml(tmp_path)
+    res = _run("_", "--action", "verify",
+               "--claim", "absolutely absent gibberish xyzzy", cwd=cwd)
+    assert res.returncode == 2
+    assert "VERIFY: UNVERIFIED" in res.stdout
+
+
+def test_cli_scrape_ssrf_blocked_exits_2_without_traceback(tmp_path):
+    """S3: an SSRF-refused target must exit 2 with a clean message and no
+    Python traceback (the refusal used to crash main())."""
+    cwd = _isolated_toml(tmp_path, "[network]\nssrf_protection = true\n")
+    res = _run("https://127.0.0.1/x", "--action", "scrape", cwd=cwd)
+    assert res.returncode == 2
+    assert "Traceback" not in res.stderr
+    assert "SSRF" in (res.stdout + res.stderr)
 
 
 def test_module_level_citation_list_is_exported():

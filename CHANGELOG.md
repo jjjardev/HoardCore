@@ -3,6 +3,82 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.10.0
+
+### Fixed
+- **Parallel-ingest vector misalignment (B1).** The near-duplicate filter ran
+  *after* the embed pipeline, so when a chunk was collapsed the vectors written
+  back no longer matched the chunk rows; the filter now runs before embedding so
+  results stay index-aligned.
+- **`verify --recall` was ignored (B2).** The verify action called
+  `verify_hint(claim, recall=5)` unconditionally; it now honors `--recall`.
+- **`document_exists` treated `ttl_seconds <= 0` as always-expired (B3).**
+  Config with a zero/negative TTL (explicit "never expire") was misread; now
+  `<= 0` means never expire, matching the README contract.
+- **Cached re-ingest dropped cached chunks (B4).** `_ingest_many` on
+  `meta['cached']` re-parsed the URL instead of serving the vaulted chunks.
+- **Discovery plugins appended *before* the engine's own search (B5).** Custom
+  providers shadowed built-in discovery results; they are now a fallback tail.
+- **`_near_duplicate_candidates` SQL-bind overflow (B6).** Large chunk batches
+  exceeded SQLite's 999-variable limit (OperationalError) on URL/key sets;
+  batches now respect `_MAX_SQL_VARIABLES = 900`, falling back to a full-table
+  scan for the residual set.
+- **robots.txt without a Sitemap line skipped discovery (B7).** A 200 response
+  with no `Sitemap:` field was treated as authoritative and discovery stopped;
+  it now probes `/sitemap.xml` before giving up.
+- **Broken pooled connection leaked (S5).** `ConnectionPool.get()` returned a
+  new connection but left the broken one unclosed; it now closes the dead
+  connection first (no fd/WAL leak).
+- **Repeated manual deletes wiped all versions' chunks (S6).** A leftover
+  `documents_after_delete` trigger fired on *any* row delete; replaced with a
+  one-shot `DROP TRIGGER IF EXISTS`.
+- **PDF file handles leaked on parse errors (S7).** `parse_pdf` now closes the
+  document in a `finally` block.
+- **`VACUUM INTO` crashed on paths with quotes (S8).** The backup filename is
+  now single-quote-escaped.
+- **`--parallel 0` deadlocked (S9).** Both `_ingest_many` and `_crawl_domain`
+  created `asyncio.Semaphore(parallel_workers)`; now `max(1, parallel_workers)`.
+- **Module docstring pinned an old version (S12).** Removed the stale version
+  string and the dead `random.seed(0)`/`import random`.
+
+### Security
+- **Preflight SSRF refusal is now a hard error (S3/S4).** `fetch()` raises
+  `RuntimeError("SSRF_BLOCKED")` instead of returning a partial/odd result, and
+  `main()` catches `SSRF_BLOCKED`, `CF_COOKIE_EXPIRED`, and `FETCH_FAILED` to
+  exit 2 with a clean message (no traceback) — matching the aiohttp per-hop
+  re-validation semantics documented in `README.md`/`skill.md`.
+
+### Changed
+- **`search()` plugin providers become a fallback tail (B5)** — see above; sync
+  and async callables both supported (`inspect.isawaitable`).
+
+### Tests
+- New `tests/test_regressions.py` (8 regression tests covering B1, B2, B3, B4,
+  B5, B6, S1, S5).
+- `tests/test_cli.py`: isolated-tmp isolation for argument-validation tests via
+  `_isolated_toml()`; new tests for `verify` on unverified claims (exit 2) and
+  SSRF-blocked `scrape` (exit 2, no traceback).
+- `tests/test_vault.py`: fixed a trivial-pass test that used `assert 1 == 1`-style
+  querying; dense-model tests now skip cleanly when no dense backend is installed.
+- `tests/test_network.py`: `test_default_strategy_is_aggressive` no longer
+  depends on ambient config files.
+
+### Docs
+- `skill.md` + `README.md`: SSRF re-validation wording corrected (aiohttp
+  re-validates every redirect hop; curl_cffi/FlareSolverr re-validate the final
+  URL only).
+- `peel_anchor/`: doc honesty pass — corrected stale runtime figures
+  (`200→0.31ms … 6400→15.7ms`), the active-scales bound (`|active| = k or k+1`,
+  not `n_peels`), retracted the unreproducible "widthcap fails ~54%" claim
+  (0/2000 at shipped settings, vacuous saturation), fixed the stale `max()`
+  glue description in `benchmark.py` exp F, and surfaced the falsified
+  anchor-aligned hypothesis (exp D: ratios 0.09–0.23) as an explicit negative
+  result.
+
+### Notes
+- Engine bugfix + test-hardening release; supersedes the stale
+  `README.md` badge (0.9.9 → 0.10.0).
+
 ## HoardCore v0.9.10
 
 ### Fixed

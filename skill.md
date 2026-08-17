@@ -159,7 +159,7 @@ Sources, doc versions, chunks, vectors, embedding dim/mode, schema version, page
 ## Important Constraints
 - **Text-only**: cannot see images/video (downloads as binary blobs).
 - **Quality**: `quality_score` < ~0.1 → likely scanned/garbled.
-- **SSRF protection on** (`network.ssrf_protection=true`): refuses private/LAN/loopback/non-http(s) and re-validates every redirect. Ask before disabling for internal targets.
+- **SSRF protection on** (`network.ssrf_protection=true`): refuses private/LAN/loopback/non-http(s). The aiohttp leg re-validates every redirect hop; the curl_cffi/FlareSolverr fallbacks (which follow redirects internally) re-validate the post-redirect final URL. Ask before disabling for internal targets.
 - **Plugins**: `hoardcore.*` entry-point plugins auto-discovered (`plugins.enabled`); chunker via `chunking.strategy = "plugin.<name>"`. Lifecycle hooks on `hoardcore.EventBus`.
 - **Dependencies**: Python 3.11+; on failure run `make install`.
 

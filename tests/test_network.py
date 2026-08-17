@@ -62,10 +62,13 @@ def test_chain_raises_when_all_fail(tmp_path):
     assert str(ei.value) == "FETCH_FAILED"
 
 
-def test_default_strategy_is_aggressive():
+def test_default_strategy_is_aggressive(tmp_path):
     """network.default_strategy must default to aggressive so every fetch
-    escalates through the full aiohttp -> curl_cffi -> FlareSolverr chain."""
-    cfg = hc.ConfigManager()
+    escalates through the full aiohttp -> curl_cffi -> FlareSolverr chain.
+    Loaded from an isolated empty config so the user's (or CI's) local
+    hoardcore.toml can never flip this test."""
+    (tmp_path / "empty.toml").write_text("", encoding="utf-8")
+    cfg = hc.ConfigManager(str(tmp_path / "empty.toml"))
     assert cfg.get("network.default_strategy", "") == "aggressive"
 
 

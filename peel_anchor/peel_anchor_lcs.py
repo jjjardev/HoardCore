@@ -6,8 +6,10 @@ approximation of Boneh, Golan, Kraus (arXiv:2507.22486, Jul 2025), which
 is the "certifier" half of the Peel-Anchor scheme (see novel_idea artifact):
 
   - Exact O(n^2) DP baseline for validation.
-  - Deterministic approx: dyadic frequency-band certificate (Lemma 8
-    pigeonhole) + Greedy LDS peeling of a first-occurrence order -> anchors.
+  - Deterministic approx: dyadic frequency-band *heuristic* (max character-mass
+    band, motivated by the Lemma-8 pigeonhole bound but not itself a
+    certificate that the LCS lives in the band) + Greedy LDS peeling of a
+    first-occurrence order -> anchors.
 
 The 2026 Mao-Rubinstein curvature-sparsified-grid rounding *is not* reimplemented
 here; it is out of scope for a tiny self-contained benchmark. This file gives
@@ -147,7 +149,9 @@ def peel_anchor_lcs(a, b, band_logs=True):
 
     band = None
     if band_logs and n:
-        # dyadic bands [2^t, 2^{t+1}); pigeonhole-certified "good" band.
+        # dyadic bands [2^t, 2^{t+1}); pick the band with the most character
+        # mass (a heuristic — a pigeonhole-style bound on how many positions can
+        # be *kept*, NOT a certificate that the true LCS lives in this band).
         best_score = -1
         for t in range(n.bit_length()):
             lo, hi = 1 << t, 1 << (t + 1)

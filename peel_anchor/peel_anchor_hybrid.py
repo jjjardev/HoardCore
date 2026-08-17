@@ -143,15 +143,17 @@ def deterministic_active_scales(scale_dev, S, n_peels):
     """Select the active scales from the peeling certificate.
 
     Fix (reviewer Bug 1): the idea doc says 'select the active scales as the
-    peeling-iteration ranks themselves'. We honor that literally: exactly
-    k = min(n_peels, S) scales are active, chosen as the top-k by peel-weighted
-    tree-total-deviation, with the top scale S always pinned (the 2026 paper's
-    'pinned' mode requires scale S active for connectivity).
+    peeling-iteration ranks themselves'. We honor that literally: k =
+    max(1, min(n_peels, S)) scales are active, chosen as the top-k by
+    peel-weighted tree-total-deviation, with the top scale S always pinned (the
+    2026 paper's 'pinned' mode requires scale S active for connectivity).
 
     So on band-concentrated instances, where Greedy LDS peeling converges in
     few iterations, few scales are rounded -- straight-line rounding happens
-    ONLY at the peel-certified scales, exactly as claimed. k=n_peels also gives
-    Claim B its content: active scales bounded by the peel-iteration count."""
+    ONLY at the peel-certified scales, exactly as claimed. Note the honest
+    bound: |active| is k or k+1 (k+1 exactly when the pinned top scale S was
+    not already in the top-k set), i.e. active <= n_peels + 1, not n_peels --
+    the README's active-scales table reflects this."""
     k = max(1, min(n_peels, S))
     ranked = sorted(range(1, S + 1), key=lambda s: scale_dev.get(s, 0.0),
                     reverse=True)
@@ -386,9 +388,10 @@ def certified_peel_anchor(a, b, M=4, B=8, keep_frac=0.5, band_logs=False,
 
     mode="widthcap" (accounting for dropped rects only):
        C = sum over DROPPED sub-intervals of width_cap(rect) / LCS.
-       VALIDATED: FAILS ~54% because the deficit also includes matches lost
-       WITHIN kept rectangles (the recursion's anchor-restriction is a real
-       bound on the true LCS only via the width cap, never reached).
+       Valid but vacuous at the shipped grid settings: 0/2000 violations,
+       because the width cap over-counts the dropped loss so badly that C
+       saturates at 1.0 and never dips below the real gap (see README;
+       the earlier "fails ~54%" note was not reproducible on this grid).
 
     mode="provable" (accounts for BOTH deficit sources):
        deficit has two provable parts:
@@ -505,8 +508,10 @@ def _certificate_test(n_samples=N_SAMPLES, n_min=6, n_max=26, M=4, B=4,
     ALWAYS holds (validated: 0 violations here); C is a valid but LOOSE bound
     (typically several times the true gap, saturating at 1.0 when sound is
     small -- the width-cap accounting over-counts, see README).
-    mode="widthcap": C = drop_cap-only -- FAILS ~54% (ignores anchor-line loss
-    inside kept rectangles).
+    mode="widthcap": C = drop_cap-only -- holds at the shipped grid settings
+    (0/2000) but only vacuously: the width cap over-counts, so C saturates at
+    1.0 and never separates failing from passing instances (the older
+    "fails ~54%" phrasing was not reproducible on this grid).
     mode="mass": C = dropped_mass/total_mass -- FAILS ~98%: the peel-mass
     deviation is a good *selector* but NOT a certificate for rounding loss."""
     random.seed(7)
