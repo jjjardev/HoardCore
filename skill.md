@@ -76,6 +76,19 @@ Every quantitative claim / date / unique term in a synthesis gets a tag:
 4. **Discover** — live web-search (DuckDuckGo/Mojeek) + ingest top results.
 5. **Emit** — write deliverables into `artifacts/`.
 
+## Hybrid Discovery — HoardCore + your harness's web tools
+
+HoardCore's own DISCOVER (DuckDuckGo/Mojeek through the resilient fetch chain) is the vault-feeding engine, but your harness's web tools make the hunt stronger. This pattern works in any harness:
+
+1. **Prime the hunt.** If the user hands you URLs, or you already know the best sources, skip discovery: `venv/bin/python hoardcore.py _ --action ingest --urls "u1,u2"` (or `scrape`/`crawl` with `--urls`). Discovery is for *unknown* sources, not for re-finding ones you already hold.
+2. **Fill discovery gaps.** When `discover`/`research` returns nothing or thin/wrong results (rate-limited search, niche topic), your harness's web search finds candidates — then ingest them with `--urls` so they enter the vault.
+3. **Pre-flight URLs.** Before ingesting, your harness's web tools can spot ad/tracking redirects, 404s, or paywalls that the junk-filter would otherwise have to parse out.
+4. **Rescue a blocked fetch.** When HoardCore's chain can't clear a page (anti-bot the `aggressive` strategy still loses), your harness's fetch tool can read it directly — then `ingest` the URL anyway so the content is vaulted and `[V]`-verifiable.
+
+**The vault stays the source of truth.** Harness web tools are a *complement to discovery, never a substitute for the vault*: anything they find must be ingested (`--action ingest --urls ...`) before you cite it or tag it `[V]`. A page only your harness tools fetched is not in the vault and can't be `verify`-checked.
+
+**OpenCode:** these are your `webfetch` (fetch a URL) and `websearch` (live query) tools. Every other harness exposes equivalent fetch/search tools — apply the same pattern.
+
 ## Artifacts
 - **Location**: `artifacts/` (configurable `storage.artifacts_dir`; default day-sorted `artifacts/YYYY-MM-DD/`). Vault = raw ingested text; `artifacts/` = provenance-tagged output.
 - **Provenance**: tag every quantitative claim `[V]`/`[E]`/`[H]`. Never claim a number the vault can't support.
@@ -94,9 +107,9 @@ Common: `url` positional = `_` for vault-only actions; `--vault NAME` scopes to 
 
 | Action | Purpose | Key flags |
 |---|---|---|
-| `scrape` | fetch+index one URL | `--strategy`, `--force` |
-| `crawl` | ingest whole site | `--strategy`, `--force` |
-| `search` | query vault | `--query`, `--mode fast\|hybrid`, `--recall` |
+| `scrape` | fetch+index one URL (or `--urls` batch) | `--urls`, `--strategy`, `--force` |
+| `crawl` | ingest whole site (or `--urls` batch) | `--urls`, `--strategy`, `--force` |
+| `search` | query vault | `--query`, `--mode fast\|hybrid`, `--limit` |
 | `verify` | machine-check a claim | `--claim`/`--claim-file`, `--hint`, `--recall` |
 | `ingest` | index explicit URLs | `--urls` |
 | `discover` | web-search + ingest | `--query`, `--limit` |
@@ -138,6 +151,7 @@ Sources, doc versions, chunks, vectors, embedding dim/mode, schema version, page
 6. Research deliverable → write into `artifacts/` with `[V]/[E]/[H]` on every quantitative claim.
 7. Integrity → `--action check` (and `--migrate` once on legacy vaults).
 8. Audit discipline → before finalizing, re-verify each quantitative claim against the vault; unverifiable → `[E]` or remove.
+9. Hybrid discovery → your harness's web tools find/verify candidate sources; feed them into the vault with `ingest --urls` before citing (see Hybrid Discovery).
 
 ## Output Format
 `fetch()` returns `list[dict]`, each with `text` (chunk content) and `metadata` (source URL, header path, quality score, parser).

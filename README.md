@@ -4,7 +4,7 @@ Research toolkit for AI agents — give your agent a memory it can prove.
 
 Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo/Mojeek web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
 
-![Version](https://img.shields.io/badge/version-0.9.8-blue)
+![Version](https://img.shields.io/badge/version-0.9.9-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -428,7 +428,7 @@ Queries are sanitized: operator characters (`" ( ) * ^ : -`) are stripped and to
 
 ### Discovery Mode
 
-`discover` turns a plain-language query into ingested sources. It hits DuckDuckGo's HTML endpoint via the same resilient fetch chain (so a rate-limited/shaped search page gets retried and can even be solved by FlareSolverr), with Mojeek as an automatic fallback provider. Only the top-N ranked results (`discovery.top_rank`) are ingested, with bounded retry + exponential backoff on transient failures.
+`discover` turns a plain-language query into ingested sources. It hits DuckDuckGo's HTML endpoint via the same resilient fetch chain (so a rate-limited/shaped search page gets retried and can even be solved by FlareSolverr), with Mojeek as an automatic fallback provider. The top `--limit` results are ingested (`discovery.top_rank`, default 6, when no `--limit` is given), with bounded retry + exponential backoff on transient failures.
 
 ### Research Workflow
 
@@ -543,11 +543,11 @@ hoardcore [URL] [options]
 
 | Action | Purpose |
 |---|---|
-| `scrape` *(default)* | Fetch + ingest a single URL or document. Requires a URL positional. |
-| `crawl` | Crawl a whole site via sitemap/robots.txt. Requires a domain URL positional. |
-| `search` | Query the vault with `--query`; restrict to a domain by passing its host as the positional. |
+| `scrape` *(default)* | Fetch + ingest a single URL/document — or an explicit `--urls` list (batch). Requires a URL positional (or `--urls`). |
+| `crawl` | Crawl a whole site via sitemap/robots.txt, or ingest an explicit `--urls` list (batch). Requires a domain URL positional (or `--urls`). |
+| `search` | Query the vault with `--query`; restrict to a domain by passing its host as the positional. `--limit` caps returned chunks. |
 | `ingest` | Index an explicit URL list given as a comma/space separated `--urls` string. |
-| `discover` | Web-search `--query`, ingest the top `--limit` results. |
+| `discover` | Web-search `--query`, ingest the top `--limit` results (default `discovery.top_rank`). |
 | `research` | Run `discover -> ingest -> recall -> emit` (memory-first: live DISCOVER is skipped when the vault already has a high-confidence answer, unless `--no-answer-first`); writes to `--out` or a day-sorted `artifacts/YYYY-MM-DD/grounding_context.md`. |
 | `verify` | Programmatic provenance audit: confirm `--claim` against vault text (exact phrasing, typography-blind; `--hint` prints the nearest vault phrase on denial). |
 | `check` | Run a three-phase vault integrity check (content hashes, counts, vector dims). |
@@ -562,9 +562,9 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 | `--action ACTION` | One of `scrape`, `crawl`, `search`, `ingest`, `discover`, `research`, `verify`, `check`, `stats`. |
 | `--strategy S` | `fast`, `balanced`, or `aggressive` (default from config). |
 | `--query Q` | Required for `search`, `discover`, `research`. |
-| `--limit N` | Web results to ingest for `discover`. |
-| `--urls U1,U2,U3` | Explicit URL list for `ingest`. |
-| `--discover N` | Sources to discover first in `research` (default 5). |
+| `--limit N` | Top results to ingest for `discover` (default `discovery.top_rank`); max chunks returned for `search`. |
+| `--urls U1,U2,U3` | Explicit URL list for `scrape`/`crawl`/`ingest` (overrides the URL positional). |
+| `--discover N` | Sources to discover first in `research` (default 5; `0` = recall-only, no web). |
 | `--recall N` | Chunks to retrieve in `research` (default 6). |
 | `--no-answer-first` | With `research`: always run live DISCOVER, even if the vault already has a high-confidence answer (default: `research.answer_first = true` skips it). |
 | `--keep-low` | With `research`: retain low-confidence hits in the grounding context (skip `filter_low`) — for exhaustive/deep hunts that want the full evidence tail. |
@@ -723,7 +723,7 @@ make clean              # wipe vault, caches, and config
 
 ```bash
 venv/bin/python -m pip install -e ".[test]"
-venv/bin/python -m pytest tests/ -v     # 101 tests
+venv/bin/python -m pytest tests/ -v     # run the pytest suite
 ```
 
 ### Code standards

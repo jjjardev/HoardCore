@@ -768,6 +768,23 @@ def test_verify_claim_folds_typographic_dashes(vault, make_chunk):
     ) == "verified"
 
 
+def test_verify_claim_folds_markdown_emphasis(vault, make_chunk):
+    """Stress-test regression: parser-emitted **bold** markers in stored text
+    are render artifacts, so 'increased by 17% in 2025' must verify against a
+    chunk storing 'increased by **17% in 2025**'."""
+    text = "electricity demand from data centers increased by **17% in 2025**"
+    vault.index_document("https://md.test/1", [make_chunk(text)], {})
+    hc_inst = object.__new__(hc.HoardCore)
+    hc_inst.vault = vault
+    assert hc_inst.verify_claim(
+        "electricity demand from data centers increased by 17% in 2025"
+    ) == "verified"
+    # Emphasis is folded, but a real token change still rejects.
+    assert hc_inst.verify_claim(
+        "electricity demand from data centers increased by 27% in 2025"
+    ) != "verified"
+
+
 def test_verify_claim_still_rejects_token_change(vault, make_chunk):
     """A6 guard: typographic folding must not become fuzzy matching — '400K'
     stays distinct from '400K+' and reordered words never verify."""
@@ -796,11 +813,20 @@ def test_verify_hint_surfaces_nearest_phrase(vault, make_chunk):
 
 def test_normalize_claim_folds_typography_only():
     """normalize_claim folds punctuation/whitespace variants but preserves
-    token identity and order (the exact-phrasing contract)."""
+    token identity and word order."""
     assert hc.normalize_claim("\u201cHi\u201d \u2014 it\u2019s 500\u20132,000") == \
-        '"hi" - it\'s 500-2,000'
+        hc.normalize_claim('"Hi" - it\'s 500-2,000')
     assert hc.normalize_claim("400K") != hc.normalize_claim("400K+")
     assert hc.normalize_claim("solar farm") != hc.normalize_claim("farm solar")
+
+
+def test_normalize_claim_strips_markdown_emphasis():
+    """**bold** / *italic* / `code` markers are render artifacts, folded like
+    typographic dashes; token identity (400K vs 400K+) is untouched."""
+    assert hc.normalize_claim("increased by **17% in 2025**") == \
+        hc.normalize_claim("increased by 17% in 2025")
+    assert hc.normalize_claim("*italic* and `code`") == "italic and code"
+    assert hc.normalize_claim("400K") != hc.normalize_claim("400K+")
 
 
 def test_vault_stats_counts_sources_and_chunks(vault, make_chunk):
@@ -1077,3 +1103,28 @@ def test_drop_low_confidence_keeps_strong():
     assert hc.HoardCore._drop_low_confidence([low, high]) == [high]
     assert hc.HoardCore._drop_low_confidence([low, low]) == [low, low]
     assert hc.HoardCore._drop_low_confidence([]) == []
+
+
+def test_drop_low_confidence_keeps_one_chunk_per_source():
+    """filter_low must never strip a source entirely: a low-banded chunk that
+    is the only representative of a distinct source survives EMIT (regression
+    from the stress test, where the authoritative primary source vanished
+    while secondary blogs survived)."""
+    a_low = hc.Chunk(text="l1", metadata={"confidence": "low",
+                                          "source_url": "https://primary.test/1"})
+    a_high = hc.Chunk(text="h1", metadata={"confidence": "high",
+                                           "source_url": "https://secondary.test/2"})
+    another_low = hc.Chunk(text="l2", metadata={"confidence": "low",
+                                                "source_url": "https://third.test/3"})
+    kept = hc.HoardCore._drop_low_confidence([a_low, a_high, another_low])
+    assert {c.metadata["source_url"] for c in kept} == {
+        "https://primary.test/1", "https://secondary.test/2", "https://third.test/3"}
+    # A low chunk whose source is already represented by a strong hit still drops.
+    dup_low = hc.Chunk(text="l3", metadata={"confidence": "low",
+                                            "source_url": "https://primary.test/1"})
+    kept2 = hc.HoardCore._drop_low_confidence([a_low, a_high, dup_low])
+    assert {c.metadata["source_url"] for c in kept2} == {
+        "https://primary.test/1", "https://secondary.test/2"}
+    assert len([c for c in kept2 if c.metadata["confidence"] == "low"]) == 1
+    # An all-low pool is never pruned (a lone low hit is better than nothing).
+    assert len(hc.HoardCore._drop_low_confidence([a_low, dup_low])) == 2

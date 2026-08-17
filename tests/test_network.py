@@ -86,6 +86,76 @@ def test_hoardcore_defaults_fetch_to_aggressive(tmp_path, monkeypatch):
     assert captured["strategy"] == cfg.get("network.default_strategy")
 
 
+def test_fetch_scrape_honors_urls_list(tmp_path, monkeypatch):
+    """Regression (the `_` bug): `--urls` on action=scrape must route to the
+    batch ingest, never fetch the placeholder positional `_`."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+
+    scraper = hc.HoardCore()
+    ingested, single_scraped = [], []
+
+    async def fake_ingest_many(urls, strategy, force_refresh):
+        ingested.extend(urls)
+        return [{"text": "ok", "metadata": {"source": u}} for u in urls]
+
+    async def fake_scrape(url, strategy, force_refresh):
+        single_scraped.append(url)
+        return []
+
+    scraper._ingest_many = fake_ingest_many
+    scraper._scrape_single = fake_scrape
+    out = asyncio.run(scraper.fetch(
+        "_", action="scrape", urls=["https://a.test/1", "https://b.test/2"]))
+    assert ingested == ["https://a.test/1", "https://b.test/2"]
+    assert single_scraped == []  # "_" was never sent to the fetcher
+    assert out == [{"text": "ok", "metadata": {"source": "https://a.test/1"}},
+                   {"text": "ok", "metadata": {"source": "https://b.test/2"}}]
+
+
+def test_fetch_crawl_honors_urls_list(tmp_path, monkeypatch):
+    """`--urls` on action=crawl ingests the explicit list instead of
+    sitemap discovery on the placeholder URL."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+
+    scraper = hc.HoardCore()
+    ingested, crawled = [], []
+
+    async def fake_ingest_many(urls, strategy, force_refresh):
+        ingested.extend(urls)
+        return [{"text": "ok", "metadata": {"source": u}} for u in urls]
+
+    async def fake_crawl(url, strategy, force_refresh):
+        crawled.append(url)
+        return []
+
+    scraper._ingest_many = fake_ingest_many
+    scraper._crawl_domain = fake_crawl
+    asyncio.run(scraper.fetch("_", action="crawl", urls=["https://c.test/9"]))
+    assert ingested == ["https://c.test/9"]
+    assert crawled == []
+
+
+def test_fetch_scrape_without_urls_still_uses_positional(tmp_path, monkeypatch):
+    """action=scrape with no --urls keeps scraping the single positional URL
+    (the documented path, unchanged)."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+
+    scraper = hc.HoardCore()
+    single_scraped = []
+
+    async def fake_scrape(url, strategy, force_refresh):
+        single_scraped.append(url)
+        return [hc.Chunk(text="ok", metadata={"source": url})]
+
+    scraper._scrape_single = fake_scrape
+    out = asyncio.run(scraper.fetch("https://example.test/x", action="scrape"))
+    assert single_scraped == ["https://example.test/x"]
+    assert out == [{"text": "ok", "metadata": {"source": "https://example.test/x"}}]
+
+
 def test_hoardcore_scopes_vault_to_subdir(tmp_path, monkeypatch):
     """HoardCore(vault_name='sleep') must point the vault at root_dir/sleep."""
     cfg = TempConfig(str(tmp_path))
@@ -95,6 +165,119 @@ def test_hoardcore_scopes_vault_to_subdir(tmp_path, monkeypatch):
     assert scraper.vault.root_dir == os.path.join(str(tmp_path), "sleep")
     assert os.path.isdir(scraper.vault.root_dir)
     assert scraper.vault.db_path == os.path.join(str(tmp_path), "sleep", "vault.db")
+
+
+def test_cli_discover_zero_is_recall_only(tmp_path, monkeypatch):
+    """Regression (the `discover or 5` bug): `--discover 0` on the CLI must
+    reach research() as 0 (recall-only), not be rewritten to 5."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+    seen = {}
+
+    class _FakeHC:
+        def __init__(self, vault_name=None):
+            pass
+
+        @property
+        def vault(self):
+            return type("V", (), {"root_dir": str(tmp_path)})
+
+        @property
+        def artifacts_dir(self):
+            return str(tmp_path)
+
+        def organize_artifacts_by_day(self):
+            return []
+
+        async def research(self, question, out_path=None, discover=5, recall=6,
+                           strategy=None, answer_first=None, keep_low=False):
+            seen.update(question=question, discover=discover, recall=recall)
+            return str(tmp_path / "out.md")
+
+    monkeypatch.setattr(hc, "HoardCore", _FakeHC)
+    with pytest.raises(SystemExit) as ei:
+        asyncio.run(hc.main(
+            ["_", "--action", "research", "--query", "q",
+             "--discover", "0", "--recall", "4"]))
+    assert ei.value.code == 0
+    assert seen["discover"] == 0  # not rewritten to 5
+    assert seen["recall"] == 4
+
+
+def test_fetch_search_honors_max_results(tmp_path, monkeypatch):
+    """`--limit`/max_results must cap chunks returned for action=search
+    (it was ignored, always using indexer.search_limit)."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+
+    scraper = hc.HoardCore()
+    captured = {}
+
+    def fake_search(query, limit, domain=None, hybrid=None):
+        captured["limit"] = limit
+        return [hc.Chunk(text="c", metadata={"source": "https://s.test"})]
+
+    scraper.vault.search_vault = fake_search
+    asyncio.run(scraper.fetch("https://s.test", action="search", query="q", max_results=7))
+    assert captured["limit"] == 7
+    # No --limit: falls back to the configured search_limit (20).
+    asyncio.run(scraper.fetch("https://s.test", action="search", query="q"))
+    assert captured["limit"] == cfg.get("indexer.search_limit", 20)
+
+
+def test_discover_and_ingest_honors_limit(tmp_path, monkeypatch):
+    """`--limit N` on discover must ingest the top N results (not always
+    discovery.top_rank), with a search pool at least as large."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+
+    scraper = hc.HoardCore()
+    results = [hc.SearchResult(title=f"t{i}", url=f"https://d.test/{i}")
+               for i in range(8)]
+    captured = {}
+
+    async def fake_search(query, max_results, strategy):
+        captured["pool"] = max_results
+        return results
+
+    async def fake_ingest_many(urls, strategy, force_refresh):
+        captured["targets"] = urls
+        return []
+
+    scraper.discovery.search = fake_search
+    scraper._ingest_many = fake_ingest_many
+    asyncio.run(scraper._discover_and_ingest("q", 3, "fast", False))
+    assert captured["targets"] == [u.url for u in results[:3]]
+    assert captured["pool"] >= 3  # never shrinks below the search pool default
+    # No --limit: falls back to discovery.top_rank (6).
+    asyncio.run(scraper._discover_and_ingest("q", 0, "fast", False))
+    assert captured["targets"] == [u.url for u in results[:cfg.get("discovery.top_rank", 6)]]
+
+
+def test_crawl_serves_vaulted_chunks_on_cache_hit(tmp_path, monkeypatch):
+    """Regression: re-crawling an already-vaulted site must return the stored
+    chunks (mirroring _scrape_single), not silently report zero content."""
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+
+    scraper = hc.HoardCore()
+
+    async def fake_discover(url):
+        return ["https://s.test/1", "https://s.test/2"]
+
+    scraper.crawler.discover_urls = fake_discover
+
+    async def fake_process(url, strategy, force_refresh):
+        return [], {"cached": True, "url": url}
+
+    def fake_get_chunks(url):
+        return [hc.Chunk(text="cached", metadata={"source": url})]
+
+    scraper._process_document = fake_process
+    scraper.vault.get_chunks_for_url = fake_get_chunks
+    chunks = asyncio.run(scraper._crawl_domain("https://s.test", "fast", False))
+    assert [c.text for c in chunks] == ["cached", "cached"]
+    assert [c.metadata["source"] for c in chunks] == ["https://s.test/1", "https://s.test/2"]
 
 
 # --- parser unit tests ---
@@ -219,7 +402,13 @@ def test_research_reports_filtered_low_confidence(tmp_path, monkeypatch):
     high = hc.Chunk(
         text="high relevance body",
         metadata={"confidence": "high", "source_url": "https://high.test/1"})
-    scraper.vault.search_vault = lambda *a, **k: [high, low]
+    # Same source as the low chunk, so that source is already represented by a
+    # strong hit and the low chunk is genuinely redundant (filter_low now keeps
+    # one chunk per distinct source, so it must be excluded on duplicate grounds).
+    high_from_low_source = hc.Chunk(
+        text="strong body from low.test",
+        metadata={"confidence": "high", "source_url": "https://low.test/1"})
+    scraper.vault.search_vault = lambda *a, **k: [high, high_from_low_source, low]
 
     out = os.path.join(str(tmp_path), "grounding.md")
     path = asyncio.run(scraper.research("q", out_path=out, discover=0, recall=3,

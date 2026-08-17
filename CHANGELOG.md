@@ -3,6 +3,54 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.9.9
+
+### Fixed
+- **`--urls` ignored by `scrape`/`crawl`.** The CLI placeholder `_` leaked into
+  the fetch and got refused as `SSRF_BLOCKED`; `--urls` was dropped because
+  `main()` only forwarded it for `ingest`. `fetch()` now routes explicit
+  `--urls` through the batch ingester for scrape/crawl/ingest, and `main()`
+  forwards them unconditionally.
+- **`--discover 0` silently became 5.** `main()` used `discover or 5`, so the
+  documented recall-only mode never actually skipped the web. Now uses
+  `discover if discover is not None else 5`.
+- **`--limit` was a no-op for `search` and `discover`.** `search` always used
+  the config `indexer.search_limit`, and the discovery ingest count came from
+  `discovery.top_rank` regardless of the CLI. Both now honor `--limit`
+  (falling back to config when unset), and the discovery pool is sized to the
+  requested count.
+- **Crawl cache hits returned nothing.** `_crawl_domain` served an empty list
+  on a cache hit while `_scrape_single` served the vaulted chunks; the crawl
+  path now returns the cached chunks too.
+- **`filter_low` could strip a source entirely.** The EMIT filter dropped every
+  `low`-banded chunk, so a low-scoring but authoritative primary source could
+  vanish from the deliverable while secondary blogs survived. `_drop_low_confidence`
+  now keeps at least one chunk per distinct source, and the grounding file's
+  drop note counts only chunks actually removed.
+- **Markdown `**bold**` artifacts broke `[V]` verification.** Parser-emitted
+  emphasis markers stored in chunk text made verbatim quoting of an artifact
+  sentence return `PARTIAL`/`UNVERIFIED`. `normalize_claim` now strips
+  `**`/`*`/backtick render markers from both the claim and the stored text, and
+  the verify `LIKE` pre-filter widens across them.
+
+### Added
+- **Hybrid Discovery guidance in `skill.md`.** New section + workflow bullet
+  documenting the harness-agnostic pattern (prime the hunt, fill discovery gaps,
+  pre-flight URLs, rescue blocked fetches), with OpenCode's `webfetch`/`websearch`
+  as the named example — the vault stays the source of truth.
+
+### Changed
+- **Docs integrated with the flag fixes** (`README.md`, `skill.md`): action and
+  flag tables now describe batch `--urls`, `--limit`, and `--discover 0`
+  correctly; the README test count is no longer hardcoded.
+- **`_drop_low_confidence` retained-source accounting** — the grounding file's
+  `filter_low` note reports only chunks actually dropped, not all low hits.
+
+### Notes
+- 10 new regression tests across `tests/test_network.py` and
+  `tests/test_vault.py`; full suite green (128 passing). Both fixes re-verified
+  live in a second end-to-end stress run (fresh vault + topic).
+
 ## HoardCore v0.9.8
 
 ### Fixed

@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.9.8"
+__version__ = "0.9.9"
 
 import argparse
 import asyncio
@@ -357,7 +357,13 @@ def normalize_claim(text: str) -> str:
     """
     if not text:
         return ""
-    t = text.translate({
+    # Strip parser-emitted markdown emphasis/code markers (**bold**, *italic*,
+    # `code`) before folding: they are render artifacts, not wording, so a
+    # sentence stored as "increased by **17% in 2025**" verifies against
+    # "increased by 17% in 2025" (same principle as folding typographic dashes).
+    # Applied symmetrically to claim and stored text; never adds/removes tokens.
+    t = re.sub(r"[\*`]+", "", text)
+    t = t.translate({
         0x2010: "-", 0x2011: "-", 0x2012: "-", 0x2013: "-",
         0x2014: "-", 0x2015: "-", 0x2212: "-",
         0x2018: "'", 0x2019: "'", 0x201A: "'", 0x201B: "'",
@@ -3507,10 +3513,27 @@ class HoardCore:
     @staticmethod
     def _drop_low_confidence(chunks: list[Chunk]) -> list[Chunk]:
         """EMIT hygiene: drop confidence='low' hits unless they are all we have
-        (a lone low hit is still better than nothing)."""
+        (a lone low hit is still better than nothing). Keeps at least one chunk
+        per distinct source, so a low-banded but authoritative primary source
+        never vanishes entirely from the deliverable (stress-test regression:
+        the IEA primary source was filtered out while blogs survived)."""
         strong = [c for c in chunks
                   if c.metadata.get('confidence') != 'low']
-        return strong or chunks
+        if not strong:
+            return chunks
+        kept_sources = {
+            c.metadata.get('source_url') or c.metadata.get('source') or '?'
+            for c in strong
+        }
+        result = list(strong)
+        for c in chunks:
+            if c.metadata.get('confidence') != 'low':
+                continue
+            src = c.metadata.get('source_url') or c.metadata.get('source') or '?'
+            if src not in kept_sources:
+                result.append(c)
+                kept_sources.add(src)
+        return result
 
     async def research(self, question: str, out_path: str | None = None,
                        discover: int = 5, recall: int = 6,
@@ -3555,7 +3578,7 @@ class HoardCore:
             dropped_low: list[str] = ([] if keep_low else [
                 c.metadata.get('source_url', '?')
                 for c in raw_memory
-                if c.metadata.get('confidence') == 'low'
+                if c.metadata.get('confidence') == 'low' and c not in memory_chunks
             ])
         else:
             # --discover N controls the hunt breadth; --discover 0 is an
@@ -3570,13 +3593,14 @@ class HoardCore:
             print(f"\n[2/RECALL] hybrid-retrieving top {recall} chunks", flush=True)
             raw_chunks = self.vault.search_vault(question, limit=recall, hybrid=True)
             chunks = raw_chunks if keep_low else self._drop_low_confidence(raw_chunks)
-            # Track how many low-confidence hits filter_low removed, so the
-            # grounding file explains the count honestly instead of looking
-            # like an under-filled recall. (No-op when keep_low is set.)
+            # Track how many low-confidence hits filter_low actually removed, so
+            # the grounding file explains the count honestly (chunks retained
+            # for source preservation are NOT counted as dropped). No-op when
+            # keep_low is set.
             dropped_low = ([] if keep_low else [
                 c.metadata.get('source_url', '?')
                 for c in raw_chunks
-                if c.metadata.get('confidence') == 'low'
+                if c.metadata.get('confidence') == 'low' and c not in chunks
             ])
             if not chunks:
                 print("  -> no chunks retrieved")
@@ -3670,7 +3694,7 @@ class HoardCore:
                 # curly quotes where the claim has straight ones, etc. The
                 # Python confirm below is authoritative, so over-widening here
                 # only costs a few extra candidate rows, never a wrong verdict.
-                like_fragment = re.sub(r"[\s\-'\u2010\u2011\u2012\u2013\u2014\u2015\u2212\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u201f]+", "%", like_fragment)
+                like_fragment = re.sub(r"[\s\-'`\*\u2010\u2011\u2012\u2013\u2014\u2015\u2212\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u201f]+", "%", like_fragment)
                 cursor.execute(
                     "SELECT text FROM chunks_fts WHERE lower(text) LIKE ? ESCAPE '\\'",
                     (f"%{like_fragment}%",)
@@ -3965,7 +3989,14 @@ class HoardCore:
         async def _crawl_one(single_url: str) -> list[Chunk]:
             async with semaphore:
                 try:
-                    chunks, _ = await self._process_document(single_url, strategy, force_refresh)
+                    chunks, meta = await self._process_document(single_url, strategy, force_refresh)
+                    if meta.get('cached'):
+                        # Cache hit: the pipeline fetched nothing, so serve the
+                        # vaulted chunks back (mirrors _scrape_single) instead
+                        # of silently reporting zero content for the URL.
+                        cached = self.vault.get_chunks_for_url(single_url)
+                        all_chunks.extend(cached)
+                        return cached
                     if chunks and not chunks[0].metadata.get('error'):
                         all_chunks.extend(chunks)
                     return chunks
@@ -3998,8 +4029,11 @@ class HoardCore:
             strategy: "fast", "balanced", or "aggressive".
             query: Required for "search" and "discover" actions.
             force_refresh: Ignore cache and re-fetch.
-            urls: For "ingest", an explicit list of URLs to process in parallel.
-            max_results: For "discover", how many search results to ingest.
+            urls: An explicit list of URLs to process in parallel, honored for
+                "scrape", "crawl", and "ingest" (a placeholder `_` positional is
+                never sent to the fetcher).
+            max_results: For "discover", how many top results to ingest; for
+                "search", the max chunks returned (falls back to config).
             mode: For "search", "fast" (FTS-only) or "hybrid" (force vector+RFF).
 
         Returns:
@@ -4015,7 +4049,8 @@ class HoardCore:
                     "text": "Error: 'query' parameter required for action='search'.",
                     "metadata": {"error": True}
                 }]
-            limit = self.config.get('indexer.search_limit', 20)
+            limit = (max_results if max_results > 0
+                     else self.config.get('indexer.search_limit', 20))
             domain = urlparse(url).netloc or None
             hybrid: bool | None = None
             if mode == 'fast':
@@ -4049,10 +4084,14 @@ class HoardCore:
             return await self._discover_and_ingest(query, max_results, strategy, force_refresh)
 
         elif action == "crawl":
+            if urls:
+                return await self._ingest_many(urls, strategy, force_refresh)
             chunks = await self._crawl_domain(url, strategy, force_refresh)
             return [c.to_dict() for c in chunks if not c.metadata.get('error', False)]
 
         else:  # "scrape" (default)
+            if urls:
+                return await self._ingest_many(urls, strategy, force_refresh)
             chunks = await self._scrape_single(url, strategy, force_refresh)
             return [c.to_dict() for c in chunks]
 
@@ -4092,9 +4131,13 @@ class HoardCore:
         """
         cfg_max = self.config.get('discovery.max_results', 10)
         cfg_top = self.config.get('discovery.top_rank', 6)
-        limit = max_results if max_results > 0 else cfg_max
+        # `--limit N` now means "ingest the top N results" (per docs); the
+        # search pool only needs to be at least that large, so it never
+        # shrinks below the configured default.
+        ingest_n = max_results if max_results > 0 else cfg_top
+        pool = max(cfg_max, ingest_n)
 
-        results = await self.discovery.search(query, max_results=limit, strategy=strategy)
+        results = await self.discovery.search(query, max_results=pool, strategy=strategy)
         if not results:
             self.bus.emit("discovery.completed", query=query, urls=[])
             return [{
@@ -4106,8 +4149,8 @@ class HoardCore:
         self.bus.emit("discovery.completed", query=query,
                       urls=[r.url for r in results])
 
-        # rank-biased ingest: take the top-N results (configurable)
-        targets = [r.url for r in results[:cfg_top]]
+        # rank-biased ingest: take the top-N results (--limit, else top_rank)
+        targets = [r.url for r in results[:ingest_n]]
         summary = [{
             "text": f"[discovery] top {len(targets)} URLs for {query!r}",
             "metadata": {
@@ -4158,6 +4201,7 @@ _EXAMPLES = (
     "  python hoardcore.py https://arxiv.org/abs/2110.12345.pdf --action scrape\n"
     "  python hoardcore.py https://example.com --action search --query 'machine learning'\n"
     "  python hoardcore.py _ --action ingest --urls 'u1,u2,u3'\n"
+    "  python hoardcore.py _ --action scrape --urls 'u1,u2'\n"
     "  python hoardcore.py _ --action discover --query 'negros renewable energy' --limit 5\n"
     "  python hoardcore.py _ --action research --query 'how does bokashi compost' --discover 5 --recall 6\n"
     "  python hoardcore.py _ --action research --query 'negros economy' --out artifacts/report.md\n"
@@ -4219,9 +4263,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force", action="store_true",
                         help="Bypass the cache and re-fetch.")
     parser.add_argument("--urls", default=None,
-                        help="Comma/space-separated URL list for ingest.")
+                        help="Comma/space-separated URL list for scrape/crawl/ingest.")
     parser.add_argument("--limit", type=int, default=0,
-                        help="Max results for discover/search.")
+                        help="Top results to ingest for discover; max chunks for search.")
     parser.add_argument("--vault", default=None, dest="vault_name",
                         help="Per-topic vault name.")
     parser.add_argument("--migrate", action="store_true",
@@ -4272,7 +4316,7 @@ async def main(argv: list[str] | None = None) -> None:
             print("  ⚠️  --query required for --action research", file=sys.stderr)
             sys.exit(2)
         written = await scraper.research(query, out_path=out_path,
-                                         discover=discover or 5, recall=recall,
+                                         discover=discover if discover is not None else 5, recall=recall,
                                          strategy=strategy,
                                          answer_first=not args.no_answer_first,
                                          keep_low=args.keep_low)
@@ -4333,7 +4377,7 @@ async def main(argv: list[str] | None = None) -> None:
     result = await scraper.fetch(
         url, action=action, strategy=strategy,
         query=query, force_refresh=force_refresh,
-        urls=urls if action == "ingest" else None,
+        urls=urls,
         max_results=max_results, mode=mode
     )
 
