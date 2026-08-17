@@ -5,6 +5,7 @@ pre-fix code; see CHANGELOG v0.10.0 for the finding IDs.
 """
 
 import asyncio
+import threading
 import time
 
 import pytest
@@ -202,3 +203,47 @@ def test_verify_claim_gets_recall_depth_wired(tmp_path, monkeypatch):
             ["_", "--action", "verify", "--claim", "x", "--hint", "--recall", "11"]))
     assert ei.value.code == 2
     assert captured["recall"] == 11
+
+
+def test_parallel_ingest_large_batch_slow_embed_does_not_deadlock(tmp_path):
+    """E2 gap found by live stress test (moon2026, 2026-08-17): with real
+    embedding latency, a batch larger than the bounded queues deadlocks the
+    parallel pipeline — the main thread blocks feeding work_q while the workers
+    block on a full result_q. A deliberately slow vectorize() makes the race
+      deterministic. All vectors must land against their own chunk text."""
+    class SlowEmbed(hc.EmbeddingsEngine):
+        def vectorize(self, text):
+            time.sleep(0.05)  # simulate realistic (non-instant) embed latency
+            return b"x" * 32
+
+    cfg = TempConfig(str(tmp_path), {"indexer.parallel": True})
+    vault = hc.VaultManager(cfg)
+    vault.embeddings = SlowEmbed(cfg)
+    n = 60  # > PIPELINE_QUEUE_SIZE (20) + WORKER_THREADS (4)
+    chunks = [
+        hc.Chunk(text=f"parallel slow embed item {i} megawatt solar", metadata={"source": "https://dl.test/1"})
+        for i in range(n)
+    ]
+
+    # A guard thread fails the test if ingest_chunks_parallel hangs.
+    done = threading.Event()
+
+    def _watch():
+        if not done.wait(30.0):
+            raise AssertionError("parallel ingest deadlocked on a large batch")
+
+    guard = threading.Thread(target=_watch, daemon=True)
+    guard.start()
+    try:
+        vault.ingest_chunks_parallel("https://dl.test/1", chunks, {})
+    finally:
+        done.set()
+
+    with vault._db() as (_conn, cur):
+        rows = cur.execute(
+            "SELECT c.rowid, c.text, v.vector FROM chunks_fts c "
+            "LEFT JOIN chunk_vectors v ON v.chunk_rowid = c.rowid "
+            "WHERE c.url = 'https://dl.test/1' ORDER BY c.rowid"
+        ).fetchall()
+    assert len(rows) == n
+    assert all(vec == b"x" * 32 for _, _, vec in rows)

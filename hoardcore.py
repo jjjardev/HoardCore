@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.10.0"
+__version__ = "0.10.1"
 
 import argparse
 import asyncio
@@ -1684,26 +1684,40 @@ class VaultManager:
                     work_q.task_done()
                 result_q.put((idx, vec))
 
-        # Start the workers, then feed work and sentinels. Feeding after start
-        # means the queue never fills up and block() can't deadlock even for
-        # batches larger than PIPELINE_QUEUE_SIZE.
+        # Start the workers, then feed work and sentinels.
         threads = [threading.Thread(target=_embed_worker, daemon=True)
                    for _ in range(WORKER_THREADS)]
         for t in threads:
             t.start()
+
+        # Drain result_q CONCURRENTLY with feeding work_q via a reader thread
+        # started BEFORE any feeding. result_q is bounded, so it must be read
+        # while the main thread feeds work; otherwise the workers block on
+        # result_q.put() once it fills and stop consuming work_q, deadlocking
+        # the main thread's work_q.put() — a real hang for any batch larger
+        # than PIPELINE_QUEUE_SIZE once embeddings are non-trivial.
+        collected: list[tuple[int, object]] = []
+
+        def _collector() -> None:
+            # Exactly len(chunks) real results are produced (sentinels are
+            # consumed by workers and produce no result), so this cannot hang.
+            for _ in range(len(chunks)):
+                idx, vec = result_q.get()
+                collected.append((idx, vec))
+
+        reader = threading.Thread(target=_collector, daemon=True)
+        reader.start()
+
         for idx, chunk in enumerate(chunks):
             work_q.put((idx, chunk.text))
         # Wake EXACTLY the number of workers we started so none hang waiting.
         for _ in threads:
             work_q.put(sentinel)
-        # Collect results CONCURRENTLY with the workers: result_q is bounded,
-        # so draining it here (rather than after join) prevents workers from
-        # blocking on a full queue while the main thread waits forever (A11).
-        for _ in range(len(chunks)):
-            idx, vec = result_q.get(timeout=10.0)
+        # reader has now collected exactly len(chunks) results; every worker has
+        # seen its sentinel and exited, so join cannot hang.
+        reader.join()
+        for idx, vec in collected:
             results[idx] = vec  # type: ignore[assignment]
-        # By now every worker has seen its sentinel (the only items left in the
-        # queue) and exited, so join cannot hang.
         for t in threads:
             t.join()
 

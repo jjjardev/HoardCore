@@ -3,6 +3,31 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.10.1
+
+### Fixed
+- **Parallel ingest deadlocked on large documents.** `ingest_chunks_parallel`
+  fed all work into a bounded `work_q` *before* draining the bounded `result_q`.
+  When embeddings were non-trivial (real latency, not instant test stubs), the
+  workers filled `result_q`, blocked on `result_q.put()`, and stopped consuming
+  `work_q`, while the main thread blocked on `work_q.put()` — a deadlock that
+  hung the CLI indefinitely. Triggered by any batch larger than the queue budget
+  (20) + worker threads (4), e.g. a long Wikipedia article with
+  `indexer.parallel=true`. Found by the lunar-programs 2026 live stress test;
+  reproduced deterministically with a 120-chunk slow-embed batch.
+  `ingest_chunks_parallel` now drains `result_q` concurrently with feeding
+  `work_q` via a reader thread started before any feeding, preserving the
+  bounded queues and the sentinel shutdown.
+- **New regression test.** `test_parallel_ingest_large_batch_slow_embed_does_not_deadlock`
+  uses 60 chunks + a deliberately slow (50 ms) `vectorize` so the race is
+  deterministic; it hangs on the pre-fix code and passes after. Verified live:
+  an 83-chunk Wikipedia page now ingests via the parallel path with vectors
+  staying 1:1 with chunks.
+
+### Notes
+- Fix + test only; full suite passes (139), ruff clean. Found and fixed during
+  the SMR/lunar 2026 engine stress tests.
+
 ## HoardCore v0.10.0
 
 ### Fixed
