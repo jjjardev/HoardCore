@@ -506,7 +506,7 @@ HoardCore's frontier-synthesis stress test is not a claim you have to take on fa
 
 ```
 peel_anchor/
-    peel_anchor_lcs.py        Deterministic near-linear LCS approximation (Boneh–Golan–Krauthgamer 2025)
+    peel_anchor_lcs.py        Deterministic near-linear LCS approximation (Boneh–Golan–Kraus 2025)
                               + exact O(n²) DP baseline. Self-tests soundness (never over-estimates).
     sample_round_lcs.py       2026 Mao–Rubinstein 45°-rotated-grid reproduction (sample-and-round). Validates rotated-DP == exact LCS.
     peel_anchor_hybrid.py     The deterministic bridge: peel-certified active scales + deviation-ranked

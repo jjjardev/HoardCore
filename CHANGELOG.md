@@ -3,6 +3,21 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.9.10
+
+### Fixed
+- **Wrong third author cited for arXiv:2507.22486.** The deterministic
+  near-linear LCS approximation is by **Boneh, Golan, and Kraus** (Bar-Ilan);
+  the repo cited `Krauthgamer` in six places (`peel_anchor/peel_anchor_lcs.py`,
+  `peel_anchor/README.md`, `deterministic_single_pass_edit_distance_sketch.md`,
+  root `README.md`) and misspelled it as `Krauthgammer` once. A third-party
+  review flagged this; web + vault (`cshard`) cross-check confirmed the correct
+  author is Matan Kraus. All six citations corrected; the distinct real author
+  `Andoni–Krauthgamer` (FOCS'07) references are untouched.
+
+### Notes
+- Documentation/citation fix; no `hoardcore.py` engine behavior changed.
+
 ## HoardCore v0.9.9
 
 ### Fixed

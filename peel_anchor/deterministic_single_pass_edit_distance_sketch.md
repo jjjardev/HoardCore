@@ -25,7 +25,7 @@
   - `[V]` "curvature is closely related to tree total deviation — curvature of p is the tree total deviation on the forward difference of (p(0), p(1), …, p(2n))".
   - `[V]` "active scales, which constitute a 1/logᶜ_M(n)-fraction of the scales".
   - **Barrier (Pass 1 RECALL):** the derandomization problem is precisely: *the 2026 scheme's only source of randomness is which sub-intervals / active scales it keeps, and the proof of its guarantee is a Hoeffding-type concentration argument over the random sub-sampling.* Removing the randomness removes the concentration proof's license. `[H]` — this is the technical barrier: **deterministic selection must itself carry a concentration/anti-concentration guarantee, which no current deterministic selector for the mass signal proves** (the repo's own certificate round showed the mass-deviation is a *selector but not a certificate* — see §4).
-- **Boneh–Golan–Krauthgamer 2025 (arXiv:2507.22486):** deterministic near-linear LCS approximation (`[V]` in vault: "outputs an O(n^{3/4} log n)-approximation"); the repo's `peel_anchor` work built the deterministic peel/certifier on this.
+- **Boneh–Golan–Kraus 2025 (arXiv:2507.22486):** deterministic near-linear LCS approximation (`[V]` in vault: "outputs an O(n^{3/4} log n)-approximation"); the repo's `peel_anchor` work built the deterministic peel/certifier on this.
 
 ### 2.2 Streaming lower bounds — what they actually say
 
@@ -153,7 +153,7 @@ We must NOT claim a symmetric-model deterministic sketch.
 **Ingested in-vault (`cshard`), all `[V]` anchors verified exit-0:**
 
 1. Mao & Rubinstein, *ED & LCS via rotated-grid curvature sparsification*, arXiv:2603.29702 — `https://arxiv.org/pdf/2603.29702` `[V]`
-2. Boneh, Golan, Krauthgamer, *Deterministic LCS Approximation in Near-Linear Time*, arXiv:2507.22486 — `https://arxiv.org/abs/2507.22486` `[V]`
+2. Boneh, Golan, Kraus, *Deterministic LCS Approximation in Near-Linear Time*, arXiv:2507.22486 — `https://arxiv.org/abs/2507.22486` `[V]`
 3. Belazzougui & Zhang, *Edit Distance: Sketching, Streaming and Document Exchange*, arXiv:1607.04200 (FOCS 2016) — `https://arxiv.org/abs/1607.04200` `[V]`
 4. Belazzougui, *Efficient Deterministic Single Round Document Exchange for Edit Distance*, arXiv:1511.09229 — `https://arxiv.org/abs/1511.09229v2` `[V]`
 5. Cheng, Farhadi, Hajiaghayi, Jin, Li, Rubinstein, Seddighin, Zheng, *Lower Bounds and Improved Algorithms for Asymmetric Streaming Edit Distance and LCS*, arXiv:2103.00713 (ar5iv HTML ingested) — `https://ar5iv.labs.arxiv.org/html/2103.00713` `[V]`

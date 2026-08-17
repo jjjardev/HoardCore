@@ -335,7 +335,7 @@ is now in place.
 
 ## Source Links / Citations
 
-- https://arxiv.org/abs/2507.22486 (Boneh, Golan, Krauthgamer — deterministic LCS approximation; Algorithm/Correctness §3–4) [V]
+- https://arxiv.org/abs/2507.22486 (Boneh, Golan, Kraus — deterministic LCS approximation; Algorithm/Correctness §3–4) [V]
 - https://arxiv.org/abs/2603.29702 (Mao, Rubinstein — randomized (1±ε) ED/LCS; rotated grid Def 5.3/5.4, sample-and-round §2.3, §5) [V]
 - https://people.csail.mit.edu/virgi/6.s078/papers/smoothedlcs.pdf (Boroujeni, Seddighin, Seddighin — smoothed analysis background for Exp C)
 - Classic O(n²) LCS DP as referenced by [WF74]/[MP80] in the vault sources.

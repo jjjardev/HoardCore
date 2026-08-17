@@ -2,7 +2,7 @@
 """Peel-Anchor: deterministic Longest Common Subsequence approximation.
 
 MIT-style reference implementation of the deterministic near-linear-time LCS
-approximation of Boneh, Golan, Krauthgamer (arXiv:2507.22486, Jul 2025), which
+approximation of Boneh, Golan, Kraus (arXiv:2507.22486, Jul 2025), which
 is the "certifier" half of the Peel-Anchor scheme (see novel_idea artifact):
 
   - Exact O(n^2) DP baseline for validation.
@@ -126,7 +126,7 @@ def peel_anchor_lcs(a, b, band_logs=True):
     Returns a dict with the output common subsequence, its length, the anchor
     order used, the band certificate, and work metrics.
 
-    Algorithm (Deterministic near-linear, Boneh-Golan-Krauthgammer 2025):
+    Algorithm (Deterministic near-linear, Boneh-Golan-Kraus 2025):
       1. Anchor order: pi = first-occurrence order of a.
       2. If band_logs: certify a dyadic frequency band B (Lemma 8 pigeonhole)
          and restrict both strings to symbols in B. The heavy peeling then runs
