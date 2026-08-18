@@ -641,6 +641,8 @@ python hoardcore.py _ --action verify --claim "the Epoch doubling time is 6 mont
 
 The verbatim stage checks the full normalized claim (not just a fixed-size prefix) against all candidate rows — it does not truncate candidates to the first 100. Agents and CI can branch on the exit code: refuse to emit a `[V]` tag unless `verify` returns `0`.
 
+> **CI gotcha: don't pipe `verify` output.** The exit code is the contract — but if you pipe `verify` through `tail`/`head` (e.g. to trim logs), the shell returns the *pipe's* exit status, not `verify`'s. Capture `$?` from an unpiped invocation, or branch directly on `subprocess.run(...).returncode`. Same caveat applies to `--claim-list` batch runs (they fail loudly with `2` on any UNVERIFIED — don't let a `| tail` mask that).
+
 > **A denial is not a falsification.** `PARTIAL`/`UNVERIFIED` mean "the vault does not hold this wording verbatim" — they do **not** mean the claim is false. The claim may well be true; it just isn't supported by the stored text as phrased. Treat a denial as a *rewording* instruction, not a verdict.
 
 **What `verify` is lenient about** (folded, so these never flip a verdict): typographic en/em/hyphen dashes, smart quotes **and curly vs straight apostrophes** (`’` ≡ `'`), full-width Unicode (NFKC), whitespace/newlines, and parser-emitted markdown markers (`**bold**`, `*italic*`, `` `code` ``).

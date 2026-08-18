@@ -122,7 +122,7 @@ Common: `url` positional = `_` for vault-only actions; `--vault NAME` scopes to 
 
 ### verify — the programmatic audit
 - **Exact phrasing, typography-blind**: folds en/em dashes, smart quotes, NBSP, full-width — but enforces token identity, word order, and `%`≠"percent". `PARTIAL`/`UNVERIFIED` = reword to source words; `--hint` prints nearest phrase.
-- **Exit codes (CI-wireable)**: `0` VERIFIED (verbatim, sliding 60-char window), `1` PARTIAL (top all-term FTS5 hit beats the corpus-scaled coincidence floor, but no verbatim), `2` UNVERIFIED. Refuse `[V]` unless `0`.
+- **Exit codes (CI-wireable)**: `0` VERIFIED (verbatim, sliding 60-char window), `1` PARTIAL (top all-term FTS5 hit beats the corpus-scaled coincidence floor, but no verbatim), `2` UNVERIFIED. Refuse `[V]` unless `0`. **Never pipe `verify` through `tail`/`head`** — the shell then reports the pipe's exit, not the gate's; the observed claim-list `| tail` showed a false `0` over a real `2` (masked verdict).
 - Currency: escape `\$` in shells or use `--claim-file`.
 - **Batch audit** (`--claim-list FILE`): a file of claims (one per line, `#`/blank lines skipped) is verified in bulk and reports an aggregate **citation-accuracy %** (VERIFIED ÷ total). Exit = worst verdict (any UNVERIFIED → 2), so it doubles as a CI citation-accuracy gate. Mutually exclusive with `--claim`/`--claim-file`.
 - **Execution provenance**: every recalled chunk carries `chunk_id` (its storage rowid) in its metadata, and the grounding artifact records the `--discover`/`--recall` run budget — so a `[V]` claim can be replayed to the exact chunk that grounded it.
@@ -137,6 +137,7 @@ venv/bin/python hoardcore.py _ --action verify --claim-list artifacts/2026-08-18
 - `--no-answer-first`: force fresh DISCOVER even if vault has a high-confidence answer.
 - `filter_low` (config, default true): at EMIT drops duplicate `low` hits but keeps one `low` chunk per distinct source (all low → keep all); `--keep-low` retains them all. Grounding notes drops transparently.
 - `max_per_source` (config `research.max_per_source`, default 2): caps recall chunks per source URL so one rich page can't crowd out every other source — recall is source-diverse by default (helps hit the distinct-source quota); set `0` for single-source depth.
+- **Distinct-URL ≠ independent source**: syndicated reprints (e.g. an aggregator mirroring a news wire piece) inflate the distinct-source count. Check for verbatim-duplicate chunks across URLs before treating two sources as corroboration; the vault stores both, so a reprint is still valid `[V]` grounding — just don't count it twice for independence.
 
 ```
 venv/bin/python hoardcore.py _ --action research \
