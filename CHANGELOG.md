@@ -3,6 +3,46 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.12.0
+
+### Added
+- **`audit` action — the execution-provenance gate.** `--action audit --artifact
+  PATH` audits a synthesis artifact's `[V#N]` evidence chain, closing the gap the
+  v0.11.1 stress test exposed: a claim-level `verify` alone never proves a tag
+  maps to a listed, ingested source. For every `[V#N]` tag it checks three links:
+  **VERBATIM** (the claim sentence — or its longest inline double-quoted passage —
+  verifies against the vault), **MAPPED** (`N` appears in the artifact's Source
+  Links / Citations block as `[#N] <url>`), and **INGESTED** (the cited URL has
+  chunks in the vault). A bare `[V]` (no `#N`) is verified but not
+  mapping-checked. Reports a per-claim table plus citation-accuracy %, then
+  exits `0` verified / `1` partial / `2` (any unverified, unmapped, or
+  not-ingested link). Strictness mirrors `verify`: only verbatim-quoted passages
+  pass; paraphrased prose is `UNVERIFIED`.
+- **Grounding contexts get their own subfolder.** `storage.grounding_subdir`
+  (default `grounding`) routes research EMITs to
+  `artifacts/YYYY-MM-DD/grounding/grounding_context[_N].md`, so the working
+  instrument no longer pollutes the day folder of finished syntheses/audits.
+  The `_N` no-clobber suffixing applies inside the subfolder.
+
+### Fixed
+- **`audit_artifact` double-counted multi-tag lines.** A line carrying two
+  `[V#N]` tags (e.g. two `[V#3]` claims in one paragraph) emitted two identical
+  claim rows, skewing `total` and accuracy. Emissions are now deduped by
+  (normalized claim, source tag) pair: one line citing `[V#3]` twice counts one
+  link, while `[V#1]`/`[V#5]` on the same line stay separate links.
+
+### Docs
+- **`README.md`:** added the `audit` action (example, flags, exit codes) and
+  the `--artifact PATH` row; documented `grounding_subdir` in the `[storage]`
+  config table and the Artifacts section.
+- **`skill.md`:** added `audit` to the action table and a full
+  "audit — execution-provenance gate" section; noted the grounding subfolder in
+  the Artifacts section.
+
+### Tests
+- `test_default_grounding_context_is_suffixed_not_clobbered` updated for the
+  `grounding/` subfolder path.
+
 ## HoardCore v0.11.1
 
 ### Added

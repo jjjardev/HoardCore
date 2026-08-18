@@ -562,12 +562,13 @@ def test_default_grounding_context_is_suffixed_not_clobbered(tmp_path, monkeypat
     monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
     scraper = hc.HoardCore()
     first = scraper.resolve_artifact_out(None)
-    assert first.endswith("grounding_context.md")
+    assert first.endswith(os.path.join("grounding", "grounding_context.md"))
     # First run writes it; second run must pick a fresh name.
+    os.makedirs(os.path.dirname(first), exist_ok=True)
     with open(first, "w", encoding="utf-8") as f:
         f.write("# first")
     second = scraper.resolve_artifact_out(None)
-    assert second.endswith("grounding_context_2.md")
+    assert second.endswith(os.path.join("grounding", "grounding_context_2.md"))
     assert second != first
     with open(second, "w", encoding="utf-8") as f:
         f.write("# second")

@@ -93,7 +93,7 @@ HoardCore's own DISCOVER (DuckDuckGo/Mojeek through the resilient fetch chain) i
 **OpenCode:** these are your `webfetch` (fetch a URL) and `websearch` (live query) tools. Every other harness exposes equivalent fetch/search tools — apply the same pattern.
 
 ## Artifacts
-- **Location**: `artifacts/` (configurable `storage.artifacts_dir`; default day-sorted `artifacts/YYYY-MM-DD/`). Vault = raw ingested text; `artifacts/` = provenance-tagged output.
+- **Location**: `artifacts/` (configurable `storage.artifacts_dir`; default day-sorted `artifacts/YYYY-MM-DD/`). Vault = raw ingested text; `artifacts/` = provenance-tagged output. Research EMITs its grounding context into the day folder's `grounding/` subfolder (`storage.grounding_subdir`) — a working instrument, not a deliverable, so it never pollutes the day folder of finished syntheses/audits.
 - **Provenance**: tag every quantitative claim `[V]`/`[E]`/`[H]`. Never claim a number the vault can't support.
 - **Citations**: every `[V]`/`[E]` carries `[V#N]`; artifact closes with a **Source Links / Citations** block. Generate via `hoardcore.citation_list(urls)` or write by hand.
 - **Helpers**: `hoardcore.write_artifact(name, content)`, `hoardcore.organize_artifacts_by_day()`, `hoardcore.citation_list(urls)`.
@@ -119,6 +119,7 @@ Common: `url` positional = `_` for vault-only actions; `--vault NAME` scopes to 
 | `research` | full loop in one cmd | `--query`, `--discover`, `--recall`, `--out`, `--vault`, `--no-answer-first`, `--keep-low` |
 | `check` | 3-phase vault integrity | `--migrate` (rebuild at 16 KB pages) |
 | `stats` | vault summary + confidence probe | `--vault` |
+| `audit` | audit an artifact's `[V#N]` chain | `--artifact PATH` |
 
 ### verify — the programmatic audit
 - **Exact phrasing, typography-blind**: folds en/em dashes, smart quotes, NBSP, full-width — but enforces token identity, word order, and `%`≠"percent". `PARTIAL`/`UNVERIFIED` = reword to source words; `--hint` prints nearest phrase.
@@ -131,6 +132,16 @@ Common: `url` positional = `_` for vault-only actions; `--vault NAME` scopes to 
 venv/bin/python hoardcore.py _ --action verify --claim "the Epoch doubling time is 6 months" --recall 5
 venv/bin/python hoardcore.py _ --action verify --claim-list artifacts/2026-08-18/all_claims.txt
 ```
+
+### audit — execution-provenance gate
+
+`--action audit --artifact PATH` audits a synthesis artifact's evidence chain (the gap verify alone never closes: a `[V#N]` tag must map to a listed, ingested source). For every `[V#N]` tag it checks three links:
+
+1. **VERBATIM** — the claim verifies against the vault (`--action verify` semantics). A bare `[V]` (no `#N`) is verified but not mapping-checked.
+2. **MAPPED** — `N` appears in the artifact's Source Links / Citations block as `[#N] <url>`.
+3. **INGESTED** — the cited URL has chunks in the vault.
+
+Strictness: only the longest inline double-quoted passage (≥24 normalized chars) passes as a claim; paraphrased prose is `UNVERIFIED`. Repeated `[V#N]` of the same claim+source tag count once. Exit codes mirror `verify` (`0` verified / `1` partial / `2` unverified), plus `2` on any unmapped/not-ingested link. **Never pipe through `tail`/`head`** — the shell reports the pipe's exit, not the gate's.
 
 ### research — full loop
 - `--discover 0` = recall-only (never touch the web; does NOT fall back to config default).

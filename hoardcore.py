@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.11.1"
+__version__ = "0.12.0"
 
 import argparse
 import asyncio
@@ -135,6 +135,11 @@ solver_timeout = 60
 root_dir = "hoardcore_data"
 artifacts_dir = "artifacts"          # Finished research deliverables (reports, syntheses, audits)
 artifacts_by_day = true          # Organize deliverables into artifacts/YYYY-MM-DD/ subfolders
+grounding_subdir = "grounding"   # Research EMITs a grounding context (a working
+                                 # instrument, not a deliverable): it lands in
+                                 # artifacts/YYYY-MM-DD/<grounding_subdir>/ so it
+                                 # never pollutes the day folder of finished
+                                 # syntheses/audits.
 save_binary = true               # Save original PDF/DOCX/EPUB files
 save_raw_html = false            # Save raw HTML for debugging
 page_size = 16384                # SQLite page size (bytes). 16 KB keeps 384-dim
@@ -278,7 +283,7 @@ class ConfigManager:
             "network": {"default_strategy": "aggressive", "enable_preflight": True, "ssrf_protection": True},
             "auth": {"cookie_string": ""},
             "solver": {"enabled": False, "url": "http://localhost:8191/v1", "solver_timeout": 60},
-            "storage": {"root_dir": "hoardcore_data", "artifacts_dir": "artifacts", "artifacts_by_day": True, "save_binary": True, "save_raw_html": False, "page_size": 16384},
+            "storage": {"root_dir": "hoardcore_data", "artifacts_dir": "artifacts", "artifacts_by_day": True, "grounding_subdir": "grounding", "save_binary": True, "save_raw_html": False, "page_size": 16384},
             "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "extract_pdf_tables": True, "enable_pdf_ocr": True},
             "crawler": {"respect_robots": True, "sitemap_limit": 500, "parallel_workers": 5},
             "indexer": {"enable_fts": True, "search_limit": 20, "parallel": True,
@@ -3736,15 +3741,19 @@ class HoardCore:
         if out_path is None:
             # Default deliverables share one name; if today's file already
             # exists, suffix it so a second research run never clobbers the
-            # first session's grounding context.
-            base = os.path.join(self._artifact_day_subdir(), "grounding_context.md")
+            # first session's grounding context. Grounding contexts are working
+            # instruments (not finished deliverables), so they live in a
+            # subfolder of the day directory and never pollute the day folder
+            # of syntheses/audits.
+            sub = self.config.get('storage.grounding_subdir', 'grounding')
+            gdir = os.path.join(self._artifact_day_subdir(), sub)
+            base = os.path.join(gdir, "grounding_context.md")
             if not os.path.exists(base):
                 return base
             i = 2
-            while os.path.exists(os.path.join(
-                    self._artifact_day_subdir(), f"grounding_context_{i}.md")):
+            while os.path.exists(os.path.join(gdir, f"grounding_context_{i}.md")):
                 i += 1
-            return os.path.join(self._artifact_day_subdir(), f"grounding_context_{i}.md")
+            return os.path.join(gdir, f"grounding_context_{i}.md")
         artifacts_root = os.path.abspath(self.artifacts_dir) + os.sep
         if os.path.abspath(out_path).startswith(artifacts_root):
             return os.path.join(self._artifact_day_subdir(), os.path.basename(out_path))
@@ -4128,6 +4137,126 @@ class HoardCore:
             + (f" (the vault writes {matched!r} here)" if matched and matched not in needle else "")
             + "\n  — then re-run this verify."
         )
+
+    def audit_artifact(self, path: str) -> dict[str, Any]:
+        """Audit a synthesis artifact's `[V#N]` citation chain against the vault.
+
+        For every `[V#N]` tag in the artifact, three links of the evidence chain
+        are checked (this is the execution-provenance gate the stress test
+        exposed as a gap — claim-level verify alone never proves the tag maps
+        to a listed, ingested source):
+
+          1. VERBATIM  — the sentence containing the tag (or its longest inline
+                         double-quoted passage) must `verify` as VERIFIED against
+                         the vault. A bare `[V]` (no #N) is verified but not
+                         mapping-checked.
+          2. MAPPED    — N must appear in the artifact's "Source Links /
+                         Citations" block as `[#N] <url>`.
+          3. INGESTED  — that cited URL must have chunks in the vault.
+
+        Returns a dict with: `claims` (list of {line, n, text, verdict, quote}),
+        `unmapped` (referenced Ns with no Source Link), `not_ingested` (Ns whose
+        URL has no vault chunks), verdict counts, and `accuracy`
+        (verified / total, excluding neither — a partial counts against).
+        """
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+
+        source_block = self._extract_source_links(lines)
+
+        tag_re = re.compile(r"\[(V|E|H)(?:#(\d+))?\]")
+        claims: list[dict[str, Any]] = []
+        verdicts: dict[str, str] = {}
+        emitted: set[tuple[str, str | None]] = set()
+        in_links = False
+        for ln_no, ln in enumerate(lines, 1):
+            if not ln.strip():
+                continue
+            if re.match(r"^#{1,6}\s", ln) and (
+                    "source link" in ln.lower() or "citation" in ln.lower()):
+                in_links = True
+                continue
+            if in_links:
+                continue
+            # Skip backticked spans (e.g. a prose mention of the literal token
+            # `` `[V]` ``) so narrative references are not audited as claims.
+            scan = re.sub(r"`[^`]*`", " ", ln)
+            for m in tag_re.finditer(scan):
+                if m.group(1) != "V":
+                    continue
+                text_cand, is_quote = self._claim_text_from_line(ln)
+                key = normalize_claim(text_cand)
+                if not key:
+                    continue
+                # One claim row per (claim, source-tag) pair: a line carrying
+                # two [V#N] tags is two chain links, but repeated tags of the
+                # same N on one line must not double-count the claim.
+                n = m.group(2)
+                if (key, n) in emitted:
+                    continue
+                emitted.add((key, n))
+                verdict = verdicts.get(key) or self.verify_claim(text_cand)
+                verdicts[key] = verdict
+                claims.append({
+                    "line": ln_no, "n": n,
+                    "text": text_cand, "quote": is_quote,
+                    "verdict": verdict,
+                })
+
+        used_n = sorted({c["n"] for c in claims if c["n"]})
+        unmapped = [n for n in used_n if n not in source_block]
+        not_ingested: list[tuple[str, str]] = []
+        if not unmapped:
+            for n in used_n:
+                url = source_block[n]
+                if not self.vault.get_chunks_for_url(url):
+                    not_ingested.append((n, url))
+
+        counts = {"verified": 0, "partial": 0, "unverified": 0}
+        for c in claims:
+            counts[c["verdict"]] = counts.get(c["verdict"], 0) + 1
+        total = len(claims)
+        return {
+            "path": path, "claims": claims, "counts": counts,
+            "total": total, "unmapped": unmapped, "used_n": used_n,
+            "not_ingested": not_ingested,
+            "accuracy": (counts["verified"] / total) if total else 0.0,
+        }
+
+    def _extract_source_links(self, lines: list[str]) -> dict[str, str]:
+        """Map `[#N] url` entries in a markdown "Source Links / Citations" block."""
+        source_block: dict[str, str] = {}
+        in_links = False
+        for ln in lines:
+            if re.match(r"^#{1,6}\s", ln):
+                in_links = ("source link" in ln.lower() or "citation" in ln.lower())
+                continue
+            if in_links:
+                m = re.match(r"\[\s*#\s*(\d+)\s*\](?::)?\s*(\S+)", ln)
+                if m:
+                    source_block[m.group(1)] = m.group(2).rstrip(",;")
+        return source_block
+
+    @staticmethod
+    def _claim_text_from_line(line: str) -> tuple[str, bool]:
+        """Extract the auditable claim from an artifact line.
+
+        Strips list/emphasis/cite-tag noise, then prefers the longest inline
+        double-quoted passage (the verbatim burden an author signals by quoting)
+        when it is long enough to be distinctive; otherwise the whole cleaned
+        line is the claim. Returns (text, was_quoted).
+        """
+        cleaned = re.sub(r"^#+\s*", "", line.strip())
+        cleaned = re.sub(r"`[^`]*`", " ", cleaned)
+        cleaned = re.sub(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", "", cleaned)
+        cleaned = re.sub(r"\[(?:V|E|H)(?:#\d+)?\]|\[CONTROL\]|\[INCOMPLETE[^\]]*\]",
+                         "", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        quotes = re.findall(r"[“\"]([^”\"]+)[”\"]", cleaned, flags=re.UNICODE)
+        best = max(quotes, key=len, default="")
+        if best and len(normalize_claim(best)) >= 24:
+            return best.strip(" \t.,;:!?’"), True
+        return cleaned, False
 
     async def _process_document(self, url: str, strategy: str, force_refresh: bool) -> tuple[list[Chunk], dict[str, Any]]:
         """
@@ -4561,7 +4690,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action", choices=["scrape", "crawl", "search", "ingest",
-                             "discover", "research", "verify", "check", "stats"],
+                             "discover", "research", "verify", "check", "stats",
+                             "audit"],
         default="scrape", help="Action to run (default: scrape).",
     )
     parser.add_argument(
@@ -4623,6 +4753,11 @@ def _build_parser() -> argparse.ArgumentParser:
                              "(blank and '#' lines skipped). Verifies each and prints "
                              "an aggregate citation-accuracy percentage. Mutually "
                              "exclusive with --claim/--claim-file.")
+    parser.add_argument("--artifact", default=None,
+                        help="With --action audit: path to a synthesis artifact (.md). "
+                             "Parses every [V#N] tag, verifies each claim verbatim "
+                             "against the vault, checks that N maps to a Source Link, "
+                             "and that the cited source has chunks in the vault.")
     return parser
 
 
@@ -4718,6 +4853,40 @@ async def main(argv: list[str] | None = None) -> None:
                 print(hint)
         # exit codes: 0=verified, 1=partial, 2=unverified (CI-wireable)
         sys.exit(0 if result == "verified" else (1 if result == "partial" else 2))
+
+    if action == "audit":
+        if not args.artifact:
+            print("  ⚠️  --artifact PATH required for --action audit", file=sys.stderr)
+            sys.exit(2)
+        if not os.path.exists(args.artifact):
+            print(f"  ⚠️  artifact not found: {args.artifact}", file=sys.stderr)
+            sys.exit(2)
+        audit = scraper.audit_artifact(args.artifact)
+        print(f"=== Audit: {audit['path']} ===")
+        print(f"Claim chain: {audit['total']} [V] tag(s) analyzed")
+        for i, c in enumerate(audit["claims"], 1):
+            src = f"[V#{c['n']}] " if c["n"] else "[V] "
+            preview = (c["text"] if len(c["text"]) <= 72
+                       else c["text"][:69] + "...")
+            print(f"[{i:>3}] {c['verdict'].upper():<10} {src}{preview}")
+        total = audit["total"]
+        acc = audit["accuracy"] * 100.0
+        c = audit["counts"]
+        print(f"=== citation accuracy: {c['verified']}/{total} = {acc:.1f}% "
+              f"(verified {c['verified']}, partial {c['partial']}, "
+              f"unverified {c['unverified']}) ===")
+        if audit["unmapped"]:
+            print(f"  ✗ Source-link mapping MISSING for [V#{'],[V#'.join(audit['unmapped'])}]")
+        else:
+            print("  ✓ every [V#N] maps to a Source Link")
+        if audit["not_ingested"]:
+            for n, url in audit["not_ingested"]:
+                print(f"  ✗ [V#{n}] cites {url} — no chunks in the vault")
+        else:
+            print("  ✓ every cited source has chunks in the vault")
+        bad_map = bool(audit["unmapped"] or audit["not_ingested"])
+        sys.exit(2 if (c["unverified"] or bad_map)
+                 else (1 if c["partial"] else (0 if total else 0)))
 
     if action == "check":
         if migrate_page_size:

@@ -197,6 +197,9 @@ python hoardcore.py _ --action research --query "how does bokashi compost" --dis
 # Programmatically verify a claim against the vault (0=verified, 1=partial, 2=unverified)
 python hoardcore.py _ --action verify --claim "the Epoch doubling time is 6 months" --recall 5
 
+# Audit an artifact's [V#N] evidence chain (verbatim verify + source-link mapping + ingested)
+python hoardcore.py _ --action audit --artifact artifacts/2026-08-18/synthesis_x.md
+
 # Run a three-phase vault integrity check (0=pass, 1=fail)
 python hoardcore.py _ --action check
 echo "exit code: $?"
@@ -528,7 +531,7 @@ Students and self-learners can use HoardCore as a **second brain with integrity 
 
 ### Artifacts
 
-Finished deliverables live in `artifacts/` (configurable via `storage.artifacts_dir`), day-sorted into `artifacts/YYYY-MM-DD/` subfolders. The tool ships `write_artifact(filename, content)` which refuses path-traversing names, plus `citation_list()` to render the source-links block. Research outputs carry provenance tags:
+Finished deliverables live in `artifacts/` (configurable via `storage.artifacts_dir`), day-sorted into `artifacts/YYYY-MM-DD/` subfolders. The tool ships `write_artifact(filename, content)` which refuses path-traversing names, plus `citation_list()` to render the source-links block. Research EMITs its grounding context into the day folder's `grounding/` subfolder (`storage.grounding_subdir`) — a working instrument, not a deliverable, so it never pollutes the day folder of finished syntheses/audits. Research outputs carry provenance tags:
 
 - `[V]` — verified against full primary text in the current vault
 - `[E]` — extracted/captured earlier, not in the current vault
@@ -613,7 +616,8 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 | `--recall N` | Chunks to retrieve in `research` (default 6). |
 | `--no-answer-first` | With `research`: always run live DISCOVER, even if the vault already has a high-confidence answer (default: `research.answer_first = true` skips it). |
 | `--keep-low` | With `research`: retain low-confidence hits in the grounding context (skip `filter_low`) — for exhaustive/deep hunts that want the full evidence tail. |
-| `--out PATH` | Output file for `research` (default day-sorted `artifacts/YYYY-MM-DD/grounding_context.md`). |
+| `--out PATH` | Output file for `research` (default: `artifacts/YYYY-MM-DD/grounding/grounding_context.md`, suffixed `_N` when today's already exists). |
+| `--artifact PATH` | With `audit`: path to a synthesis artifact to audit. |
 | `--claim C` | Claim text to verify for the `verify` action. In shells, escape `$` as `\$` (bash expands `$13` to empty); or use `--claim-file` to read the claim from a file so `$` survives untouched. |
 | `--claim-file PATH` | With `verify`: read the claim from this file instead of `--claim` (preserves `$`, e.g. `$13`). |
 | `--claim-list PATH` | With `verify`: batch-audit a file of claims (one per line; `#`/blank lines skipped). Prints a per-claim verdict table plus an aggregate **citation-accuracy %** (VERIFIED ÷ total) and exits with the worst verdict (2 on any UNVERIFIED) — so it doubles as a CI-wireable citation-accuracy gate. Mutually exclusive with `--claim`/`--claim-file`. |
@@ -623,7 +627,7 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 | `--migrate` | With `check`: rebuild the vault at the configured `storage.page_size` (16 KB default) via `VACUUM INTO`. |
 | `--force` | Ignore the cache and re-fetch / re-index. |
 
-Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `check`) does not need a URL.
+Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `check`, `audit`) does not need a URL.
 
 ### `verify` — the programmatic audit
 
@@ -649,6 +653,22 @@ The verbatim stage checks the full normalized claim (not just a fixed-size prefi
 
 **What `verify` is strict about** (these cause `PARTIAL`/`UNVERIFIED`): token identity, word **order**, and whether a word is present or absent — adding, dropping, or reordering words (e.g. a prefix the source doesn't have) fails even if the meaning is identical, and `%` never folds to "percent". To confirm a claim, quote the source's *exact stored words*; `--hint` prints the nearest vault phrase to reword toward.
 
+### `audit` — execution-provenance gate
+
+Where `verify` checks a claim against the vault, `audit` checks an artifact's *evidence chain*: every `[V#N]` tag must trace to a listed, ingested source, not just verify in isolation.
+
+```bash
+python hoardcore.py _ --action audit --artifact artifacts/2026-08-18/synthesis_x.md
+```
+
+For each `[V#N]` tag in the artifact it checks three links:
+
+1. **VERBATIM** — the claim sentence (or its longest inline double-quoted passage, ≥24 normalized chars) `verify`s against the vault. A bare `[V]` (no `#N`) is verified but not mapping-checked.
+2. **MAPPED** — `N` appears in the artifact's Source Links / Citations block as `[#N] <url>`.
+3. **INGESTED** — the cited URL has chunks in the vault.
+
+Strictness mirrors `verify` — paraphrased prose is `UNVERIFIED`; only verbatim quoted passages pass. Repeated `[V#N]` tags of the same claim+source count once. Outputs a per-claim table plus citation-accuracy %, then exits `0` verified / `1` partial / `2` (any unverified **or** any unmapped/not-ingested link). Same CI gotcha as `verify`: never pipe through `tail`/`head` — the shell reports the pipe's exit, not the gate's.
+
 ### Configuration file (`hoardcore.toml`)
 
 Created automatically on first run. Key sections:
@@ -659,7 +679,7 @@ Created automatically on first run. Key sections:
 | `[network]` | `default_strategy` (`fast`/`balanced`/`aggressive`), `enable_preflight`, `ssrf_protection` (block private/LAN/non-http(s) targets + re-validate redirects, default true) |
 | `[auth]` | `cookie_string` (e.g. `cf_clearance=...; session=...`) |
 | `[solver]` | `enabled` (default `true`), `url`, `solver_timeout` |
-| `[storage]` | `root_dir`, `artifacts_dir`, `artifacts_by_day`, `save_binary`, `save_raw_html`, `page_size` (16 KB default) |
+| `[storage]` | `root_dir`, `artifacts_dir`, `artifacts_by_day`, `grounding_subdir` (research grounding contexts land in `artifacts/YYYY-MM-DD/<subdir>/` so they don't pollute the day folder of finished deliverables; default `grounding`), `save_binary`, `save_raw_html`, `page_size` (16 KB default) |
 | `[parsers]` | `enable_pdf`, `enable_docx`, `enable_epub`, `extract_pdf_tables`, `enable_pdf_ocr` (auto-OCR scanned PDF pages when `rapidocr_onnxruntime` is present, default true) |
 | `[crawler]` | `respect_robots`, `sitemap_limit`, `parallel_workers` |
 | `[indexer]` | `enable_fts`, `search_limit`, `parallel` (threaded ingest, default off), `near_dedup` (simhash dup filter, default off), `near_dedup_threshold` |
