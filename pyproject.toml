@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hoardcore"
-version = "0.11.0"
+version = "0.11.1"
 description = "Research toolkit for AI agents (single-file Python module + SQLite vault + CLI): DISCOVER→INGEST→RECALL→EMIT, hybrid retrieval, provenance tagging, Cloudflare-aware fetching."
 readme = "README.md"
 requires-python = ">=3.11"

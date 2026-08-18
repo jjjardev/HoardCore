@@ -177,6 +177,34 @@ def test_hybrid_search_ranks_relevant_first(vault, make_chunk):
     assert not res[0].metadata["source_url"].startswith("https://recipe.test")
 
 
+def test_recall_metadata_carries_chunk_id(vault, make_chunk):
+    """Execution-provenance (improving_hoardcore.md #1): every recalled chunk
+    must carry the exact storage `chunk_id` (a real int rowid), so a claim's
+    grounding can be replayed to its source chunk. Applies to the FTS-only,
+    fts_fast, and hybrid retrieval paths."""
+    vault.index_document("https://prov.test/1", [
+        make_chunk("negros island solar microgrid capacity"),
+        make_chunk("geothermal plans pililla reservoir"),
+    ], {})
+    vault.index_document("https://prov.test/2", [
+        make_chunk("solar microgrid DFT lighting poloc"),
+    ], {})
+    # FTS-only path (search_vault hybrid=False): rowid comes from the FTS table.
+    fts = vault.search_vault("negros", limit=5, hybrid=False)
+    assert fts, "FTS path should return hits for a present keyword"
+    assert all(c.metadata.get("chunk_id") is not None for c in fts)
+    assert all(isinstance(c.metadata["chunk_id"], int) for c in fts)
+    # Hybrid path: rowid comes from the merged recall set.
+    hy = vault.search_vault("negros geothermal", limit=5, hybrid=True)
+    assert hy, "hybrid path should return hits for a present query"
+    assert all(c.metadata.get("chunk_id") is not None for c in hy)
+    assert all(isinstance(c.metadata["chunk_id"], int) for c in hy)
+    # The chunk_id must identify the exact stored chunk (replayable), so a
+    # given text maps back to a stable, distinct rowid.
+    by_text = {c.text: c.metadata["chunk_id"] for c in hy}
+    assert len(set(by_text.values())) == len(by_text)
+
+
 def test_embeddings_lexical_similarity():
     from hoardcore import ConfigManager
     # Pin sparse mode: this test exercises the dependency-free lexical hash,

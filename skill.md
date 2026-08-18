@@ -113,7 +113,7 @@ Common: `url` positional = `_` for vault-only actions; `--vault NAME` scopes to 
 | `scrape` | fetch+index one URL (or `--urls` batch) | `--urls`, `--strategy`, `--force` |
 | `crawl` | ingest whole site (or `--urls` batch) | `--urls`, `--strategy`, `--force` |
 | `search` | query vault | `--query`, `--mode fast\|hybrid`, `--limit` |
-| `verify` | machine-check a claim | `--claim`/`--claim-file`, `--hint`, `--recall` |
+| `verify` | machine-check a claim (or a claim list) | `--claim`/`--claim-file`/`--claim-list`, `--hint`, `--recall` |
 | `ingest` | index explicit URLs | `--urls` |
 | `discover` | web-search + ingest | `--query`, `--limit` |
 | `research` | full loop in one cmd | `--query`, `--discover`, `--recall`, `--out`, `--vault`, `--no-answer-first`, `--keep-low` |
@@ -124,9 +124,12 @@ Common: `url` positional = `_` for vault-only actions; `--vault NAME` scopes to 
 - **Exact phrasing, typography-blind**: folds en/em dashes, smart quotes, NBSP, full-width — but enforces token identity, word order, and `%`≠"percent". `PARTIAL`/`UNVERIFIED` = reword to source words; `--hint` prints nearest phrase.
 - **Exit codes (CI-wireable)**: `0` VERIFIED (verbatim, sliding 60-char window), `1` PARTIAL (top all-term FTS5 hit beats the corpus-scaled coincidence floor, but no verbatim), `2` UNVERIFIED. Refuse `[V]` unless `0`.
 - Currency: escape `\$` in shells or use `--claim-file`.
+- **Batch audit** (`--claim-list FILE`): a file of claims (one per line, `#`/blank lines skipped) is verified in bulk and reports an aggregate **citation-accuracy %** (VERIFIED ÷ total). Exit = worst verdict (any UNVERIFIED → 2), so it doubles as a CI citation-accuracy gate. Mutually exclusive with `--claim`/`--claim-file`.
+- **Execution provenance**: every recalled chunk carries `chunk_id` (its storage rowid) in its metadata, and the grounding artifact records the `--discover`/`--recall` run budget — so a `[V]` claim can be replayed to the exact chunk that grounded it.
 
 ```
 venv/bin/python hoardcore.py _ --action verify --claim "the Epoch doubling time is 6 months" --recall 5
+venv/bin/python hoardcore.py _ --action verify --claim-list artifacts/2026-08-18/all_claims.txt
 ```
 
 ### research — full loop

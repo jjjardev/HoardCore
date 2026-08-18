@@ -3,6 +3,22 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.11.1
+
+### Added
+- **`verify --claim-list FILE` batch audit.** Verify a file of claims (one per
+  line; `#`/blank lines skipped) in one run and get a per-claim verdict table
+  plus an aggregate **citation-accuracy %** (VERIFIED ÷ total). Exit code is
+  the worst verdict (`0` all verified / `1` any partial / `2` any unverified),
+  so a CI job can enforce "zero hallucinated citations" as a measured number.
+  Mutually exclusive with `--claim`/`--claim-file`.
+- **Execution-provenance in recall.** Every recalled chunk now carries its
+  exact storage `chunk_id` (`source_url`, `chunk_id`, and `retrieval` mode) in
+  its metadata across the FTS-only, `fts_fast`, and hybrid paths, and the
+  research grounding artifact lists each chunk's id plus the `--discover` /
+  `--recall` run budget — so a `[V]` claim is replayable to the exact chunk
+  that grounded it.
+
 ## HoardCore v0.11.0
 
 ### Added

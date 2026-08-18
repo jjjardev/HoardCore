@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.11.0"
+__version__ = "0.11.1"
 
 import argparse
 import asyncio
@@ -158,7 +158,9 @@ parallel_workers = 5
 [indexer]
 enable_fts = true
 search_limit = 20
-# parallel = false        # threaded ingest for large batches (off by default)
+parallel = true           # threaded ingest: engages the reader→embed→write
+                          # pipeline for batches of 8+ chunks (--no-parallel
+                          # forces sequential)
 near_dedup = false        # simhash near-duplicate chunk filter (off: preserves
                           # cross-source corroborating text as evidence)
 near_dedup_threshold = 3  # hamming-distance cutoff for a near-dup block (0-64)
@@ -181,6 +183,8 @@ mrl_dims = 0             # Matryoshka truncation: store only the first N dims of
                          # models. Existing rows rebuild via backfill.
 hybrid_search = true       # merge FTS + vector via RRF
 top_k = 40                 # candidate pool from vector search
+batch_size = 16            # chunks per model forward pass at ingest (bit-identical
+                           # output to per-chunk; 0 = no batching, one chunk at a time)
 quantize = "float32"       # "float32" (default) or "int8" (1 byte/dim, ~4x smaller, tiny recall cost)
 fts_fast_path = true       # skip the vector scan when FTS5 alone fills the result set (all-term AND match)
 recency_half_life_days = 0 # recency weighting in RRF: 0 = disabled; e.g. 30 halves an old hit's score per month
@@ -277,9 +281,9 @@ class ConfigManager:
             "storage": {"root_dir": "hoardcore_data", "artifacts_dir": "artifacts", "artifacts_by_day": True, "save_binary": True, "save_raw_html": False, "page_size": 16384},
             "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "extract_pdf_tables": True, "enable_pdf_ocr": True},
             "crawler": {"respect_robots": True, "sitemap_limit": 500, "parallel_workers": 5},
-            "indexer": {"enable_fts": True, "search_limit": 20, "parallel": False,
+            "indexer": {"enable_fts": True, "search_limit": 20, "parallel": True,
                         "near_dedup": False, "near_dedup_threshold": 3},
-            "embeddings": {"enabled": True, "mode": "dense", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 256, "mrl_dims": 0, "hybrid_search": True, "top_k": 40, "conf_mode": "relative", "conf_high_abs": 0.025, "conf_low_abs": 0.020, "quantize": "float32", "fts_fast_path": True, "recency_half_life_days": 0, "reranker_model": ""},
+            "embeddings": {"enabled": True, "mode": "dense", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 256, "mrl_dims": 0, "hybrid_search": True, "top_k": 40, "conf_mode": "relative", "conf_high_abs": 0.025, "conf_low_abs": 0.020, "quantize": "float32", "fts_fast_path": True, "recency_half_life_days": 0, "reranker_model": "", "batch_size": 16},
             "research": {"answer_first": True, "filter_low": True, "max_per_source": 2},
             "discovery": {"enabled": True, "provider": "duckduckgo_html", "max_results": 10, "top_rank": 6, "max_retries": 2, "backoff_seconds": 1.5},
             "chunking": {"max_tokens": 512, "overlap_tokens": 50, "strategy": "heading"},
@@ -603,12 +607,59 @@ class EmbeddingsEngine:
         return arr.tobytes()
 
     def vectorize(self, text: str) -> bytes:
-        vec = self._vectorize_dense(text) if (
-            self.mode == 'dense' and self._dense is not None
-        ) else self._hash_vector(text)
-        if self.mode == 'dense' and self.mrl_dims > 0:
+        was_dense = (self.mode == 'dense' and self._dense is not None)
+        raw = self._vectorize_dense(text) if was_dense else self._hash_vector(text)
+        return self._finalize(raw, was_dense)
+
+    def vectorize_batch(self, texts: list[str]) -> list[bytes]:
+        """Embed many texts in a single model call; returns a list aligned to
+        `texts`.
+
+        Bit-identical to calling `vectorize` per text (shared normalization and
+        post-processing), so batching is a pure throughput win with no recall
+        cost. Falls back to per-item embedding if the model returns a mismatched
+        count or raises.
+        """
+        if not texts:
+            return []
+        if self.mode == 'dense' and self._dense is not None:
+            model, _dim = self._dense
+            vectors: list = []
+            try:
+                vectors = list(model.embed(list(texts)))
+            except Exception as e:
+                logger.warning(f"Batch embed failed ({e}); per-item fallback.")
+            if len(vectors) == len(texts):
+                return [
+                    self._finalize(self._dense_vec_to_bytes(v) if v is not None else b"", True)
+                    for v in vectors
+                ]
+            logger.warning("Batch embed returned a different count; per-item fallback.")
+        return [self.vectorize(t) for t in texts]
+
+    def _dense_vec_to_bytes(self, vec) -> bytes:
+        """Normalize a raw dense vector to a unit float32 blob (shared by the
+        single- and batch-embedding paths so tokenization/output is identical)."""
+        from array import array
+
+        if _np is not None:
+            arr = _np.asarray(vec, dtype=_np.float32).reshape(-1)
+            norm = float(_np.linalg.norm(arr))
+            if norm > 0:
+                arr = arr / norm
+            return array('f', arr).tobytes()
+        arr = list(vec)
+        norm = float(sum(v * v for v in arr)) ** 0.5
+        if norm > 0:
+            arr = [v / norm for v in arr]
+        return array('f', arr).tobytes()
+
+    def _finalize(self, vec: bytes, was_dense: bool) -> bytes:
+        """Apply mode-specific post-processing (MRL truncation, int8) to a
+        serialized vector. Shared by single and batched embedding."""
+        if was_dense and self.mrl_dims > 0:
             vec = self._truncate_f32(vec, self.dim)
-        if self.mode == 'dense' and self.quantize == 'int8' and vec:
+        if was_dense and self.quantize == 'int8' and vec:
             return self._quantize_int8(vec)
         return vec
 
@@ -642,30 +693,14 @@ class EmbeddingsEngine:
         return q.tobytes()
 
     def _vectorize_dense(self, text: str) -> bytes:
-        """Encode text with the loaded dense model, stored as float32 bytes.
-
-        The query is embedded, the result is normalized to a unit vector, and
-        the float32 payload is returned in the same binary layout as the
-        sparse hash so the existing cosine path works unchanged.
-        """
-        from array import array
-
-        model, dim = self._dense
+        """Encode one text with the loaded dense model, normalized to a unit
+        float32 blob. Post-processing (MRL truncation, int8) is applied by
+        `_finalize` so the single and batched paths stay byte-identical."""
+        model, _dim = self._dense
         vec = next(iter(model.embed([text])), None)
         if vec is None:
             return b""
-        if _np is not None:
-            arr = _np.asarray(vec, dtype=_np.float32).reshape(-1)
-            norm = float(_np.linalg.norm(arr))
-            if norm > 0:
-                arr = arr / norm
-            return array('f', arr).tobytes()
-        # Pure-Python fallback (no numpy installed).
-        arr = list(vec)
-        norm = float(sum(v * v for v in arr)) ** 0.5
-        if norm > 0:
-            arr = [v / norm for v in arr]
-        return array('f', arr).tobytes()
+        return self._dense_vec_to_bytes(vec)
 
     @staticmethod
     def cosine(a: bytes, b: bytes, dim: int) -> float:
@@ -1278,6 +1313,7 @@ class VaultManager:
 
             # Insert chunks into FTS + content-addressable dedup. The CA-vector
             # lookup runs on the SAME connection (no nested pool acquires).
+            embed_jobs: list[tuple[int, str, str]] = []  # (rowid, c_hash, text)
             for chunk in chunks:
                 text = chunk.text
                 header = chunk.metadata.get('header_path', 'Root')
@@ -1298,9 +1334,16 @@ class VaultManager:
                 rowid = cursor.lastrowid
 
                 if embed_ok:
-                    # Dedup-aware embedding: reuse a cached vector for an
-                    # identical chunk instead of recomputing it.
-                    vec = self._embed_chunk(cursor, c_hash, text)
+                    embed_jobs.append((rowid, c_hash, text))
+
+            # Batch-embed the whole document (one model call over many chunks),
+            # then write vectors keyed by their FTS rowid. Dedup-aware and
+            # bit-identical to per-chunk embedding.
+            if embed_jobs:
+                vec_by_hash = self._embed_chunk_batch(
+                    cursor, [(c_hash, text) for _r, c_hash, text in embed_jobs])
+                for rowid, c_hash, _text in embed_jobs:
+                    vec = vec_by_hash.get(c_hash)
                     if vec is not None:
                         cursor.execute(
                             "INSERT OR REPLACE INTO chunk_vectors (chunk_rowid, url, vector) "
@@ -1355,6 +1398,76 @@ class VaultManager:
                     self.bus.emit("chunk.embedded", chunk_hash=c_hash,
                                   vector_dim=self.embeddings.dim)
         return vec
+
+    def _embed_chunk_batch(self, cursor: sqlite3.Cursor,
+                           items: list[tuple[str, str]]) -> dict[str, bytes]:
+        """Embed many (c_hash, text) items in a single model call, reusing
+        content-addressed vectors for any already embedded under the current
+        fingerprint.
+
+        Returns `{c_hash: vector_bytes}` for every item that produced a vector
+        (cached or freshly embedded). Runs on the caller's connection. Batch
+        lookup + batch embed so the model does one forward pass over many texts
+        instead of one per chunk; bit-identical output to per-chunk embedding.
+        Non-fatal: a failed item is simply absent from the result.
+        """
+        embed_fp = self.embeddings.fingerprint()
+        expected = self.embeddings.dim * self.embeddings.bytes_per_dim
+        result: dict[str, bytes] = {}
+
+        # 1. Batch content-addressed cache lookup for every hash at once.
+        cached: dict[str, bytes] = {}
+        hashes = [h for h, _t in items]
+        if hashes:
+            ph = ",".join("?" * len(hashes))
+            try:
+                cursor.execute(
+                    f"SELECT chunk_hash, vector FROM chunk_vectors_ca "
+                    f"WHERE chunk_hash IN ({ph}) AND embed_fp = ?",
+                    (*hashes, embed_fp),
+                )
+                for ch, vec in cursor.fetchall():
+                    if vec is not None and len(vec) == expected:
+                        cached[ch] = vec
+            except Exception as e:
+                logger.debug(f"CA batch cache lookup failed: {e}")
+
+        pending: list[tuple[str, str]] = []
+        for c_hash, text in items:
+            if c_hash in cached:
+                result[c_hash] = cached[c_hash]
+            else:
+                pending.append((c_hash, text))
+
+        if not pending:
+            return result
+
+        # 2. Batch-embed only the missing texts, in slices so huge documents
+        # don't allocate one giant batch.
+        batch_size = int(self.config.get('embeddings.batch_size', 16) or 0)
+        if batch_size <= 0:
+            batch_size = len(pending)
+        for i in range(0, len(pending), batch_size):
+            slice_ = pending[i:i + batch_size]
+            try:
+                vecs = self.embeddings.vectorize_batch([t for _h, t in slice_])
+            except Exception as e:
+                logger.warning(f"Batch embedding failed ({e}); item skipped.")
+                vecs = []
+            for (c_hash, _text), vec in zip(slice_, vecs, strict=False):
+                if not vec:
+                    continue
+                result[c_hash] = vec
+                with suppress(Exception):
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO chunk_vectors_ca "
+                        "(chunk_hash, vector, embed_fp) VALUES (?, ?, ?)",
+                        (c_hash, vec, embed_fp),
+                    )
+                    if self.bus is not None:
+                        self.bus.emit("chunk.embedded", chunk_hash=c_hash,
+                                      vector_dim=self.embeddings.dim)
+        return result
 
     def backfill_vectors(self) -> int:
         """Compute and store embeddings for chunks missing one (or with a stale
@@ -1688,28 +1801,37 @@ class VaultManager:
             return
 
         embed_ok = self.config.get('embeddings.enabled', True)
+        batch_size = max(1, int(self.config.get('embeddings.batch_size', 16) or 0) or 16)
+        # Slice chunks into embedding mini-batches keyed by their start index in
+        # `chunks`, so the model does one forward pass over several texts per
+        # worker instead of one pass per chunk. Bit-identical output.
+        work_batches: list[tuple[int, list[str]]] = [
+            (i, [c.text for c in chunks[i:i + batch_size]])
+            for i in range(0, len(chunks), batch_size)
+        ]
         work_q: queue.Queue = queue.Queue(maxsize=PIPELINE_QUEUE_SIZE)
         result_q: queue.Queue = queue.Queue(maxsize=PIPELINE_QUEUE_SIZE)
         error_holder: list[Exception] = []
         results: list[tuple[int, str, bytes | None]] = [None] * len(chunks)  # type: ignore[list-item]
         # A sentinel is pushed to the WORK queue (not result_q) and consumed by
         # the workers themselves, so shutdown can never race with the consumer
-        # (A11). The reader then collects exactly len(chunks) results.
+        # (A11). The reader then collects exactly len(work_batches) results.
         sentinel = (-1, None)
 
         def _embed_worker() -> None:
             while True:
-                idx, text = work_q.get()
+                start, texts = work_q.get()
                 try:
-                    if idx == -1:
+                    if start == -1:
                         return
-                    vec = self.embeddings.vectorize(text) if embed_ok else None
+                    vecs = (self.embeddings.vectorize_batch(texts) if embed_ok
+                            else [None] * len(texts))
                 except Exception as e:
                     error_holder.append(e)
-                    vec = None
+                    vecs = [None] * len(texts)
                 finally:
                     work_q.task_done()
-                result_q.put((idx, vec))
+                result_q.put((start, vecs))
 
         # Start the workers, then feed work and sentinels.
         threads = [threading.Thread(target=_embed_worker, daemon=True)
@@ -1726,25 +1848,26 @@ class VaultManager:
         collected: list[tuple[int, object]] = []
 
         def _collector() -> None:
-            # Exactly len(chunks) real results are produced (sentinels are
+            # Exactly len(work_batches) real results are produced (sentinels are
             # consumed by workers and produce no result), so this cannot hang.
-            for _ in range(len(chunks)):
-                idx, vec = result_q.get()
-                collected.append((idx, vec))
+            for _ in range(len(work_batches)):
+                start, vecs = result_q.get()
+                collected.append((start, vecs))
 
         reader = threading.Thread(target=_collector, daemon=True)
         reader.start()
 
-        for idx, chunk in enumerate(chunks):
-            work_q.put((idx, chunk.text))
+        for start, texts in work_batches:
+            work_q.put((start, texts))
         # Wake EXACTLY the number of workers we started so none hang waiting.
         for _ in threads:
             work_q.put(sentinel)
-        # reader has now collected exactly len(chunks) results; every worker has
-        # seen its sentinel and exited, so join cannot hang.
+        # reader has now collected exactly len(work_batches) results; every
+        # worker has seen its sentinel and exited, so join cannot hang.
         reader.join()
-        for idx, vec in collected:
-            results[idx] = vec  # type: ignore[assignment]
+        for start, vecs in collected:
+            for j, vec in enumerate(vecs):  # type: ignore[arg-type]
+                results[start + j] = vec  # type: ignore[assignment]
         for t in threads:
             t.join()
 
@@ -1880,6 +2003,7 @@ class VaultManager:
                 meta = json.loads(meta_json)
                 meta['search_rank'] = rank
                 meta['source_url'] = url
+                meta['chunk_id'] = rowid
                 results.append(Chunk(text=text, metadata=meta))
 
         return results
@@ -2111,6 +2235,7 @@ class VaultManager:
                     url, _hp, text, meta_json = row_by_id[rid]
                     meta = json.loads(meta_json)
                     meta['source_url'] = url
+                    meta['chunk_id'] = rid
                     meta['retrieval'] = 'fts_fast'
                     meta['hybrid_score'] = None
                     # Confidence band is deliberately 'medium', not 'high':
@@ -2285,6 +2410,7 @@ class VaultManager:
                     meta['hybrid_score'] = rrf.get(rid, 0.0)
                     meta['confidence'] = conf_by_rid.get(rid, "low")
                     meta['source_url'] = url
+                    meta['chunk_id'] = rid
                     meta['retrieval'] = 'hybrid'
                     results.append(Chunk(text=text, metadata=meta))
             # Optional cross-encoder re-ranking of the final recalled set.
@@ -3815,8 +3941,11 @@ class HoardCore:
                 seen.add(src)
                 score = c.metadata.get("hybrid_score")
                 score_s = f"{score:.4f}" if score is not None else "n/a"
-                f.write(f"### [{i}] {src}  (score {score_s} | {c.metadata.get('confidence', 'n/a')})\n")
+                cid = c.metadata.get("chunk_id")
+                cid_s = f" | chunk {cid}" if cid is not None else ""
+                f.write(f"### [{i}] {src}  (score {score_s} | {c.metadata.get('confidence', 'n/a')}{cid_s})\n")
                 f.write(f"{c.text}\n\n")
+            f.write(f"## Run budget\n- `--discover` {discover if discover is not None else '(config)'} | `--recall` {recall}\n\n")
             f.write(f"## Distinct sources in recall: {len(seen)}\n")
             for s in sorted(seen):
                 f.write(f" - {s}\n")
@@ -4489,6 +4618,11 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="With --action verify: read the claim from this file "
                              "instead of --claim. Keeps characters like '$' intact "
                              "(bash would otherwise expand '$13' to empty).")
+    parser.add_argument("--claim-list", default=None,
+                        help="With --action verify: a file of claims, one per line "
+                             "(blank and '#' lines skipped). Verifies each and prints "
+                             "an aggregate citation-accuracy percentage. Mutually "
+                             "exclusive with --claim/--claim-file.")
     return parser
 
 
@@ -4534,6 +4668,34 @@ async def main(argv: list[str] | None = None) -> None:
         sys.exit(0 if written else 1)
 
     if action == "verify":
+        claim = args.claim
+        if args.claim_list and (args.claim or args.claim_file):
+            print("  ⚠️  --claim-list cannot be combined with --claim/--claim-file",
+                  file=sys.stderr)
+            sys.exit(2)
+        if args.claim_list:
+            try:
+                with open(args.claim_list, encoding="utf-8") as cf:
+                    claims = [ln.strip() for ln in cf.read().splitlines()
+                              if ln.strip() and not ln.strip().startswith("#")]
+            except OSError as e:
+                print(f"  ⚠️  cannot read --claim-list: {e}", file=sys.stderr)
+                sys.exit(2)
+            if not claims:
+                print("  ⚠️  --claim-list contains no claims", file=sys.stderr)
+                sys.exit(2)
+            tally: dict[str, int] = {"verified": 0, "partial": 0, "unverified": 0}
+            print(f"=== Batch verify: {len(claims)} claim(s) ===")
+            for i, c in enumerate(claims, 1):
+                result = scraper.verify_claim(c)
+                tally[result] = tally.get(result, 0) + 1
+                print(f"[{i:>3}] {result.upper():<11} {c}")
+            total = len(claims)
+            pct = 100.0 * tally["verified"] / total
+            print(f"=== citation accuracy: {tally['verified']}/{total} = {pct:.1f}% "
+                  f"(verified {tally['verified']}, partial {tally['partial']}, "
+                  f"unverified {tally['unverified']}) ===")
+            sys.exit(2 if tally["unverified"] else (1 if tally["partial"] else 0))
         if args.claim_file:
             try:
                 with open(args.claim_file, encoding="utf-8") as cf:

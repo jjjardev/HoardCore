@@ -122,6 +122,58 @@ def test_cli_verify_unverified_exits_2(tmp_path):
     assert "VERIFY: UNVERIFIED" in res.stdout
 
 
+def test_cli_verify_claim_list_conflict_rejected(tmp_path):
+    """improving_hoardcore.md #2: --claim-list is mutually exclusive with
+    --claim/--claim-file (CLI contract error, not a silent merge)."""
+    cwd = _isolated_toml(tmp_path)
+    claims = tmp_path / "claims.txt"
+    claims.write_text("some claim\n", encoding="utf-8")
+    res = _run("_", "--action", "verify", "--claim-list", str(claims),
+               "--claim", "other", cwd=cwd)
+    assert res.returncode == 2
+    assert "cannot be combined" in (res.stdout + res.stderr)
+
+
+def test_cli_verify_claim_list_empty_file_exits_2(tmp_path):
+    """A --claim-list containing only blanks/comments is a usage error (exit 2),
+    not a silently empty (all-passing) batch."""
+    cwd = _isolated_toml(tmp_path)
+    claims = tmp_path / "claims.txt"
+    claims.write_text("# only a comment\n\n", encoding="utf-8")
+    res = _run("_", "--action", "verify", "--claim-list", str(claims), cwd=cwd)
+    assert res.returncode == 2
+    assert "no claims" in (res.stdout + res.stderr)
+
+
+def test_cli_verify_claim_list_reports_aggregate_accuracy(tmp_path, make_chunk):
+    """improving_hoardcore.md #2: batch verify must print a per-claim verdict
+    table plus an aggregate citation-accuracy %, and exit with the worst
+    verdict (any unverified -> 2)."""
+    import hoardcore as hc
+    cwd_s = _isolated_toml(tmp_path)  # root_dir = tmp_path/'data'
+    cfg = hc.ConfigManager(str(tmp_path / "hoardcore.toml"))
+    hc_obj = hc.HoardCore.__new__(hc.HoardCore)
+    hc_obj.config = cfg
+    hc_obj.vault = hc.VaultManager(cfg)
+    hc_obj.vault.index_document(
+        "https://coffee.test/1",
+        [make_chunk("The Philippines has a coffee trade deficit of 13 million "
+                    "dollars in 2022", url="https://coffee.test/1")],
+        {})
+    claims = tmp_path / "claims.txt"
+    claims.write_text(
+        "# batch audit\n"
+        "The Philippines has a coffee trade deficit of 13 million dollars in 2022\n"
+        "absolutely absent gibberish xyzzy\n",
+        encoding="utf-8",
+    )
+    res = _run("_", "--action", "verify", "--claim-list", str(claims), cwd=cwd_s)
+    assert res.returncode == 2  # worst verdict wins: one UNVERIFIED
+    assert "VERIFIED" in res.stdout
+    assert "UNVERIFIED" in res.stdout
+    assert "citation accuracy: 1/2 = 50.0%" in res.stdout
+
+
 def test_cli_scrape_ssrf_blocked_exits_2_without_traceback(tmp_path):
     """S3: an SSRF-refused target must exit 2 with a clean message and no
     Python traceback (the refusal used to crash main())."""
