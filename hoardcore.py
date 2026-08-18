@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.10.2"
+__version__ = "0.11.0"
 
 import argparse
 import asyncio
@@ -107,8 +107,8 @@ class Chunk:
 # 2. CONFIGURATION MANAGER
 # =============================================================================
 
-DEFAULT_CONFIG = """
-# HoardCore v0.9.0 Configuration
+DEFAULT_CONFIG = f"""
+# HoardCore v{__version__} Configuration
 
 [general]
 timeout_seconds = 30
@@ -194,8 +194,10 @@ reranker_model = ""        # optional cross-encoder re-ranker applied to the fin
 answer_first = true      # skip live DISCOVER when the existing vault already
                          # returns a high-confidence hit (Adaptive-RAG style:
                          # most recurring questions need no new retrieval)
-filter_low = true        # at EMIT, drop confidence='low' chunks whenever
-                         # stronger (non-low) chunks remain
+filter_low = true        # at EMIT, drop duplicate confidence='low' chunks but
+                         # keep one low chunk per distinct source (all-low: keep all)
+max_per_source = 2       # cap recall chunks per source URL so one rich page
+                         # can't crowd out every other source (0 = unlimited)
 
 [discovery]
 enabled = true
@@ -278,7 +280,7 @@ class ConfigManager:
             "indexer": {"enable_fts": True, "search_limit": 20, "parallel": False,
                         "near_dedup": False, "near_dedup_threshold": 3},
             "embeddings": {"enabled": True, "mode": "dense", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 256, "mrl_dims": 0, "hybrid_search": True, "top_k": 40, "conf_mode": "relative", "conf_high_abs": 0.025, "conf_low_abs": 0.020, "quantize": "float32", "fts_fast_path": True, "recency_half_life_days": 0, "reranker_model": ""},
-            "research": {"answer_first": True, "filter_low": True},
+            "research": {"answer_first": True, "filter_low": True, "max_per_source": 2},
             "discovery": {"enabled": True, "provider": "duckduckgo_html", "max_results": 10, "top_rank": 6, "max_retries": 2, "backoff_seconds": 1.5},
             "chunking": {"max_tokens": 512, "overlap_tokens": 50, "strategy": "heading"},
             "plugins": {"enabled": True},
@@ -377,6 +379,31 @@ def normalize_claim(text: str) -> str:
     # unifies look-alike punctuation; do it on the translated string.
     norm = unicodedata.normalize("NFKC", t)
     return re.sub(r"\s+", " ", norm).strip().lower()
+
+
+def _tidy_markdown_text(text: str) -> str:
+    """Strip parser-emitted markdown emphasis/code markers from stored chunk
+    text so the vault's canonical text is clean prose (mirrors the verifier's
+    marker-strip in `normalize_claim`, applied at ingest so the stored form
+    already matches the compared form). Preserves newline structure and leaves
+    code fences (```` ``` ````) and their content intact. Collapses only the
+    horizontal whitespace a removed marker orphans, so "a **b** c" -> "a b c"
+    but line structure is untouched."""
+    if not text:
+        return text
+    in_fence = False
+    out: list[str] = []
+    for line in text.split("\n"):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            out.append(line)          # keep the fence marker itself
+            continue
+        if in_fence:
+            out.append(line)          # code content left untouched
+            continue
+        t = re.sub(r"[\*`]+", "", line)   # strip emphasis + inline code markers
+        out.append(re.sub(r"[ \t]{2,}", " ", t))
+    return "\n".join(out)
 
 
 def _nearest_phrase_probe(text: str, needle: str) -> tuple[float, int, int]:
@@ -1804,7 +1831,7 @@ class VaultManager:
         return f' {op} '.join(tokens)
 
     def search_vault(self, query: str, limit: int = 20, domain: str | None = None,
-                     hybrid: bool | None = None) -> list[Chunk]:
+                     hybrid: bool | None = None, max_per_source: int = 0) -> list[Chunk]:
         """Perform FTS5 search (or hybrid FTS+vector when enabled).
 
         Args:
@@ -1812,6 +1839,10 @@ class VaultManager:
             limit: max results.
             domain: restrict to a netloc substring, if given.
             hybrid: None -> use config; True/False -> override.
+            max_per_source: cap on chunks from any one source URL in the result
+                (0 = unlimited). Research recall uses this to keep the set
+                source-diverse so a single rich page can't crowd out every other
+                source.
         """
         if not self.config.get('indexer.enable_fts', True):
             return []
@@ -1821,7 +1852,7 @@ class VaultManager:
 
         use_hybrid = self.config.get('embeddings.hybrid_search', True) if hybrid is None else hybrid
         if use_hybrid and self.embeddings.enabled:
-            return self._search_hybrid(query, limit, domain)
+            return self._search_hybrid(query, limit, domain, max_per_source=max_per_source)
 
         results = []
         with self._db() as (_conn, cursor):
@@ -1971,10 +2002,41 @@ class VaultManager:
             logger.warning(f"Reranker unavailable ({e}); keeping original order.")
             return chunks
 
-    def _search_hybrid(self, query: str, limit: int, domain: str | None) -> list[Chunk]:
+    @staticmethod
+    def _diverse_order(fused: list[tuple[int, float]],
+                       limit: int, max_per_source: int,
+                       url_by_rid: dict[int, str]) -> list[tuple[int, float]]:
+        """Rebalance a rank-ordered RRF list so no single source dominates the
+        top-N, keeping the set source-diverse while preserving relevance.
+
+        Walks the fused (already relevance-ranked) list in order and admits each
+        hit unless its source URL has already contributed `max_per_source` hits,
+        continuing to fill until `limit` is reached. The top-ranked hit is always
+        admitted (its source can't be saturated yet), so the most relevant result
+        is never demoted. Returns the full list when `limit <= 0` (no cap) or
+        `max_per_source <= 0` (diversity off)."""
+        if max_per_source <= 0 or limit <= 0:
+            return fused[:limit] if limit > 0 else fused
+        per_src: dict[str, int] = {}
+        selected: list[tuple[int, float]] = []
+        for rid, score in fused:
+            if len(selected) >= limit:
+                break
+            src = url_by_rid.get(rid, '?')
+            if per_src.get(src, 0) >= max_per_source:
+                continue
+            per_src[src] = per_src.get(src, 0) + 1
+            selected.append((rid, score))
+        return selected
+
+    def _search_hybrid(self, query: str, limit: int, domain: str | None,
+                       max_per_source: int = 0) -> list[Chunk]:
         """Fuse FTS5 keyword ranks and vector-similarity ranks via Reciprocal
         Rank Fusion (RRF). Returns Chunks best matching the query.
 
+        max_per_source > 0 caps how many chunks any single source URL may
+        contribute to the returned set (see `_diverse_order`); the top-ranked
+        hit is always kept regardless of source, so relevance stays first.
         Reads the FTS candidate pool in a SINGLE query (fetching the full rows
         once and stashing them by rowid) instead of a second rowid-IN round
         trip for the fast path and the fused result set (B3)."""
@@ -2135,8 +2197,13 @@ class VaultManager:
             if not rrf:
                 return []
 
+            # URL per result, for source-diversity rebalancing (built outside
+            # the recency block so `_diverse_order` always has it).
+            url_by_rid: dict[int, str] = dict(fts_rows)
+            url_by_rid.update({rid: u for _s, rid, u in scored})
+
             fused = sorted(rrf.items(), key=lambda kv: kv[1], reverse=True)
-            order = fused[:limit] if limit > 0 else fused
+            order = self._diverse_order(fused, limit, max_per_source, url_by_rid)
             ids = [rid for rid, _ in order]
 
             # --- Confidence bands ---
@@ -3009,6 +3076,11 @@ class SemanticChunker:
         if not markdown:
             return [Chunk(text="[Empty content]", metadata={"source": url, "empty": True})]
 
+        # Tidy parser-emitted markdown markers (**bold**, *italic*, `code`) out
+        # of the canonical text up front, so stored chunks read as clean prose
+        # and match the verifier's normalized form (G1).
+        markdown = _tidy_markdown_text(markdown)
+
         # Plugin chunker: chunking.strategy = "plugin.<name>" (G1). On any
         # failure we fall through to the built-in pipeline rather than abort.
         if self.strategy.startswith("plugin."):
@@ -3678,8 +3750,11 @@ class HoardCore:
             answer_first = bool(self.config.get('research.answer_first', True))
 
         # [0/ANSWER-FIRST] memory check before touching the web.
+        # max_per_source keeps recall source-diverse (DeepResearch wants breadth,
+        # not one rich page crowding out the rest); 0 disables it.
+        max_per_source = int(self.config.get('research.max_per_source', 2) or 0)
         raw_memory: list[Chunk] = self.vault.search_vault(
-            question, limit=recall, hybrid=True)
+            question, limit=recall, hybrid=True, max_per_source=max_per_source)
         memory_chunks = (raw_memory if keep_low
                          else self._drop_low_confidence(raw_memory))
         answered = (answer_first and memory_chunks and any(
@@ -3704,7 +3779,8 @@ class HoardCore:
                 await self._discover_and_ingest(question, discover, strategy, force_refresh=False)
 
             print(f"\n[2/RECALL] hybrid-retrieving top {recall} chunks", flush=True)
-            raw_chunks = self.vault.search_vault(question, limit=recall, hybrid=True)
+            raw_chunks = self.vault.search_vault(question, limit=recall, hybrid=True,
+                                                  max_per_source=max_per_source)
             chunks = raw_chunks if keep_low else self._drop_low_confidence(raw_chunks)
             # Track how many low-confidence hits filter_low actually removed, so
             # the grounding file explains the count honestly (chunks retained
@@ -3741,7 +3817,7 @@ class HoardCore:
                 score_s = f"{score:.4f}" if score is not None else "n/a"
                 f.write(f"### [{i}] {src}  (score {score_s} | {c.metadata.get('confidence', 'n/a')})\n")
                 f.write(f"{c.text}\n\n")
-            f.write(f"## Distinct sources ingested: {len(seen)}\n")
+            f.write(f"## Distinct sources in recall: {len(seen)}\n")
             for s in sorted(seen):
                 f.write(f" - {s}\n")
             if dropped_low:

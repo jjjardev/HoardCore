@@ -3,6 +3,53 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.11.0
+
+### Added
+- **Source-diverse research recall.** The `research` action's hybrid recall now
+  caps chunks per source URL (`research.max_per_source`, default `2`, `0` =
+  unlimited) so a single rich page can't crowd out every other source. A new
+  `VaultManager._diverse_order` rebalances the RRF-ranked list; the top-ranked
+  hit is always kept, so relevance stays first while the set spans more distinct
+  sources (directly helps hit the DeepResearch distinct-source quota). Wired into
+  both the answer-first and post-DISCOVER recall paths; plain `search` is
+  unchanged (unlimited by default).
+
+### Changed
+- **Markdown-tidy stored chunk text.** Parser-emitted markdown emphasis/code
+  markers (`**bold**`, `*italic*`, `` `code` ``) are now stripped when chunks are
+  built, so the vault's canonical text reads as clean prose. This mirrors the
+  verifier's own marker-strip, so `[V]` fidelity is unchanged; newlines and
+  ``` code fences (and their contents) are preserved.
+- **Config banner tracks the module version.** The generated `hoardcore.toml`
+  header is now `# HoardCore v{__version__}` instead of a hardcoded string, so
+  it can no longer drift from the engine version.
+- **Grounding label clarified.** The artifact heading is now "Distinct sources
+  in recall" (was "ingested") — the count refers to the recall set, not the
+  vault's total ingested sources.
+- **`pyproject.toml` version aligned** to the engine version (was stale at
+  0.9.9 while the module had moved to 0.10.x).
+
+### Docs
+- **`README.md`:** added a "Quick Start for Humans" onboarding section
+  (AI-agent-assisted and manual paths) with an example query; corrected the
+  fetch-chain description to concurrent (aiohttp ∥ curl_cffi) rather than
+  serial; documented `filter_low` (keeps one `low` per distinct source) and
+  `max_per_source`; added a precise `verify` "lenient vs strict" breakdown with
+  an explicit "a denial is not a falsification" callout.
+- **`skill.md`:** `filter_low` now described as "keeps one low per source";
+  added the `max_per_source` recall note; clarified that `PARTIAL`/`UNVERIFIED`
+  ≠ "false".
+
+### Tests
+- `tests/test_network.py`: research mock updated to accept the new
+  `max_per_source` keyword. Full suite passes (143), ruff clean.
+
+### Notes
+- Verified live on a 254-chunk multi-source vault: research recall went from
+  10 chunks / 3 distinct sources to 10 chunks / 6 distinct sources with the top
+  hit unchanged.
+
 ## HoardCore v0.10.2
 
 ### Added

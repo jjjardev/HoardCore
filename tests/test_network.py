@@ -522,7 +522,7 @@ def test_research_forwards_strategy_to_discovery(tmp_path, monkeypatch):
     scraper._discover_and_ingest = fake_discover
     # Avoid touching the real vault; empty recall short-circuits research.
     monkeypatch.setattr(scraper.vault, "search_vault",
-                        lambda query, limit=None, hybrid=None: [])
+                        lambda query, limit=None, hybrid=None, **kwargs: [])
 
     # Explicit strategy is honored...
     asyncio.run(scraper.research("q", discover=2, recall=4, strategy="aggressive"))
