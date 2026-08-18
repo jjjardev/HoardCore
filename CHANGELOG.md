@@ -3,6 +3,21 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.12.3
+
+### Fixed
+- **CI pyright no longer fails on optional parser imports.** The GitHub Actions
+  workflow installs only base dependencies (`pip install . ruff pytest
+  pytest-cov bandit pyright`), so the four *lazy, optional* parser imports —
+  `fitz` (PyMuPDF), `docx` (python-docx), `ebooklib`, and
+  `rapidocr_onnxruntime` — were unresolvable to pyright in CI and reported
+  `reportMissingImports`. These are deliberately optional (binary parsers load
+  only when installed), so each now carries
+  `# type: ignore[import-not-found]`, matching the file's existing
+  optional-import style. Local pyright (venv has the deps) was never affected;
+  verified the ignore token genuinely suppresses a missing import.
+  Lint (`ruff`), security (`bandit`), and type-check remain green.
+
 ## HoardCore v0.12.2
 
 ### Fixed

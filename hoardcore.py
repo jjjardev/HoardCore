@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.12.2"
+__version__ = "0.12.3"
 
 import argparse
 import asyncio
@@ -2888,28 +2888,29 @@ class DocumentParser:
             return
         _BINARY_IMPORTED = True
         try:
-            import fitz  # PyMuPDF for PDFs
+            import fitz  # type: ignore[import-not-found]  # PyMuPDF (optional)
             cls._fitz = fitz
             FITZ_AVAILABLE = True
         except ImportError:
             FITZ_AVAILABLE = False
             print("Warning: PyMuPDF (fitz) not installed. PDF parsing disabled.", file=sys.stderr)
         try:
-            import docx  # python-docx
+            import docx  # type: ignore[import-not-found]  # python-docx (optional)
             cls._docx = docx
             DOCX_AVAILABLE = True
         except ImportError:
             DOCX_AVAILABLE = False
             print("Warning: python-docx not installed. DOCX parsing disabled.", file=sys.stderr)
         try:
-            from ebooklib import epub  # ebooklib
+            from ebooklib import epub  # type: ignore[import-not-found]  # ebooklib (optional)
             cls._epub = epub
             EPUB_AVAILABLE = True
         except ImportError:
             EPUB_AVAILABLE = False
             print("Warning: ebooklib not installed. EPUB parsing disabled.", file=sys.stderr)
         try:
-            from rapidocr_onnxruntime import RapidOCR  # optional PDF OCR fallback
+            # optional PDF OCR fallback
+            from rapidocr_onnxruntime import RapidOCR  # type: ignore[import-not-found]
             cls._RapidOCR = RapidOCR
             RAPIDOCR_AVAILABLE = True
         except ImportError:
