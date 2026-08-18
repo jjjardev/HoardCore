@@ -49,11 +49,31 @@ venv/bin/python hoardcore.py _ --action research \
 
 ### Provenance Mandate (non-negotiable)
 Every quantitative claim / date / unique term in a synthesis gets a tag:
-- `[V]` Verified — confirmed verbatim in current vault text, traced to source.
-- `[E]` External — earlier/general knowledge, not retraceable to current vault. Don't overuse.
+- `[V#N]` Verified — the claim appears **verbatim** in vault text from source `#N`. The ONLY tag the audit machine-checks.
+- `[E]` External — earlier/general knowledge, or data present in the vault only as table/list cells (not contiguous prose). Don't overuse.
 - `[H]` Hypothesis — reasoning/deduction, not stated in sources.
 
+**Tag grammar (learn this — it decides whether your artifact audits clean):**
+- A **verbatim quote** from the vault gets `[V#N]` immediately after it, in a *body* paragraph. This is the only place `[V#N]` appears.
+- An **`[E]` or `[H]` line carries NO `[V#N]`.** These are analysis/paraphrase, not verbatim, so they can never `verify`. If an `[E]`/`[H]` point must reference evidence, say "verified in §N above" in prose — no tag. Putting `[V#N]` on an `[E]`/`[H]` line fails the audit (it treats any `[V#N]` token as a claim to verify).
+- The artifact closes with a **Source Links / Citations** block where `[#N]` maps to the URL; `[V#N]` resolves against it.
+
 **Adversarial audit before output:** re-verify every number; unverifiable → demote to `[E]` or strike. Reputation depends on truth.
+
+### Write artifacts that audit clean (read before emitting)
+
+The `audit` action machine-checks every `[V#N]` against the vault. These rules make it pass 100% the first time — each is a live-learned failure mode:
+
+- **HARD RULE — `[V#N]` is body-only, never in a summary.** A `[V#N]` may appear only immediately after a real `"…"` verbatim quote in a *body* paragraph. **NEVER** put a `[V#N]` inside a recap/summary bullet list (e.g. a "Bottom line" section), a bulleted list item, or a bracketed `"see §N"` cross-reference. The audit treats *any* `[V#N]` token as a claim to verify, and recap/list/prose lines are not verbatim — they will fail `UNVERIFIED` every time. This is the single most common failure, and it survives even when you believe you're following the rules. If a summary bullet must reference evidence, say "recapped from §N" in prose and put the `[V#N]` tags only in the body section the §N points to.
+- **No `[V#N]` on `[E]`/`[H]` lines.** Analysis/paraphrase can never verify; reference evidence in prose instead (see the Provenance Mandate tag grammar).
+- **Every body `[V#N]` must end a verbatim double-quoted passage.** A `[V#N]` after paraphrase or a parenthetical reference fails. Quote the source's exact stored words.
+- **A quote may span physical lines.** Double-quoted text wrapped across two lines (normal ~80-col markdown wrapping) is joined into one claim — no need to keep quotes on one line.
+- **No nested double-quotes in a claim.** A line like `"on … made of "nipa,""` breaks attribution (the inner `"nipa,"` is <24 chars, so the tag falls back to the whole line and fails). Rephrase, or demote that fact to `[E]`.
+- **Infobox/table/list figures are NOT verbatim prose.** Census tables, fiscal rows, DTI pillars, and slash-reflowed lists exist in the vault as table cells / separate lines, so re-arranging them into a sentence fails `verify`. Quote only contiguous prose; demote tabular/fiscal/list data to `[E]`.
+- **Verify exact phrasings before tagging.** Draft the artifact, then `--action verify --claim-list` the exact quote strings against the vault. Only confirmed-`VERIFIED` strings may carry `[V#N]`. This catches wording drift (e.g. "1st class municipality" vs stored "1st municipal income class") before the audit.
+- **Cross-source conflicts** (e.g. two sources naming different mayors) → keep the verbatim quotes `[V#N]`, flag the discrepancy as `[H]`/`[E]`, never assert one as `[V]`.
+
+Each `[V#N]` is attributed to the double-quoted passage ending nearest before it (not the line's longest quote), so one paraphrased claim can't hide behind another tag's verbatim quote; a tag with no preceding distinctive quote falls back to the whole line.
 
 ### Interaction contract
 - **Initiation**: state you're running the Hardcore Research Loop at its depth preset.
@@ -95,7 +115,7 @@ HoardCore's own DISCOVER (DuckDuckGo/Mojeek through the resilient fetch chain) i
 ## Artifacts
 - **Location**: `artifacts/` (configurable `storage.artifacts_dir`; default day-sorted `artifacts/YYYY-MM-DD/`). Vault = raw ingested text; `artifacts/` = provenance-tagged output. Research EMITs its grounding context into the day folder's `grounding/` subfolder (`storage.grounding_subdir`) — a working instrument, not a deliverable, so it never pollutes the day folder of finished syntheses/audits.
 - **Provenance**: tag every quantitative claim `[V]`/`[E]`/`[H]`. Never claim a number the vault can't support.
-- **Citations**: every `[V]`/`[E]` carries `[V#N]`; artifact closes with a **Source Links / Citations** block. Generate via `hoardcore.citation_list(urls)` or write by hand.
+- **Citations**: every **verbatim** claim carries `[V#N]` (N resolves to the Source Link block); `[E]`/`[H]` claims carry no `[V#N]`. Artifact closes with a **Source Links / Citations** block. Generate via `hoardcore.citation_list(urls)` or write by hand.
 - **Helpers**: `hoardcore.write_artifact(name, content)`, `hoardcore.organize_artifacts_by_day()`, `hoardcore.citation_list(urls)`.
 
 ## When to Use
@@ -143,10 +163,7 @@ venv/bin/python hoardcore.py _ --action verify --claim-list artifacts/2026-08-18
 
 Strictness: only the longest inline double-quoted passage (≥24 normalized chars) passes as a claim; paraphrased prose is `UNVERIFIED`. Repeated `[V#N]` of the same claim+source tag count once. Exit codes mirror `verify` (`0` verified / `1` partial / `2` unverified), plus `2` on any unmapped/not-ingested link. **Never pipe through `tail`/`head`** — the shell reports the pipe's exit, not the gate's.
 
-**Quote handling (read before writing artifacts):**
-- **A quote may span physical lines.** A double-quoted passage wrapped across two lines (normal markdown ~80-col wrapping) is joined into one logical claim before extraction — no need to keep quotes on one line.
-- **Each `[V#N]` is attributed to its own quote.** On a line with several tags, a tag is audited against the double-quoted passage ending nearest before it (not the line's longest quote), so one paraphrased claim can't hide behind another tag's verbatim quote. A tag with no preceding distinctive quote falls back to the whole line.
-- **Whole-line fallback is strict.** Unquoted/paraphrased lines verify only if the *entire* cleaned line is verbatim in the vault — usually `UNVERIFIED`. Quote the source's exact stored words.
+**Authoring rules live in the "Write artifacts that audit clean" section above** (under DeepResearch → Provenance Mandate). Read them before writing an artifact — they are the difference between a 100% first-pass audit and a second edit.
 
 ### research — full loop
 - `--discover 0` = recall-only (never touch the web; does NOT fall back to config default).

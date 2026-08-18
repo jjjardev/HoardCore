@@ -3,6 +3,34 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.12.4
+
+### Added
+- **`audit` authoring-smell warning.** When a `[V#N]` appears on a line where an
+  `[H]`/`[E]` marker precedes it (the recurring live failure mode: analysis
+  prose carrying a cite tag), `audit` now prints an informational warning —
+  `⚠ line N: [V#N] sits on an [H]/[E] analysis line — move the tag to the
+  verbatim quote in the body, or demote the line to [E]`. Detected on the raw
+  line (backticks intact) so `` `[H]` ``/`` `[E]` `` markers aren't stripped
+  first. The warning is informational only — it never changes the exit code;
+  the VERBATIM/MAPPED/INGESTED gate still decides pass/fail. Warnings are also
+  returned in the result dict as `warnings`.
+
+### Docs
+- **`skill.md` restructured for a fresh agent.** Resolved a genuine
+  contradiction in the Provenance Mandate (it previously told authors to tag
+  `[E]` with `[V#N]`, which the audit then fails — `[E]`/`[H]` lines now carry
+  **no** `[V#N]`). Added explicit tag grammar, and promoted the authoring
+  rules into a dedicated early "Write artifacts that audit clean" section so
+  the critical rules aren't buried under the `audit` action. Added the
+  slash-reflowed-list lesson (demote to `[E]`). Single source of truth — the
+  `audit` section now points to the new section.
+
+### Tests
+- `tests/test_audit.py` grows 17 → 20: warns on `[H]`-before-`[V#N]`, no
+  warning when a verbatim quote precedes the tag, and warns + `UNVERIFIED`
+  together on analysis prose.
+
 ## HoardCore v0.12.3
 
 ### Fixed

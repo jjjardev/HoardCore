@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.12.3"
+__version__ = "0.12.4"
 
 import argparse
 import asyncio
@@ -4196,6 +4196,13 @@ class HoardCore:
         verdicts: dict[str, str] = {}
         emitted: set[tuple[str, str | None]] = set()
         in_links = False
+        # Authoring-smell warnings: a `[V#N]` on a line explicitly marked as
+        # analysis (`[H]`/`[E]` appearing BEFORE the cite tag) is a strong
+        # signal the tag was attached to paraphrase, not a verbatim quote —
+        # the recurring live failure mode. Informational only (never changes
+        # the exit code); it just calls out the likely fix so a 100% audit
+        # needs no hunting.
+        warnings: list[dict[str, Any]] = []
         for unit_text, ln_no in self._logical_lines(lines):
             if not unit_text.strip():
                 continue
@@ -4213,6 +4220,23 @@ class HoardCore:
             cleaned0 = re.sub(r"^#+\s*", "", scan.strip())
             cleaned0 = re.sub(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", "", cleaned0)
             cleaned0 = re.sub(r"\s+", " ", cleaned0).strip()
+            # Authoring smell: does an [H]/[E] marker precede a [V#N] on this
+            # line? If so, the [V#N] is likely riding on analysis prose. Run on
+            # the RAW unit_text (backticks intact) because authors mark
+            # `` `[H]` ``/`` `[E]` `` in backticks; stripping them first would
+            # hide the very marker we are looking for.
+            raw_first_vn = next(
+                (m for m in tag_re.finditer(unit_text)
+                 if m.group(1) == "V" and m.group(2) is not None),
+                None)
+            if raw_first_vn is not None and any(
+                    m.group(1) in ("H", "E")
+                    for m in tag_re.finditer(unit_text[:raw_first_vn.start()])):
+                warnings.append({
+                    "line": ln_no,
+                    "type": "v_on_analysis_line",
+                    "tag": raw_first_vn.group(0),
+                })
             for m in tag_re.finditer(cleaned0):
                 if m.group(1) != "V":
                     continue
@@ -4251,7 +4275,7 @@ class HoardCore:
         return {
             "path": path, "claims": claims, "counts": counts,
             "total": total, "unmapped": unmapped, "used_n": used_n,
-            "not_ingested": not_ingested,
+            "not_ingested": not_ingested, "warnings": warnings,
             "accuracy": (counts["verified"] / total) if total else 0.0,
         }
 
@@ -5016,6 +5040,11 @@ async def _main_impl(argv: list[str] | None = None) -> None:
                 print(f"  ✗ [V#{n}] cites {url} — no chunks in the vault")
         else:
             print("  ✓ every cited source has chunks in the vault")
+        if audit.get("warnings"):
+            for w in audit["warnings"]:
+                print(f"  ⚠ line {w['line']}: {w['tag']} sits on an [H]/[E] "
+                      f"analysis line — move the tag to the verbatim quote "
+                      f"in the body, or demote the line to [E]")
         bad_map = bool(audit["unmapped"] or audit["not_ingested"])
         sys.exit(2 if (c["unverified"] or bad_map)
                  else (1 if c["partial"] else (0 if total else 0)))

@@ -295,3 +295,43 @@ def test_audit_empty_vault_reports_not_ingested(tmp_path, monkeypatch):
     assert out["claims"][0]["verdict"] == "unverified"
     assert out["unmapped"] == []
     assert ("1", _URL) in out["not_ingested"]
+
+
+# --- authoring-smell warnings -------------------------------------------------
+
+
+def test_audit_warns_v_tag_on_analysis_line(scraper, tmp_path):
+    """A [V#N] that appears on a line where an [H]/[E] marker precedes it is
+    flagged as an authoring smell (analysis prose likely carrying a cite tag),
+    while the claim itself still audits normally."""
+    body = (f'`[H]` This is analysis juxtaposing "{_QUOTE}" with other data '
+            '[V#1].\n\n'
+            + _source_links((1, _URL)))
+    out = scraper.audit_artifact(_make_artifact(tmp_path, body=body))
+    assert out["warnings"], "expected an authoring-smell warning"
+    w = out["warnings"][0]
+    assert w["type"] == "v_on_analysis_line"
+    assert w["tag"] == "[V#1]"
+    # The warning is informational: the underlying claim (a verbatim quote)
+    # still verifies and the exit-relevant state is unchanged.
+    assert out["accuracy"] == 1.0
+
+
+def test_audit_no_warning_when_quote_precedes_tag(scraper, tmp_path):
+    """A [V#N] that ends a verbatim quote with no preceding [H]/[E] marker
+    produces no authoring-smell warning."""
+    body = _quote_body(_QUOTE, 1)
+    out = scraper.audit_artifact(_make_artifact(tmp_path, body=body))
+    assert out.get("warnings") == []
+
+
+def test_audit_warns_h_analysis_with_unverified_prose(scraper, tmp_path):
+    """Analysis prose carrying a [V#N] on an [H] line both warns AND lands
+    UNVERIFIED — the warning is the early signal, the verdict the gate."""
+    body = ('`[H]` Comparing these figures reveals the sector is in retreat '
+            '[V#1].\n\n'
+            + _source_links((1, _URL)))
+    out = scraper.audit_artifact(_make_artifact(tmp_path, body=body))
+    assert out["warnings"], "expected an authoring-smell warning"
+    assert out["claims"][0]["verdict"] == "unverified"
+    assert out["accuracy"] == 0.0
