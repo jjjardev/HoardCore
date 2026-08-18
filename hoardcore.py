@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.12.1"
+__version__ = "0.12.2"
 
 import argparse
 import asyncio
@@ -4171,7 +4171,11 @@ class HoardCore:
           1. VERBATIM  — the sentence containing the tag (or its longest inline
                          double-quoted passage) must `verify` as VERIFIED against
                          the vault. A bare `[V]` (no #N) is verified but not
-                         mapping-checked.
+                         mapping-checked. When several `[V#N]` tags share a
+                         line, each is attributed to the double-quoted passage
+                         ending nearest before it; a quote wrapped across two
+                         physical lines is joined into one claim before
+                         extraction.
           2. MAPPED    — N must appear in the artifact's "Source Links /
                          Citations" block as `[#N] <url>`.
           3. INGESTED  — that cited URL must have chunks in the vault.
@@ -4191,22 +4195,27 @@ class HoardCore:
         verdicts: dict[str, str] = {}
         emitted: set[tuple[str, str | None]] = set()
         in_links = False
-        for ln_no, ln in enumerate(lines, 1):
-            if not ln.strip():
+        for unit_text, ln_no in self._logical_lines(lines):
+            if not unit_text.strip():
                 continue
-            if re.match(r"^#{1,6}\s", ln) and (
-                    "source link" in ln.lower() or "citation" in ln.lower()):
+            if re.match(r"^#{1,6}\s", unit_text) and (
+                    "source link" in unit_text.lower() or "citation" in unit_text.lower()):
                 in_links = True
                 continue
             if in_links:
                 continue
             # Skip backticked spans (e.g. a prose mention of the literal token
             # `` `[V]` ``) so narrative references are not audited as claims.
-            scan = re.sub(r"`[^`]*`", " ", ln)
-            for m in tag_re.finditer(scan):
+            scan = re.sub(r"`[^`]*`", " ", unit_text)
+            # Clean heading/list markers but keep cite tags so each tag's
+            # position maps to the same offsets as the quoted spans.
+            cleaned0 = re.sub(r"^#+\s*", "", scan.strip())
+            cleaned0 = re.sub(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", "", cleaned0)
+            cleaned0 = re.sub(r"\s+", " ", cleaned0).strip()
+            for m in tag_re.finditer(cleaned0):
                 if m.group(1) != "V":
                     continue
-                text_cand, is_quote = self._claim_text_from_line(ln)
+                text_cand, is_quote = self._claim_text_for_tag(cleaned0, m.start())
                 key = normalize_claim(text_cand)
                 if not key:
                     continue
@@ -4260,6 +4269,73 @@ class HoardCore:
         return source_block
 
     @staticmethod
+    def _unclosed_quotes(text: str) -> bool:
+        """True when `text` ends inside an open double-quoted passage.
+
+        Straight `"` toggles a quote (open on the first, close on the next);
+        curly `“`/`”` open/close explicitly. Used to join a quote that is
+        wrapped across physical lines into one logical audit unit.
+        """
+        depth = 0
+        for ch in text:
+            if ch == '“':
+                depth += 1
+            elif ch == '”':
+                depth = max(0, depth - 1)
+            elif ch == '"':
+                if depth > 0:
+                    depth -= 1
+                else:
+                    depth += 1
+        return depth > 0
+
+    @staticmethod
+    def _logical_lines(lines: list[str]) -> list[tuple[str, int]]:
+        """Group consecutive non-blank lines into logical units, continuing a
+        unit while a double-quoted passage is still open across the line break.
+
+        Returns `(joined_text, start_line)` pairs (1-based) so a quote that a
+        markdown editor wraps over two physical lines is audited as one claim
+        instead of two fragment lines. Headings, list bullets, and balanced
+        single-line prose each stay their own unit.
+        """
+        out: list[tuple[str, int]] = []
+        buf: list[str] = []
+        start = 1
+        for i, ln in enumerate(lines, 1):
+            if not ln.strip():
+                if buf:
+                    out.append((" ".join(buf), start))
+                    buf = []
+                continue
+            if not buf:
+                start = i
+            buf.append(ln.strip())
+            if HoardCore._unclosed_quotes(" ".join(buf)):
+                continue
+            out.append((" ".join(buf), start))
+            buf = []
+        if buf:
+            out.append((" ".join(buf), start))
+        return out
+
+    @staticmethod
+    def _quotes_in(text: str) -> list[tuple[int, str]]:
+        """Inline double-quoted spans as (char_offset, quote_text) pairs."""
+        return [(m.start(1), m.group(1))
+                for m in re.finditer(r'[“"]([^”"]+)[”"]', text)]
+
+    @staticmethod
+    def _clean_claim_line(line: str) -> str:
+        """Strip markdown/cite-tag noise from an artifact line for claim text."""
+        cleaned = re.sub(r"^#+\s*", "", line.strip())
+        cleaned = re.sub(r"`[^`]*`", " ", cleaned)
+        cleaned = re.sub(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", "", cleaned)
+        cleaned = re.sub(r"\[(?:V|E|H)(?:#\d+)?\]|\[CONTROL\]|\[INCOMPLETE[^\]]*\]",
+                         "", cleaned)
+        return re.sub(r"\s+", " ", cleaned).strip()
+
+    @staticmethod
     def _claim_text_from_line(line: str) -> tuple[str, bool]:
         """Extract the auditable claim from an artifact line.
 
@@ -4268,17 +4344,28 @@ class HoardCore:
         when it is long enough to be distinctive; otherwise the whole cleaned
         line is the claim. Returns (text, was_quoted).
         """
-        cleaned = re.sub(r"^#+\s*", "", line.strip())
-        cleaned = re.sub(r"`[^`]*`", " ", cleaned)
-        cleaned = re.sub(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", "", cleaned)
-        cleaned = re.sub(r"\[(?:V|E|H)(?:#\d+)?\]|\[CONTROL\]|\[INCOMPLETE[^\]]*\]",
-                         "", cleaned)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
-        quotes = re.findall(r"[“\"]([^”\"]+)[”\"]", cleaned, flags=re.UNICODE)
-        best = max(quotes, key=len, default="")
+        cleaned = HoardCore._clean_claim_line(line)
+        best = max([q for _, q in HoardCore._quotes_in(cleaned)],
+                   key=len, default="")
         if best and len(normalize_claim(best)) >= 24:
             return best.strip(" \t.,;:!?’"), True
         return cleaned, False
+
+    @staticmethod
+    def _claim_text_for_tag(cleaned0: str, tag_pos: int) -> tuple[str, bool]:
+        """Attribute the claim to the inline quote ending nearest before the
+        tag (its own citation target) when that quote is distinctive; falls
+        back to the whole line's longest quote / whole cleaned line.
+
+        `cleaned0` is the line cleaned of heading/list markers with cite tags
+        still present so `tag_pos` maps to the same offsets as `_quotes_in`.
+        """
+        spans = [(s + len(q), q) for s, q in HoardCore._quotes_in(cleaned0)
+                 if s + len(q) <= tag_pos]
+        nearest = max(spans, default=(0, ""))[1]
+        if nearest and len(normalize_claim(nearest)) >= 24:
+            return nearest.strip(" \t.,;:!?’"), True
+        return HoardCore._claim_text_from_line(cleaned0)
 
     async def _process_document(self, url: str, strategy: str, force_refresh: bool) -> tuple[list[Chunk], dict[str, Any]]:
         """

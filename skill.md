@@ -143,6 +143,11 @@ venv/bin/python hoardcore.py _ --action verify --claim-list artifacts/2026-08-18
 
 Strictness: only the longest inline double-quoted passage (≥24 normalized chars) passes as a claim; paraphrased prose is `UNVERIFIED`. Repeated `[V#N]` of the same claim+source tag count once. Exit codes mirror `verify` (`0` verified / `1` partial / `2` unverified), plus `2` on any unmapped/not-ingested link. **Never pipe through `tail`/`head`** — the shell reports the pipe's exit, not the gate's.
 
+**Quote handling (read before writing artifacts):**
+- **A quote may span physical lines.** A double-quoted passage wrapped across two lines (normal markdown ~80-col wrapping) is joined into one logical claim before extraction — no need to keep quotes on one line.
+- **Each `[V#N]` is attributed to its own quote.** On a line with several tags, a tag is audited against the double-quoted passage ending nearest before it (not the line's longest quote), so one paraphrased claim can't hide behind another tag's verbatim quote. A tag with no preceding distinctive quote falls back to the whole line.
+- **Whole-line fallback is strict.** Unquoted/paraphrased lines verify only if the *entire* cleaned line is verbatim in the vault — usually `UNVERIFIED`. Quote the source's exact stored words.
+
 ### research — full loop
 - `--discover 0` = recall-only (never touch the web; does NOT fall back to config default).
 - `--no-answer-first`: force fresh DISCOVER even if vault has a high-confidence answer.

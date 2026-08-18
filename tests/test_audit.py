@@ -150,6 +150,108 @@ def test_audit_not_ingested_url_reported(scraper, tmp_path):
     assert out["claims"][0]["verdict"] == "verified"
 
 
+# --- wrapped quotes (multi-line) --------------------------------------------
+
+
+def test_audit_wrapped_quote_spans_two_lines(scraper, tmp_path):
+    """A quote that a markdown editor wraps over two physical lines must be
+    joined into one logical line and verified as a single claim."""
+    body = ('The FoodLore report says "the minimum budget to launch an indoor '
+            'vertical farming facility in 2026 is projected at '
+            f'$36 million" [V#1].\n\n{_source_links((1, _URL))}')
+    out = scraper.audit_artifact(_make_artifact(tmp_path, body=body))
+    assert out["total"] == 1
+    c = out["claims"][0]
+    assert c["verdict"] == "verified"
+    assert c["quote"] is True
+    assert c["text"] == (
+        "the minimum budget to launch an indoor vertical farming facility "
+        "in 2026 is projected at $36 million")
+    assert out["accuracy"] == 1.0
+
+
+def test_audit_wrapped_quote_spans_three_lines(scraper, tmp_path):
+    """A quote wrapped across three physical lines joins into one claim."""
+    body = ('The FoodLore report says "the minimum budget to launch an indoor '
+            'vertical farming facility in 2026 is projected at $36 '
+            'million" [V#1].\n\n' + _source_links((1, _URL)))
+    out = scraper.audit_artifact(_make_artifact(tmp_path, body=body))
+    assert out["total"] == 1
+    assert out["claims"][0]["verdict"] == "verified"
+    assert out["claims"][0]["quote"] is True
+
+
+def test_audit_wrapped_paraphrase_still_unverified(scraper, tmp_path):
+    """Joining wrapped lines must not turn prose into a verified quote: a
+    wrapped, paraphrased claim (no distinctive quoted span) stays UNVERIFIED."""
+    body = ("Chopped and reworded claims like this one are not in the vault "
+            "and wrapping them over multiple lines "
+            "changes nothing.\n"
+            "Here is the continuation of the paraphrase [V#1].\n\n"
+            + _source_links((1, _URL)))
+    out = scraper.audit_artifact(_make_artifact(tmp_path, body=body))
+    assert out["total"] == 1
+    assert out["claims"][0]["verdict"] == "unverified"
+
+
+def test_audit_logical_lines_joins_only_open_quotes():
+    """Blank lines, balanced quotes, and headings break units; an open quote
+    carries the next physical line into the same logical unit."""
+    units = hc.HoardCore._logical_lines([
+        'The country "aims to capture 4% of global hydrogen demand by 2030, targeting exports to',
+        'Europe" [V#1].',
+        "",
+        "Balanced single-line prose stays its own unit.",
+        "",
+        "## Source Links / Citations",
+        "[#1] https://example.test",
+    ])
+    texts = [t for t, _ in units]
+    assert texts[0] == (
+        'The country "aims to capture 4% of global hydrogen demand by 2030, '
+        'targeting exports to Europe" [V#1].')
+    assert texts[1] == "Balanced single-line prose stays its own unit."
+    assert texts[2] == "## Source Links / Citations"
+
+
+def test_audit_unclosed_quotes_tracks_straight_and_curly():
+    """`_unclosed_quotes` toggles on straight quotes and honors curly pairs."""
+    assert hc.HoardCore._unclosed_quotes('said "provides 1 million hectares')
+    assert not hc.HoardCore._unclosed_quotes('said "provides 1 million hectares of land"')
+    assert hc.HoardCore._unclosed_quotes('said \u201cprovides 1 million hectares')
+    assert not hc.HoardCore._unclosed_quotes('said \u201cprovides 1 million hectares\u201d')
+
+
+# --- per-tag attribution -----------------------------------------------------
+
+
+def test_audit_attributes_each_tag_to_its_own_quote(scraper, tmp_path):
+    """Two different quotes with their own [V#N] tags on one line are audited
+    separately: the paraphrase is UNVERIFIED and the verbatim quote is
+    VERIFIED — the paraphrase must not be hidden behind the longest quote."""
+    body = ('The report says "a fanciful invention about fairy farming '
+            'economics" [V#1] and confirms "the minimum budget to launch an '
+            'indoor vertical farming facility in 2026 is projected at $36 '
+            f'million" [V#2].\n\n{_source_links((1, _URL), (2, _URL))}')
+    out = scraper.audit_artifact(_make_artifact(tmp_path, body=body))
+    assert out["total"] == 2
+    by_n = {c["n"]: c for c in out["claims"]}
+    assert by_n["1"]["verdict"] == "unverified"
+    assert by_n["2"]["verdict"] == "verified"
+    assert out["counts"] == {"verified": 1, "partial": 0, "unverified": 1}
+
+
+def test_audit_nearest_quote_precedes_its_tag(scraper, tmp_path):
+    """A tag cites the quote ending nearest before it, not a later one."""
+    body = (f'The FoodLore report says "{_QUOTE}" [V#1]; a later quote on the '
+            f'same line repeats it verbatim [V#2].\n\n'
+            + _source_links((1, _URL), (2, _URL)))
+    out = scraper.audit_artifact(_make_artifact(tmp_path, body=body))
+    assert out["total"] == 2
+    assert {c["n"] for c in out["claims"]} == {"1", "2"}
+    assert all(c["verdict"] == "verified" for c in out["claims"])
+
+
 # --- dedupe -------------------------------------------------------------------
 
 

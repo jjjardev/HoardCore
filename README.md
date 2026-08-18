@@ -663,7 +663,7 @@ python hoardcore.py _ --action audit --artifact artifacts/2026-08-18/synthesis_x
 
 For each `[V#N]` tag in the artifact it checks three links:
 
-1. **VERBATIM** — the claim sentence (or its longest inline double-quoted passage, ≥24 normalized chars) `verify`s against the vault. A bare `[V]` (no `#N`) is verified but not mapping-checked.
+1. **VERBATIM** — the claim sentence (or its longest inline double-quoted passage, ≥24 normalized chars) `verify`s against the vault. A quote wrapped across two physical lines (normal markdown wrapping) is joined into one claim, and a line carrying several tags attributes each tag to the double-quoted passage ending nearest before it — so a paraphrased claim can't hide behind another tag's verbatim quote. A bare `[V]` (no `#N`) is verified but not mapping-checked.
 2. **MAPPED** — `N` appears in the artifact's Source Links / Citations block as `[#N] <url>`.
 3. **INGESTED** — the cited URL has chunks in the vault.
 

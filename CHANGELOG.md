@@ -3,6 +3,44 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.12.2
+
+### Fixed
+- **`audit` joins quotes wrapped across physical lines.** The gate previously
+  scanned artifacts one physical line at a time, so a double-quoted passage a
+  markdown editor wrapped over two lines had no complete `"…"` span on either
+  line and fell back to whole-line prose — condemning naturally-written
+  artifacts to `UNVERIFIED` (observed live: the Morocco synthesis scored 10%
+  purely from ~80-col wrapping; re-formatted single-line quotes scored 100%).
+  `audit_artifact` now groups consecutive non-blank lines into logical units
+  (continuing a unit while a quote is still open via `_unclosed_quotes`, which
+  tracks straight and curly quotes) before claim extraction.
+- **`audit` attributes each `[V#N]` to its own quote.** On a line carrying
+  several tags, every tag previously inherited the line's *longest* quote, so a
+  paraphrased claim could hide behind a co-tagged verbatim quote. Each tag now
+  audits the double-quoted passage ending nearest before it
+  (`_claim_text_for_tag`); with no preceding distinctive quote it falls back to
+  the whole line. Post-fix the Morocco report splits into 20 per-quote claims
+  (was 11 under longest-quote collapsing) and the ERCOT stress-test report
+  audits 16/16 = 100% with quotes deliberately wrapped across lines.
+
+### Docs
+- **`skill.md`:** new "Quote handling (read before writing artifacts)" block
+  under the `audit` action — quotes may span physical lines, each tag is
+  attributed to its own nearest preceding quote, and the whole-line fallback is
+  strict (paraphrased lines usually `UNVERIFIED`).
+- **`README.md`:** the `audit` VERBATIM bullet documents wrapped-quote joining
+  and per-tag attribution.
+
+### Tests
+- `tests/test_audit.py` grows 10 → 17: wrapped quotes across 2 and 3 physical
+  lines verify; a wrapped paraphrase stays `UNVERIFIED`; `_logical_lines` and
+  `_unclosed_quotes` unit tests; per-tag attribution (a paraphrase can no
+  longer hide behind another tag's verbatim quote); nearest-quote precedence.
+- Live stress test: fresh `ercot_bess` vault (2026 ERCOT battery storage) ran
+  research → check (90 checks PASS) → audit 100%, exercising the fixed path
+  end-to-end.
+
 ## HoardCore v0.12.1
 
 ### Added
