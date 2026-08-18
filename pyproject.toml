@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hoardcore"
-version = "0.12.0"
+version = "0.12.1"
 description = "Research toolkit for AI agents (single-file Python module + SQLite vault + CLI): DISCOVER→INGEST→RECALL→EMIT, hybrid retrieval, provenance tagging, Cloudflare-aware fetching."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -34,7 +34,7 @@ pdf = ["PyMuPDF>=1.21"]
 docx = ["python-docx>=1.0"]
 epub = ["ebooklib>=0.18"]
 ocr = ["rapidocr_onnxruntime>=1.4"]
-test = ["pytest>=8"]
+test = ["pytest>=8", "pytest-cov>=5", "bandit>=1.7", "pyright>=1.1", "ruff>=0.5"]
 
 [project.scripts]
 hoardcore = "hoardcore:cli_entry"
@@ -44,6 +44,21 @@ py-modules = ["hoardcore"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["hoardcore"]
+
+[tool.coverage.report]
+fail_under = 66
+show_missing = true
+skip_covered = true
+
+[tool.pyright]
+pythonVersion = "3.11"
+include = ["hoardcore.py"]
+
+[tool.bandit]
+exclude_dirs = ["tests", "tools", "hoardcore_data"]
 
 [tool.ruff]
 line-length = 100

@@ -3,6 +3,42 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.12.1
+
+### Added
+- **CLI exception safety net.** `main()` is now a thin wrapper around the
+  renamed `_main_impl()`: `KeyboardInterrupt` exits `130`, `SystemExit` is
+  re-raised, and any unexpected exception exits `2` with a clean one-line
+  message instead of a raw traceback — so the CLI contract (exit codes 0/1/2)
+  holds even for unforeseen action bugs.
+- **`audit` test coverage (10 unit + 5 CLI tests).** Verbatim-quote pass,
+  paraphrase `UNVERIFIED`, whole-line claims, unmapped tag, bare `[V]` not
+  mapping-checked, not-ingested URL, tag dedupe, skip source-links block, empty
+  vault, `--artifact`/missing-file exit codes, and the safety net above. The
+  audit feature itself shipped in v0.12.0; this release proves it.
+- **CI quality gates.** `.github/workflows/ci.yml` now runs bandit (security),
+  pyright (type check), ruff, and pytest with `--cov-fail-under=66`. Local
+  equivalents via `make lint / audit / typecheck / coverage / check`. Test
+  deps (`pytest-cov`, `bandit`, `pyright`, `ruff`) live in the `test` extra.
+
+### Fixed
+- **Type check clean (40 pyright findings → 0).** Real defects surfaced and
+  fixed: `resolve_artifact_out` crashed with `artifacts_by_day=false` and no
+  `out_path` (now falls back to a suffixed default name); the probe-query
+  builder sliced a `set` (`sorted(seen)`) when no candidates survived; aiohttp
+  `timeout=` kwargs are now explicit `ClientTimeout` objects. The rest were
+  type-honesty fixes: lazy `_np`/`curl_requests`/binary-parser imports are
+  now `None`-typed and guarded, `strategy` resolution is `str()`-coerced in
+  `research`/`fetch`, `_normalize_fetch` takes/returns `tuple[Any, ...]`,
+  `_try_plugin_fetchers` no longer lies about returning `None`, `yarl.URL`
+  is used for redirect joins, and `import lxml.etree` resolves cleanly.
+- **Bandit clean.** The 9 `B608` findings were false positives (all `?`
+  placeholder-bound); each f-string SQL is now either assigned to a `sql`
+  variable with `# nosec B608` or annotated inline, and `curl_requests` gets
+  an explicit `None` fallback import instead of a bare `assert`.
+- **`_vectorize_dense` no longer crashes on a `None` embedding backend** and
+  `embed_jobs` skips rows whose `lastrowid` is `None`.
+
 ## HoardCore v0.12.0
 
 ### Added

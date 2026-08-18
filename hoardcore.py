@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.12.0"
+__version__ = "0.12.1"
 
 import argparse
 import asyncio
@@ -55,6 +55,7 @@ import aiohttp
 import trafilatura
 from aiohttp import ClientTimeout, TCPConnector
 from readability import Document
+from yarl import URL
 
 # Heavy binary parsers are lazy-imported so that HTML/text-only usage works
 # even without PDF/DOCX/EPUB libraries installed. Modules are fetched on first
@@ -80,6 +81,7 @@ try:
     from curl_cffi import requests as curl_requests
     CURL_AVAILABLE = True
 except ImportError:
+    curl_requests = None  # type: ignore[assignment]
     CURL_AVAILABLE = False
     print("Warning: curl_cffi not found. Advanced TLS impersonation disabled.", file=sys.stderr)
 
@@ -701,7 +703,10 @@ class EmbeddingsEngine:
         """Encode one text with the loaded dense model, normalized to a unit
         float32 blob. Post-processing (MRL truncation, int8) is applied by
         `_finalize` so the single and batched paths stay byte-identical."""
-        model, _dim = self._dense
+        dense = self._dense
+        if dense is None:
+            return b""
+        model, _dim = dense
         vec = next(iter(model.embed([text])), None)
         if vec is None:
             return b""
@@ -1245,7 +1250,7 @@ class VaultManager:
             return [r[0] for r in rows]
         qmarks = ",".join("?" * len(probes))
         rows = cursor.execute(
-            f"SELECT simhash FROM chunks_simhash WHERE bucket IN ({qmarks})",
+            f"SELECT simhash FROM chunks_simhash WHERE bucket IN ({qmarks})",  # nosec B608
             probes).fetchall()
         return [r[0] for r in rows]
 
@@ -1338,7 +1343,7 @@ class VaultManager:
                 """, (url, header, text, json.dumps(chunk.metadata)))
                 rowid = cursor.lastrowid
 
-                if embed_ok:
+                if embed_ok and rowid is not None:
                     embed_jobs.append((rowid, c_hash, text))
 
             # Batch-embed the whole document (one model call over many chunks),
@@ -1427,7 +1432,7 @@ class VaultManager:
             ph = ",".join("?" * len(hashes))
             try:
                 cursor.execute(
-                    f"SELECT chunk_hash, vector FROM chunk_vectors_ca "
+                    f"SELECT chunk_hash, vector FROM chunk_vectors_ca "  # nosec B608
                     f"WHERE chunk_hash IN ({ph}) AND embed_fp = ?",
                     (*hashes, embed_fp),
                 )
@@ -1537,13 +1542,14 @@ class VaultManager:
                         f"Cleared {cursor.rowcount} stale CA cache entries "
                         f"(embedding config changed)."
                     )
-            cursor.execute(f"""
+            sql = f"""
                 SELECT c.rowid, c.url, c.text
                 FROM chunks_fts c
                 LEFT JOIN chunk_vectors v ON v.chunk_rowid = c.rowid
                 WHERE v.chunk_rowid IS NULL
                    OR length(v.vector) != {expected_bytes}
-            """)
+            """  # nosec B608 (expected_bytes is an int, not user input)
+            cursor.execute(sql)
             while True:
                 rows = cursor.fetchmany(1000)
                 if not rows:
@@ -1710,7 +1716,7 @@ class VaultManager:
             candidates.append(seg)
         # Prefer the longest (most specific, keyword-dense) segments.
         candidates.sort(key=lambda s: len(s.split()), reverse=True)
-        phrases = candidates[: max(1, probes * 4)] or seen or ["crop"]
+        phrases = candidates[: max(1, probes * 4)] or sorted(seen) or ["crop"]
         if not phrases:
             return {"high": 0, "medium": 0, "low": 0}
         chosen = phrases[: max(1, probes)]
@@ -1995,13 +2001,14 @@ class VaultManager:
                 params.append(f'%{domain}%')
 
             # FTS5 query with ranking
-            cursor.execute(f"""
+            sql = f"""
                 SELECT url, header_path, text, metadata_json, rank, rowid
                 FROM chunks_fts
                 WHERE {where}
                 ORDER BY rank
                 LIMIT ?
-            """, (*params, limit))
+            """  # nosec B608 (where is a fixed clause; values are bound)
+            cursor.execute(sql, (*params, limit))
 
             for row in cursor.fetchall():
                 url, header_path, text, meta_json, rank, rowid = row
@@ -2031,7 +2038,7 @@ class VaultManager:
             vec_where = " WHERE url LIKE ?"
             vec_params.append(f'%{domain}%')
         cursor.execute(
-            "SELECT chunk_rowid, url, vector FROM chunk_vectors" + vec_where,
+            "SELECT chunk_rowid, url, vector FROM chunk_vectors" + vec_where,  # nosec B608
             vec_params,
         )
         rows = cursor.fetchall()
@@ -2070,7 +2077,7 @@ class VaultManager:
                 except ValueError:
                     mat = None
 
-        if mat is not None:
+        if mat is not None and _np is not None:
             try:
                 if self.embeddings.bytes_per_dim == 1:
                     q = _np.frombuffer(qvec, dtype=_np.int8).astype(_np.float32) / 127.0
@@ -2118,7 +2125,7 @@ class VaultManager:
                 if isinstance(item, tuple):
                     idx, score = item[0], item[1]
                 else:
-                    idx, score = item.index, item.score
+                    idx, score = item.index, item.score  # pyright: ignore[reportAttributeAccessIssue]
                 score_by_idx[idx] = float(score)
             ordered = sorted(range(len(chunks)),
                              key=lambda i: score_by_idx.get(i, 0.0),
@@ -2189,13 +2196,14 @@ class VaultManager:
             fts_rows: list[tuple[int, str]] = []
             row_by_id: dict[int, tuple[str, str, str, str]] = {}
             if fts_match:
-                cursor.execute(f"""
+                sql = f"""
                     SELECT rowid, url, header_path, text, metadata_json
                     FROM chunks_fts
                     WHERE {fts_where}
                     ORDER BY rank
                     LIMIT ?
-                """, (*fts_params, fts_pool))
+                """  # nosec B608 (fts_where is a fixed clause; values are bound)
+                cursor.execute(sql, (*fts_params, fts_pool))
                 full_rows = cursor.fetchall()
                 fts_rows = [(rid, url) for rid, url, _hp, _text, _mj in full_rows]
                 row_by_id = {rid: (url, hp, text, mj)
@@ -2221,7 +2229,7 @@ class VaultManager:
                     if urls:
                         placeholders = ",".join("?" * len(urls))
                         cursor.execute(
-                            f"SELECT url, MAX(fetched_at) FROM documents "
+                            f"SELECT url, MAX(fetched_at) FROM documents "  # nosec B608
                             f"WHERE url IN ({placeholders}) GROUP BY url",
                             urls,
                         )
@@ -2313,7 +2321,7 @@ class VaultManager:
                 if urls:
                     placeholders = ",".join("?" * len(urls))
                     cursor.execute(
-                        f"SELECT url, MAX(fetched_at) FROM documents "
+                        f"SELECT url, MAX(fetched_at) FROM documents "  # nosec B608
                         f"WHERE url IN ({placeholders}) GROUP BY url",
                         urls,
                     )
@@ -2400,10 +2408,11 @@ class VaultManager:
                 fetched_by_id: dict[int, tuple[str, str, str, str]] = {}
                 if missing:
                     placeholders = ",".join("?" * len(missing))
-                    cursor.execute(f"""
+                    sql = f"""
                         SELECT rowid, url, header_path, text, metadata_json
                         FROM chunks_fts WHERE rowid IN ({placeholders})
-                    """, missing)
+                    """  # nosec B608 (placeholders are positional ? marks)
+                    cursor.execute(sql, missing)
                     fetched_by_id = {rid: (url, hp, text, mj)
                                      for rid, url, hp, text, mj in cursor.fetchall()}
                 for rid in ids:
@@ -2543,7 +2552,7 @@ class NetworkFetcher:
             return True
         except (OverflowError, ValueError):
             return False
-        return all(NetworkFetcher._is_public_ip(info[4][0]) for info in infos)
+        return all(NetworkFetcher._is_public_ip(str(info[4][0])) for info in infos)
 
     def _parse_cookies(self) -> dict[str, str]:
         cookies = {}
@@ -2617,7 +2626,7 @@ class NetworkFetcher:
                             if not location:
                                 return None, None, '', resp.status
                             try:
-                                current = str(resp.url.join(location))
+                                current = str(resp.url.join(URL(location)))
                             except ValueError:
                                 return None, None, '', resp.status
                             continue
@@ -2646,6 +2655,8 @@ class NetworkFetcher:
         cookies = self._parse_cookies()
         try:
             def _sync_fetch():
+                if curl_requests is None:
+                    raise RuntimeError("curl_cffi unexpectedly unavailable")
                 resp = curl_requests.get(
                     url,
                     cookies=cookies,
@@ -2724,7 +2735,7 @@ class NetworkFetcher:
             return None, None, '', None
 
     @staticmethod
-    def _normalize_fetch(result: tuple) -> tuple[str | None, bytes | None, str, int | None]:
+    def _normalize_fetch(result: tuple[Any, ...]) -> tuple[Any, ...]:
         """Pad a fetch-strategy result to (text, binary, content_type, status).
 
         Strategy methods return the full 4-tuple; test doubles/older callers
@@ -2826,12 +2837,12 @@ class NetworkFetcher:
             return result[0], result[1], result[2], None
         return result
 
-    async def _try_plugin_fetchers(self, url: str) -> tuple[str | None, bytes | None, str, int | None] | None:
+    async def _try_plugin_fetchers(self, url: str) -> tuple[str | None, bytes | None, str, int | None]:
         """Try registered plugin fetchers in order (G1).
 
-        Returns "NOTHING" normalization-fodder: None means every plugin either
-        raised, returned None, or returned an all-None tuple — so the strategy
-        chain can move on without confusing a None for a successful fetch.
+        Returns an all-None tuple when every plugin either raised, returned
+        None, or returned an all-None tuple — so the strategy chain can move
+        on without confusing a None for a successful fetch.
         """
         for name, fn in self.plugin_fetchers.items():
             try:
@@ -2857,10 +2868,10 @@ class DocumentParser:
 
     # Lazy/optional binary parsers. Imported on first use so that HTML-only
     # scraping works without the heavy PDF/DOCX/EPUB libraries installed.
-    _fitz = None
-    _docx = None
-    _epub = None
-    _ocr_engine = None
+    _fitz: Any = None
+    _docx: Any = None
+    _epub: Any = None
+    _ocr_engine: Any = None
     _ocr_engine_ready = False
     # Plugin parsers keyed by content type (hoardcore.parsers entry points).
     _plugin_parsers: dict[str, Any] = {}
@@ -3322,7 +3333,7 @@ class CrawlerPlanner:
         base_url = f"{domain}/robots.txt"
         try:
             async with aiohttp.ClientSession() as session, session.get(
-                base_url, timeout=10
+                base_url, timeout=ClientTimeout(total=10)
             ) as resp:
                 if resp.status == 200:
                     text = await resp.text()
@@ -3348,7 +3359,7 @@ class CrawlerPlanner:
         regex scan if the payload cannot be parsed as XML.
         """
         try:
-            from lxml import etree as _etree
+            import lxml.etree as _etree
             root = _etree.fromstring(xml.encode("utf-8"))
             locs: list[str] = []
             for el in root.iter():
@@ -3367,7 +3378,7 @@ class CrawlerPlanner:
         """Parse sitemap XML and extract URLs."""
         try:
             async with aiohttp.ClientSession() as session, session.get(
-                sitemap_url, timeout=30
+                sitemap_url, timeout=ClientTimeout(total=30)
             ) as resp:
                 if resp.status != 200:
                     return []
@@ -3636,7 +3647,7 @@ class PluginManager:
                     selected = eps.select(group=group)
                 except (AttributeError, TypeError):
                     # Python < 3.10 returned a dict; keep the project 3.10+.
-                    selected = eps.get(group, [])
+                    selected = eps.get(group, [])  # pyright: ignore[reportAttributeAccessIssue]
                 for ep in selected:
                     try:
                         targets[group][ep.name] = ep.load()
@@ -3692,8 +3703,10 @@ class HoardCore:
                 if isinstance(obj, dict):
                     for ct, fn in obj.items():
                         DocumentParser.register_parser(str(ct), fn)
-                elif callable(obj) and getattr(obj, "content_type", None):
-                    DocumentParser.register_parser(str(obj.content_type), obj)
+                elif callable(obj):
+                    ct = getattr(obj, "content_type", None)
+                    if ct:
+                        DocumentParser.register_parser(str(ct), obj)
                 else:
                     logger.warning(
                         f"Parser plugin {name}: expected a dict or a callable "
@@ -3737,6 +3750,15 @@ class HoardCore:
         full control of out-of-vault writes.
         """
         if not self.config.get('storage.artifacts_by_day', True):
+            if out_path is None:
+                base = os.path.join(self.artifacts_dir, "grounding_context.md")
+                if not os.path.exists(base):
+                    return base
+                i = 2
+                while os.path.exists(os.path.join(self.artifacts_dir,
+                                                  f"grounding_context_{i}.md")):
+                    i += 1
+                return os.path.join(self.artifacts_dir, f"grounding_context_{i}.md")
             return out_path
         if out_path is None:
             # Default deliverables share one name; if today's file already
@@ -3879,7 +3901,7 @@ class HoardCore:
             retrieval). Pass False to always run live discovery.
         """
         if strategy is None:
-            strategy = self.config.get("network.default_strategy", "aggressive")
+            strategy = str(self.config.get("network.default_strategy", "aggressive"))
 
         if answer_first is None:
             answer_first = bool(self.config.get('research.answer_first', True))
@@ -4312,7 +4334,7 @@ class HoardCore:
 
         # Parse document
         markdown = ""
-        parser_meta = {"content_type": content_type}
+        parser_meta: dict[str, Any] = {"content_type": content_type}
 
         if 'text/html' in content_type or 'text/plain' in content_type:
             if text is None and binary:
@@ -4490,7 +4512,7 @@ class HoardCore:
             List of dicts with "text" and "metadata" for the LLM.
         """
         if strategy is None:
-            strategy = self.config.get('network.default_strategy', 'aggressive')
+            strategy = str(self.config.get('network.default_strategy', 'aggressive'))
 
         # Route actions
         if action == "search":
@@ -4762,6 +4784,28 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 async def main(argv: list[str] | None = None) -> None:
+    """CLI entry point.
+
+    Wraps the implementation in a safety net: any unexpected exception exits
+    cleanly with a short message and code 2 instead of dumping a raw traceback
+    (only KeyboardInterrupt and deliberate SystemExit pass through).
+    """
+    try:
+        await _main_impl(argv)
+    except KeyboardInterrupt:
+        print("\n  ⚠️  interrupted", file=sys.stderr)
+        sys.exit(130)
+    except SystemExit:
+        raise
+    except Exception as e:
+        logger.exception("Unhandled error during %s", " ".join(argv or []))
+        print(f"  ⚠️  unexpected error: {e}", file=sys.stderr)
+        print("  (run with --action check to inspect vault integrity; see "
+              "hoardcore_data/*/vault.db for details)", file=sys.stderr)
+        sys.exit(2)
+
+
+async def _main_impl(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
     url = args.url
     action = args.action

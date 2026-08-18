@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 MODULE = REPO / "hoardcore.py"
 
@@ -184,6 +186,34 @@ def test_cli_scrape_ssrf_blocked_exits_2_without_traceback(tmp_path):
     assert "SSRF" in (res.stdout + res.stderr)
 
 
+def test_cli_unexpected_exception_exits_2_no_traceback(tmp_path, monkeypatch):
+    """An unexpected exception inside an action must exit 2 with a clean
+    message and no raw traceback on stderr (the CLI contract)."""
+    import asyncio
+
+    import hoardcore as hc
+    from tests.conftest import TempConfig
+
+    cfg = TempConfig(str(tmp_path))
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            pass
+
+        config = type("C", (), {"_config": {}})()
+
+        def organize_artifacts_by_day(self):
+            return []
+
+    monkeypatch.setattr(hc, "HoardCore", _Boom)
+    with pytest.raises(SystemExit) as ei:
+        asyncio.run(hc.main(
+            ["_", "--action", "scrape", "https://example.test/x"]))
+    assert ei.value.code == 2
+
+
+
 def test_module_level_citation_list_is_exported():
     """skill.md documents hoardcore.citation_list(urls); it must exist as a
     top-level module function (was AttributeError before the fix)."""
@@ -215,3 +245,81 @@ def test_cli_parallel_flag_runs_check(tmp_path):
     assert res.returncode == 0, res.stderr
     res = _run("_", "--action", "check", "--no-parallel", cwd=cwd)
     assert res.returncode == 0, res.stderr
+
+
+# --- audit CLI exit codes ------------------------------------------------
+
+
+def _audit_fixture(tmp_path, make_chunk):
+    """Isolated vault seeded with one verbatim chunk + artifact paths."""
+    import hoardcore as hc
+    cwd_s = _isolated_toml(tmp_path)
+    cfg = hc.ConfigManager(str(tmp_path / "hoardcore.toml"))
+    hc_obj = hc.HoardCore.__new__(hc.HoardCore)
+    hc_obj.config = cfg
+    hc_obj.vault = hc.VaultManager(cfg)
+    url = "https://coffee.test/audit-1"
+    claim = ("The Philippines has a coffee trade deficit of 13 million "
+             "dollars in 2022")
+    hc_obj.vault.index_document(url, [make_chunk(claim, url=url)], {})
+    quotes = {"v": f'X says "{claim}" [V#1]',
+              "p": 'X says "verifiably absent nonsense xyzzy" [V#1]'}
+    for kind, body in quotes.items():
+        (tmp_path / f"art_{kind}.md").write_text(body + "\n"
+            "\n## Source Links / Citations\n"
+            f"[#1] {url} — {url}\n", encoding="utf-8")
+    return cwd_s, quotes
+
+
+def test_cli_audit_requires_artifact(tmp_path):
+    """`--action audit` without --artifact must exit 2 with a clear message."""
+    cwd = _isolated_toml(tmp_path)
+    res = _run("_", "--action", "audit", cwd=cwd)
+    assert res.returncode == 2
+    assert "--artifact" in (res.stdout + res.stderr)
+
+
+def test_cli_audit_missing_artifact_file_exits_2(tmp_path):
+    """A nonexistent --artifact path must exit 2, not raise."""
+    cwd = _isolated_toml(tmp_path)
+    res = _run("_", "--action", "audit",
+               "--artifact", str(tmp_path / "nope.md"), cwd=cwd)
+    assert res.returncode == 2
+    assert "not found" in (res.stdout + res.stderr)
+
+
+def test_cli_audit_verified_artifact_exits_0(tmp_path, make_chunk):
+    """A fully-verified artifact (verbatim quote, mapped, ingested) exits 0."""
+    import hoardcore as hc  # noqa: F401
+    cwd, quotes = _audit_fixture(tmp_path, make_chunk)
+    res = _run("_", "--action", "audit",
+               "--artifact", str(tmp_path / "art_v.md"), cwd=cwd)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "VERIFIED" in res.stdout
+    assert "100.0%" in res.stdout
+
+
+def test_cli_audit_unverified_artifact_exits_2(tmp_path, make_chunk):
+    """An artifact whose claims don't verify exits 2 (0% accuracy)."""
+    cwd, quotes = _audit_fixture(tmp_path, make_chunk)
+    res = _run("_", "--action", "audit",
+               "--artifact", str(tmp_path / "art_p.md"), cwd=cwd)
+    assert res.returncode == 2
+    assert "UNVERIFIED" in res.stdout
+    assert "0.0%" in res.stdout
+
+
+def test_cli_audit_unmapped_source_exits_2(tmp_path, make_chunk):
+    """A [V#N] with no Source Link entry exits 2 with the mapping warning."""
+    import hoardcore as hc  # noqa: F401
+    cwd, quotes = _audit_fixture(tmp_path, make_chunk)
+    unmapped = (tmp_path / "art_unmap.md")
+    unmapped.write_text(
+        ('X says "The Philippines has a coffee trade deficit of 13 million '
+         'dollars in 2022" [V#9]\n\n## Source Links / Citations\n'
+         "[#1] https://coffee.test/audit-1 — https://coffee.test/audit-1\n"),
+        encoding="utf-8")
+    res = _run("_", "--action", "audit",
+               "--artifact", str(unmapped), cwd=cwd)
+    assert res.returncode == 2
+    assert "Source-link mapping MISSING" in res.stdout

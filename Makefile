@@ -8,7 +8,7 @@
 #
 # Set PYTHON to override the interpreter (defaults to python3.11).
 
-.PHONY: install run discover test clean
+.PHONY: install run discover test bench clean lint audit typecheck coverage check
 
 PYTHON ?= python3.11
 
@@ -32,6 +32,25 @@ discover:
 test:
 	@echo "🧪 Running HoardCore test suite (pytest)..."
 	venv/bin/python -m pytest tests/ -q
+
+lint:
+	@echo "🧼 Ruff lint..."
+	venv/bin/python -m ruff check hoardcore.py tests/
+
+audit:
+	@echo "🔐 Bandit security scan..."
+	venv/bin/bandit -q hoardcore.py
+
+typecheck:
+	@echo "🛡️ Pyright type check..."
+	venv/bin/pyright hoardcore.py --pythonpath venv/bin/python
+
+coverage:
+	@echo "📊 Coverage report (fail under 66%)..."
+	venv/bin/python -m pytest tests/ -q --cov=hoardcore --cov-report=term-missing
+
+check: lint audit typecheck coverage
+	@echo "✅ All gates green."
 
 bench:
 	@echo "📐 Running vector-search benchmark (float32 vs int8 x page size)..."

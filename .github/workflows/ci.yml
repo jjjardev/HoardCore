@@ -19,8 +19,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install . ruff pytest
+          pip install . ruff pytest pytest-cov bandit pyright
       - name: Lint
-        run: ruff check .
+        run: ruff check hoardcore.py tests/
+      - name: Security audit (bandit)
+        run: bandit -q hoardcore.py
+      - name: Type check (pyright)
+        run: pyright hoardcore.py --pythonpath $(which python)
       - name: Test
-        run: python -m pytest tests/ -q
+        run: python -m pytest tests/ -q --cov=hoardcore --cov-fail-under=66
