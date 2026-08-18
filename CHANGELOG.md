@@ -3,6 +3,19 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.12.5
+
+### Docs
+- **`README.md` cleaned up for consistency.** Fixed the stale version badge
+  (`0.10.2` → `0.12.4`), added the `audit` action to the Actions table and the
+  `--action` flag list (it was documented later but omitted from both reference
+  tables), and fixed the missing `audit` example in the "use a positional of
+  `_`" note. Resolved the same `[V]`/`[V#N]` tagging ambiguity as skill.md: the
+  provenance-tag definition now states that `[V#N]` appears only after a
+  verbatim quote, `[E]`/`[H]` claims carry no `[V#N]`, and every `[V#N]`
+  resolves against the Source Links block. Documented the new `audit`
+  authoring-smell warning.
+
 ## HoardCore v0.12.4
 
 ### Added

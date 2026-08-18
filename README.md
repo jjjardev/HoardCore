@@ -4,7 +4,7 @@ Research toolkit for AI agents — give your agent a memory it can prove.
 
 Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo/Mojeek web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
 
-![Version](https://img.shields.io/badge/version-0.10.2-blue)
+![Version](https://img.shields.io/badge/version-0.12.4-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -533,9 +533,11 @@ Students and self-learners can use HoardCore as a **second brain with integrity 
 
 Finished deliverables live in `artifacts/` (configurable via `storage.artifacts_dir`), day-sorted into `artifacts/YYYY-MM-DD/` subfolders. The tool ships `write_artifact(filename, content)` which refuses path-traversing names, plus `citation_list()` to render the source-links block. Research EMITs its grounding context into the day folder's `grounding/` subfolder (`storage.grounding_subdir`) — a working instrument, not a deliverable, so it never pollutes the day folder of finished syntheses/audits. Research outputs carry provenance tags:
 
-- `[V]` — verified against full primary text in the current vault
-- `[E]` — extracted/captured earlier, not in the current vault
-- `[H]` — hypothesis / authored framing
+- `[V#N]` — **verified verbatim** against full primary text in the current vault, traced to source `#N`. The only tag the audit machine-checks.
+- `[E]` — extracted/captured earlier, or data present only as table/list cells (not contiguous prose); not in the current vault.
+- `[H]` — hypothesis / authored framing.
+
+Tag grammar: `[V#N]` appears only immediately after a verbatim `"…"` quote in a body paragraph; `[E]`/`[H]` claims carry **no** `[V#N]` (they can never verify). Every `[V#N]` resolves against the artifact's **Source Links / Citations** block.
 
 Example artifacts already produced: the renewable-island synthesis, its adversarial audit, and the master research portfolio.
 
@@ -598,16 +600,17 @@ hoardcore [URL] [options]
 | `discover` | Web-search `--query`, ingest the top `--limit` results (default `discovery.top_rank`). |
 | `research` | Run `discover -> ingest -> recall -> emit` (memory-first: live DISCOVER is skipped when the vault already has a high-confidence answer, unless `--no-answer-first`); writes to `--out` or a day-sorted `artifacts/YYYY-MM-DD/grounding_context.md`. |
 | `verify` | Programmatic provenance audit: confirm `--claim` against vault text (exact phrasing, typography-blind; `--hint` prints the nearest vault phrase on denial). |
+| `audit` | Audit an artifact's `[V#N]` evidence chain (verbatim + source-link mapping + ingested). |
 | `check` | Run a three-phase vault integrity check (content hashes, counts, vector dims). |
 | `stats` | Vault summary in one command: sources, chunks, vectors, embedding dim/mode, schema version, DB size, plus a sampled confidence-band distribution (`high`/`medium`/`low`) to spot retrieval flatness. |
 
-Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `check`, `stats`) does not need a URL.
+Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `audit`, `check`, `stats`) does not need a URL.
 
 ### Flags
 
 | Flag | Description |
 |---|---|
-| `--action ACTION` | One of `scrape`, `crawl`, `search`, `ingest`, `discover`, `research`, `verify`, `check`, `stats`. |
+| `--action ACTION` | One of `scrape`, `crawl`, `search`, `ingest`, `discover`, `research`, `verify`, `audit`, `check`, `stats`. |
 | `--strategy S` | `fast`, `balanced`, or `aggressive` (default from config). |
 | `--query Q` | Required for `search`, `discover`, `research`. |
 | `--limit N` | Top results to ingest for `discover` (default `discovery.top_rank`); max chunks returned for `search`. |
@@ -667,7 +670,7 @@ For each `[V#N]` tag in the artifact it checks three links:
 2. **MAPPED** — `N` appears in the artifact's Source Links / Citations block as `[#N] <url>`.
 3. **INGESTED** — the cited URL has chunks in the vault.
 
-Strictness mirrors `verify` — paraphrased prose is `UNVERIFIED`; only verbatim quoted passages pass. Repeated `[V#N]` tags of the same claim+source count once. Outputs a per-claim table plus citation-accuracy %, then exits `0` verified / `1` partial / `2` (any unverified **or** any unmapped/not-ingested link). Same CI gotcha as `verify`: never pipe through `tail`/`head` — the shell reports the pipe's exit, not the gate's.
+Strictness mirrors `verify` — paraphrased prose is `UNVERIFIED`; only verbatim quoted passages pass. Repeated `[V#N]` tags of the same claim+source count once. A `[V#N]` that appears on an `[H]`/`[E]` analysis line is flagged with an informational warning (it never changes the exit code, but it signals the tag belongs on a verbatim quote in the body). Outputs a per-claim table plus citation-accuracy %, then exits `0` verified / `1` partial / `2` (any unverified **or** any unmapped/not-ingested link). Same CI gotcha as `verify`: never pipe through `tail`/`head` — the shell reports the pipe's exit, not the gate's.
 
 ### Configuration file (`hoardcore.toml`)
 
