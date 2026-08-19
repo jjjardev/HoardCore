@@ -3709,7 +3709,7 @@ _LOCAL_EXTENSIONS = frozenset({".pdf", ".docx", ".epub", ".html", ".htm",
 class HoardCore:
     """Main entry point for scraping, crawling, and searching."""
 
-    def __init__(self, vault_name: str | None = None):
+    def __init__(self, vault_name: str | list[str] | tuple[str, ...] | None = None):
         self.config = ConfigManager()
         self.bus = EventBus()
         self.plugins = PluginManager(self.config).discover()
@@ -4126,7 +4126,7 @@ class HoardCore:
                     c.metadata.setdefault("vault", vault.vault_name or "(default)")
                     results[key] = c
 
-        keys = sorted(score, key=score.get, reverse=True)
+        keys = sorted(score, key=lambda k: score[k], reverse=True)
         if max_per_source > 0:
             selected: list[str] = []
             per_src: dict[str, int] = {}

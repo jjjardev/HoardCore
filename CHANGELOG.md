@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.14.1
+
+### Fixed
+- **CI pyright gate clean.** `_search_across_vaults` sorted its fused score dict
+  with `dict.get` as the key, which pyright rejects (overload not assignable to
+  `sorted`'s key); replaced with a `key=lambda k: score[k]`. `HoardCore.__init__`
+  is now typed to accept the cross-vault list (`str | list[str] |
+  tuple[str, ...] | None`) so passing `--vault a,b,c` passes type-check. The
+  earlier v0.14.0 release failed the `pyright hoardcore.py --pythonpath
+  $(which python)` CI gate with 3 `reportCallIssue`/`reportArgumentType` errors;
+  this closes them (0 errors, 0 warnings).
+
 ## HoardCore v0.14.0
 
 ### Added
