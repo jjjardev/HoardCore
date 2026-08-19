@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.12.5"
+__version__ = "0.13.0"
 
 import argparse
 import asyncio
@@ -4176,7 +4176,9 @@ class HoardCore:
                          line, each is attributed to the double-quoted passage
                          ending nearest before it; a quote wrapped across two
                          physical lines is joined into one claim before
-                         extraction.
+                         extraction. Non-verified claims carry a `hint` field
+                         (the nearest stored vault phrase) so the author knows
+                         how to reword them instead of guessing.
           2. MAPPED    — N must appear in the artifact's "Source Links /
                          Citations" block as `[#N] <url>`.
           3. INGESTED  — that cited URL must have chunks in the vault.
@@ -4253,10 +4255,13 @@ class HoardCore:
                 emitted.add((key, n))
                 verdict = verdicts.get(key) or self.verify_claim(text_cand)
                 verdicts[key] = verdict
+                hint = None
+                if verdict != "verified":
+                    hint = self.verify_hint(text_cand, recall=5)
                 claims.append({
                     "line": ln_no, "n": n,
                     "text": text_cand, "quote": is_quote,
-                    "verdict": verdict,
+                    "verdict": verdict, "hint": hint,
                 })
 
         used_n = sorted({c["n"] for c in claims if c["n"]})
@@ -5025,6 +5030,9 @@ async def _main_impl(argv: list[str] | None = None) -> None:
             preview = (c["text"] if len(c["text"]) <= 72
                        else c["text"][:69] + "...")
             print(f"[{i:>3}] {c['verdict'].upper():<10} {src}{preview}")
+            if c["verdict"] != "verified" and c.get("hint"):
+                for hint_line in c["hint"].splitlines():
+                    print(f"      {hint_line.strip()}")
         total = audit["total"]
         acc = audit["accuracy"] * 100.0
         c = audit["counts"]

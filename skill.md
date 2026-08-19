@@ -71,6 +71,8 @@ The `audit` action machine-checks every `[V#N]` against the vault. These rules m
 - **No nested double-quotes in a claim.** A line like `"on … made of "nipa,""` breaks attribution (the inner `"nipa,"` is <24 chars, so the tag falls back to the whole line and fails). Rephrase, or demote that fact to `[E]`.
 - **Infobox/table/list figures are NOT verbatim prose.** Census tables, fiscal rows, DTI pillars, and slash-reflowed lists exist in the vault as table cells / separate lines, so re-arranging them into a sentence fails `verify`. Quote only contiguous prose; demote tabular/fiscal/list data to `[E]`.
 - **Verify exact phrasings before tagging.** Draft the artifact, then `--action verify --claim-list` the exact quote strings against the vault. Only confirmed-`VERIFIED` strings may carry `[V#N]`. This catches wording drift (e.g. "1st class municipality" vs stored "1st municipal income class") before the audit.
+- **`audit` now coaches failing claims.** For every `UNVERIFIED`/`PARTIAL` claim, the audit prints the nearest vault phrase right under it — reword your quote to that exact stored text (don't let the quote trail past what the vault chunk actually holds), then re-run. If the nearest phrase looks like a different wording, that's the source's real words; mirror them.
+- **Citation lines must start with `[#N] <url>` — no `- ` bullet prefix.** The source-link extractor `re.match`es `[#N]` at the start of the line, so a `- [#1] ...` bullet line silently fails to map (every `[V#N]` then reports mapping-MISSING). Put each `[#N] url` on its own line, plain, in the `## Source Links / Citations` block.
 - **Cross-source conflicts** (e.g. two sources naming different mayors) → keep the verbatim quotes `[V#N]`, flag the discrepancy as `[H]`/`[E]`, never assert one as `[V]`.
 
 Each `[V#N]` is attributed to the double-quoted passage ending nearest before it (not the line's longest quote), so one paraphrased claim can't hide behind another tag's verbatim quote; a tag with no preceding distinctive quote falls back to the whole line.
@@ -161,7 +163,7 @@ venv/bin/python hoardcore.py _ --action verify --claim-list artifacts/2026-08-18
 2. **MAPPED** — `N` appears in the artifact's Source Links / Citations block as `[#N] <url>`.
 3. **INGESTED** — the cited URL has chunks in the vault.
 
-Strictness: only the longest inline double-quoted passage (≥24 normalized chars) passes as a claim; paraphrased prose is `UNVERIFIED`. Repeated `[V#N]` of the same claim+source tag count once. Exit codes mirror `verify` (`0` verified / `1` partial / `2` unverified), plus `2` on any unmapped/not-ingested link. **Never pipe through `tail`/`head`** — the shell reports the pipe's exit, not the gate's.
+Strictness: only the longest inline double-quoted passage (≥24 normalized chars) passes as a claim; paraphrased prose is `UNVERIFIED`. Repeated `[V#N]` of the same claim+source tag count once. Exit codes mirror `verify` (`0` verified / `1` partial / `2` unverified), plus `2` on any unmapped/not-ingested link. **Never pipe through `tail`/`head`** — the shell reports the pipe's exit, not the gate's. For each failing claim, the audit prints the nearest vault phrase under it (the same coaching `verify --hint` gives) so you can reword to the source's exact words without hunting.
 
 **Authoring rules live in the "Write artifacts that audit clean" section above** (under DeepResearch → Provenance Mandate). Read them before writing an artifact — they are the difference between a 100% first-pass audit and a second edit.
 
