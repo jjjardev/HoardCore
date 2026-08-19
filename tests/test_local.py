@@ -10,6 +10,8 @@ import io
 import os
 import zipfile
 
+import pytest
+
 import hoardcore as hc
 from tests.conftest import TempConfig
 
@@ -171,6 +173,11 @@ def test_scan_lists_files_with_sizes(tmp_path, monkeypatch):
 
 
 def test_docx_pdf_epub_ingest(tmp_path, monkeypatch):
+    # The binary parsers load lazily (CI installs base deps only), so force the
+    # import and skip when PyMuPDF/python-docx are unavailable.
+    hc.DocumentParser._import_binary_parsers()
+    if not (hc.FITZ_AVAILABLE and hc.DOCX_AVAILABLE):
+        pytest.skip("optional binary parsers (PyMuPDF/python-docx) not installed")
     scraper, inputs = _scraper(tmp_path, monkeypatch)
     _write(inputs, "docs/doc.docx", _docx_bytes())
     _write(inputs, "docs/doc.pdf", _pdf_bytes())

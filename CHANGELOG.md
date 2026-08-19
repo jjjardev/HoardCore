@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.14.2
+
+### Fixed
+- **CI coverage run clean on base deps.** `test_docx_pdf_epub_ingest`
+  unconditionally imported `python-docx`/`PyMuPDF` to generate sample files,
+  but those are optional binary parsers that CI does not install (base deps
+  only) — so `pytest --cov` failed with `ModuleNotFoundError: No module named
+  'docx'`. The test now forces the lazy binary-parser import and skips when
+  the parsers are unavailable (matching `test_ocr.py`'s optional-dep
+  pattern), so it runs where the deps exist and skips in CI. Coverage remains
+  above the 66% gate (71%).
+
 ## HoardCore v0.14.1
 
 ### Fixed
