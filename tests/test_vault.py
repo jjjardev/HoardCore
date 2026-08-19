@@ -100,6 +100,7 @@ def test_verify_claim_confirms_currency_figure(vault, make_chunk):
     hc_obj = HoardCore.__new__(HoardCore)
     hc_obj.config = vault.config
     hc_obj.vault = vault
+    hc_obj.vaults = [vault]
     assert hc_obj.verify_claim("The Philippines has a coffee trade deficit of $13 million in 2022") == "verified"
 
 
@@ -126,6 +127,7 @@ def test_confidence_probe_prefers_distinctive_headers(vault, make_chunk):
     hc_obj = HoardCore.__new__(HoardCore)
     hc_obj.config = vault.config
     hc_obj.vault = vault
+    hc_obj.vaults = [vault]
     # The probe should drive a keyword-backed multi-word query, producing a
     # spread rather than the degenerate all-medium the generic headers would.
     dist = vault.confidence_distribution(probes=2, recall=4)
@@ -406,6 +408,7 @@ def test_verify_claim_three_states(vault, make_chunk):
     hc_obj = HoardCore.__new__(HoardCore)
     hc_obj.config = vault.config
     hc_obj.vault = vault
+    hc_obj.vaults = [vault]
     # verified: a distinctive substring present verbatim
     assert hc_obj.verify_claim("doubling time is closer to six months") == "verified"
     # unverified: gibberish with no keyword coverage
@@ -424,6 +427,7 @@ def test_verify_claim_partial_is_corpus_scaled(vault, make_chunk):
     hc_obj = HoardCore.__new__(HoardCore)
     hc_obj.config = vault.config
     hc_obj.vault = vault
+    hc_obj.vaults = [vault]
     # Terms all present but NOT verbatim-contiguous (that would VERIFY): the
     # honest state is PARTIAL — previously UNVERIFIED because the small
     # vault's ranks never reached the old absolute cutoff.
@@ -492,6 +496,7 @@ def test_verify_claim_tolerates_newline_split_text(vault, make_chunk):
     vault.index_document("https://sleep.test/1", [make_chunk(text)], {})
     hc_inst = object.__new__(hc.HoardCore)
     hc_inst.vault = vault
+    hc_inst.vaults = [vault]
     result = hc_inst.verify_claim("Sleep deprivation is associated with impaired cognitive function and reduced attention span")
     assert result == "verified"
 
@@ -502,6 +507,7 @@ def test_verify_claim_unverified_when_absent(vault, make_chunk):
                          [make_chunk("sleep architecture rem deep slow wave")], {})
     hc_inst = object.__new__(hc.HoardCore)
     hc_inst.vault = vault
+    hc_inst.vaults = [vault]
     result = hc_inst.verify_claim("giraffes sleep standing up for exactly 47 minutes")
     assert result == "unverified"
 
@@ -767,6 +773,7 @@ def test_verify_claim_long_claim_with_distinctive_tail(vault, make_chunk):
     vault.index_document("https://negros.test/1", [make_chunk(text)], {})
     hc_inst = object.__new__(hc.HoardCore)
     hc_inst.vault = vault
+    hc_inst.vaults = [vault]
     # 130+ char claim; 'seventy three' appears ~100 chars in -- past the old
     # 60-char window, so this would previously fall through to partial.
     claim = ("The signatories agreed that the economic impact of renewable "
@@ -784,6 +791,7 @@ def test_verify_claim_partial_requires_strong_bm25(vault, make_chunk):
     ], {})
     hc_inst = object.__new__(hc.HoardCore)
     hc_inst.vault = vault
+    hc_inst.vaults = [vault]
     # All keywords exist in that one chunk, but it is a weak, generic match.
     assert hc_inst.verify_claim("on the table under the door behind everyone") == "unverified"
 
@@ -796,6 +804,7 @@ def test_verify_claim_folds_typographic_dashes(vault, make_chunk):
     vault.index_document("https://launch.test/1", [make_chunk(text)], {})
     hc_inst = object.__new__(hc.HoardCore)
     hc_inst.vault = vault
+    hc_inst.vaults = [vault]
     # en-dash + curly-quote variants of the exact same claim verify:
     assert hc_inst.verify_claim(
         "A successful Product Hunt launch can deliver 500\u20132,000 GitHub stars in 48 hours"
@@ -815,6 +824,7 @@ def test_verify_claim_folds_markdown_emphasis(vault, make_chunk):
     vault.index_document("https://md.test/1", [make_chunk(text)], {})
     hc_inst = object.__new__(hc.HoardCore)
     hc_inst.vault = vault
+    hc_inst.vaults = [vault]
     assert hc_inst.verify_claim(
         "electricity demand from data centers increased by 17% in 2025"
     ) == "verified"
@@ -831,6 +841,7 @@ def test_verify_claim_still_rejects_token_change(vault, make_chunk):
     vault.index_document("https://tldr.test/1", [make_chunk(text)], {})
     hc_inst = object.__new__(hc.HoardCore)
     hc_inst.vault = vault
+    hc_inst.vaults = [vault]
     # exact phrasing (verbatim) verifies...
     assert hc_inst.verify_claim("TLDR AI has 400K+ subscribers") == "verified"
     # ...but the missing '+' is a different claim: not verbatim -> not verified.
@@ -844,6 +855,7 @@ def test_verify_hint_surfaces_nearest_phrase(vault, make_chunk):
     vault.index_document("https://hint.test/1", [make_chunk(text)], {})
     hc_inst = object.__new__(hc.HoardCore)
     hc_inst.vault = vault
+    hc_inst.vaults = [vault]
     hint = hc_inst.verify_hint("the vault stores 640K tokens of source text")
     assert hint is not None
     assert "640K+" in hint or "640k+" in hint

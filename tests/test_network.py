@@ -216,7 +216,7 @@ def test_fetch_search_honors_max_results(tmp_path, monkeypatch):
     scraper = hc.HoardCore()
     captured = {}
 
-    def fake_search(query, limit, domain=None, hybrid=None):
+    def fake_search(query, limit, domain=None, hybrid=None, max_per_source=0):
         captured["limit"] = limit
         return [hc.Chunk(text="c", metadata={"source": "https://s.test"})]
 

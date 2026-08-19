@@ -32,6 +32,10 @@ audit step, and artifact conventions. Follow it.
 - `artifacts/` — provenance-tagged research deliverables `[V]/[E]/[H]`.
 - `tests/` — pytest suite (run `make test`).
 - `hoardcore_data/` — the local SQLite vault (runtime, git-ignored).
+- `local_inputs/` — the read-only folder for `--action local` (git-ignored):
+  drop files there (`.pdf .docx .epub .html .htm .txt .md`), then
+  `hoardcore.py _ --action local` ingests them into the primary vault without
+  any network.
 
 ```bash
 # Drive the engine (see skill.md for full action mapping)

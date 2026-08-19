@@ -244,7 +244,7 @@ Because an agent drives HoardCore via `skill.md` and the CLI, these parameters a
 | `--discover N` | How many sources to hunt before ingesting (`0` = recall-only: vault query + grounding only, web hunt skipped) | More sources = broader coverage; fewer = faster turnaround |
 | `--recall N` | How many chunks to retrieve per synthesis pass | More chunks = deeper context; fewer = sharper focus |
 | `--strategy {fast,balanced,aggressive}` | Anti-bot escalation chain | Government sites and job boards require FlareSolverr; lightweight blogs don't |
-| `--vault NAME` | Scope the whole session to a per-topic vault (`hoardcore_data/NAME/`) | Keeps recall clean: research memory is isolated per topic/domain instead of polluting one shared pool |
+| `--vault NAME` | Scope the whole session to a per-topic vault (`hoardcore_data/NAME/`); a list (`a,b,c`) adds read-only companions for cross-vault search/verify/audit | Keeps recall clean: research memory is isolated per topic/domain instead of polluting one shared pool |
 | **Depth presets** (`research` / `deep` / `exhaustive` / `x N`) | Pass count × source quota | You decide when "enough" is enough, not the platform |
 | **Output schema** | Defined in the prompt / `skill.md` | A SWOT matrix, a legal brief, a lead list — the agent emits what you specify |
 | **Provenance tags** | `[V]/[E]/[H]` enforcement | You decide the epistemic standard |
@@ -602,7 +602,8 @@ hoardcore [URL] [options]
 | `verify` | Programmatic provenance audit: confirm `--claim` against vault text (exact phrasing, typography-blind; `--hint` prints the nearest vault phrase on denial). |
 | `audit` | Audit an artifact's `[V#N]` evidence chain (verbatim + source-link mapping + ingested). |
 | `check` | Run a three-phase vault integrity check (content hashes, counts, vector dims). |
-| `stats` | Vault summary in one command: sources, chunks, vectors, embedding dim/mode, schema version, DB size, plus a sampled confidence-band distribution (`high`/`medium`/`low`) to spot retrieval flatness. |
+| `stats` | Vault summary in one command: sources, chunks, vectors, embedding dim/mode, schema version, DB size, plus a sampled confidence-band distribution (`high`/`medium`/`low`) to spot retrieval flatness. With `--vault a,b,c` prints a block per named vault. |
+| `local` | Index local files from `storage.local_dir` (default `local_inputs/`, git-ignored) — no network. Supported: `.pdf .docx .epub .html .htm .txt .md`, walked recursively. `--path` scopes to a file/folder inside it, `--list` is a read-only scan. Freshness is content-based (unchanged extracted content is skipped unless `--force`). |
 
 Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `audit`, `check`, `stats`) does not need a URL.
 
@@ -610,7 +611,7 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 
 | Flag | Description |
 |---|---|
-| `--action ACTION` | One of `scrape`, `crawl`, `search`, `ingest`, `discover`, `research`, `verify`, `audit`, `check`, `stats`. |
+| `--action ACTION` | One of `scrape`, `crawl`, `search`, `ingest`, `discover`, `research`, `verify`, `audit`, `check`, `stats`, `local`. |
 | `--strategy S` | `fast`, `balanced`, or `aggressive` (default from config). |
 | `--query Q` | Required for `search`, `discover`, `research`. |
 | `--limit N` | Top results to ingest for `discover` (default `discovery.top_rank`); max chunks returned for `search`. |
@@ -624,7 +625,9 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 | `--claim C` | Claim text to verify for the `verify` action. In shells, escape `$` as `\$` (bash expands `$13` to empty); or use `--claim-file` to read the claim from a file so `$` survives untouched. |
 | `--claim-file PATH` | With `verify`: read the claim from this file instead of `--claim` (preserves `$`, e.g. `$13`). |
 | `--claim-list PATH` | With `verify`: batch-audit a file of claims (one per line; `#`/blank lines skipped). Prints a per-claim verdict table plus an aggregate **citation-accuracy %** (VERIFIED ÷ total) and exits with the worst verdict (2 on any UNVERIFIED) — so it doubles as a CI-wireable citation-accuracy gate. Mutually exclusive with `--claim`/`--claim-file`. |
-| `--vault NAME` | Scope the whole session to a per-topic vault (`hoardcore_data/NAME/`). |
+| `--vault NAME` | Scope the whole session to a per-topic vault (`hoardcore_data/NAME/`). A comma/space list (`a,b,c`) enables **cross-vault read**: vault `a` is the write-primary; `b,c` are read-only companions. Search/verify/audit/`--hint` fuse across all of them; new ingest/discover only touches `a`. Single name behaves exactly as before. |
+| `--path PATH` | With `local`: relative path (file or directory) inside `storage.local_dir` to process; defaults to the whole `local_dir`. |
+| `--list` | With `local`: read-only scan — list supported files under `--path` without ingesting. |
 | `--mode MODE` | For `search`: `fast` (FTS-only) or `hybrid` (vector+RRF). Default follows config. Note: with `embeddings.fts_fast_path=true` (default), `hybrid` still short-circuits to the FTS fast path whenever FTS5 alone fills the result set — hits are then tagged `retrieval='fts_fast'`, not `'hybrid'`. Set `fts_fast_path=false` to always force the vector+RRF path. |
 | `--parallel` / `--no-parallel` | Override threaded ingest for this run (in-memory only, not written to `hoardcore.toml`). Engages the parallel reader→embed→write pipeline for batches of 8+ chunks; default follows `indexer.parallel` (off). On smaller batches it is a silent no-op (sequential path). |
 | `--migrate` | With `check`: rebuild the vault at the configured `storage.page_size` (16 KB default) via `VACUUM INTO`. |
@@ -682,7 +685,7 @@ Created automatically on first run. Key sections:
 | `[network]` | `default_strategy` (`fast`/`balanced`/`aggressive`), `enable_preflight`, `ssrf_protection` (block private/LAN/non-http(s) targets + re-validate redirects, default true) |
 | `[auth]` | `cookie_string` (e.g. `cf_clearance=...; session=...`) |
 | `[solver]` | `enabled` (default `true`), `url`, `solver_timeout` |
-| `[storage]` | `root_dir`, `artifacts_dir`, `artifacts_by_day`, `grounding_subdir` (research grounding contexts land in `artifacts/YYYY-MM-DD/<subdir>/` so they don't pollute the day folder of finished deliverables; default `grounding`), `save_binary`, `save_raw_html`, `page_size` (16 KB default) |
+| `[storage]` | `root_dir`, `artifacts_dir`, `artifacts_by_day`, `grounding_subdir` (research grounding contexts land in `artifacts/YYYY-MM-DD/<subdir>/` so they don't pollute the day folder of finished deliverables; default `grounding`), `local_dir` (read-only root for `--action local`; default `local_inputs/`, git-ignored), `save_binary`, `save_raw_html`, `page_size` (16 KB default) |
 | `[parsers]` | `enable_pdf`, `enable_docx`, `enable_epub`, `extract_pdf_tables`, `enable_pdf_ocr` (auto-OCR scanned PDF pages when `rapidocr_onnxruntime` is present, default true) |
 | `[crawler]` | `respect_robots`, `sitemap_limit`, `parallel_workers` |
 | `[indexer]` | `enable_fts`, `search_limit`, `parallel` (threaded ingest, default off), `near_dedup` (simhash dup filter, default off), `near_dedup_threshold` |

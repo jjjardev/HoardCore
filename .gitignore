@@ -23,6 +23,9 @@ hoardcore_data/
 # --- Research artifacts (local deliverables only) ---
 artifacts/
 
+# --- Local ingestion inputs (user documents dropped in for --action local) ---
+local_inputs/
+
 # The top-level peel_anchor/ directory (deterministic LCS approx + the
 # streaming-edit-distance sketch research) is COMMITTED and tracked, so the
 # claims are provable. It is the proof-of-record for the frontier-synthesis

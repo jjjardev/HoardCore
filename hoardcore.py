@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
 import argparse
 import asyncio
@@ -142,6 +142,10 @@ grounding_subdir = "grounding"   # Research EMITs a grounding context (a working
                                  # artifacts/YYYY-MM-DD/<grounding_subdir>/ so it
                                  # never pollutes the day folder of finished
                                  # syntheses/audits.
+local_dir = "local_inputs"       # Read-only local folder for --action local: only
+                                 # this directory (relative to the project root)
+                                 # may be ingested from disk; paths that resolve
+                                 # outside it are refused.
 save_binary = true               # Save original PDF/DOCX/EPUB files
 save_raw_html = false            # Save raw HTML for debugging
 page_size = 16384                # SQLite page size (bytes). 16 KB keeps 384-dim
@@ -285,7 +289,7 @@ class ConfigManager:
             "network": {"default_strategy": "aggressive", "enable_preflight": True, "ssrf_protection": True},
             "auth": {"cookie_string": ""},
             "solver": {"enabled": False, "url": "http://localhost:8191/v1", "solver_timeout": 60},
-            "storage": {"root_dir": "hoardcore_data", "artifacts_dir": "artifacts", "artifacts_by_day": True, "grounding_subdir": "grounding", "save_binary": True, "save_raw_html": False, "page_size": 16384},
+            "storage": {"root_dir": "hoardcore_data", "artifacts_dir": "artifacts", "artifacts_by_day": True, "grounding_subdir": "grounding", "local_dir": "local_inputs", "save_binary": True, "save_raw_html": False, "page_size": 16384},
             "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "extract_pdf_tables": True, "enable_pdf_ocr": True},
             "crawler": {"respect_robots": True, "sitemap_limit": 500, "parallel_workers": 5},
             "indexer": {"enable_fts": True, "search_limit": 20, "parallel": True,
@@ -1939,6 +1943,23 @@ class VaultManager:
                           chunks=len(chunks), parallel=True)
         logger.info(f"Indexed {len(chunks)} chunks for {url} (v{version}, parallel)")
 
+    def latest_content_hash(self, url: str) -> str | None:
+        """Return the newest stored `content_hash` for a URL, or None.
+
+        Local ingestion uses this to skip re-indexing a file whose extracted
+        content is unchanged since the last ingest (content-based freshness
+        instead of the HTTP cache TTL): identical content -> identical hash ->
+        no new WORM version is written. `--force` bypasses the check.
+        """
+        with self._db() as (_conn, cursor):
+            cursor.execute(
+                "SELECT content_hash FROM documents WHERE url = ? "
+                "ORDER BY version DESC LIMIT 1",
+                (url,),
+            )
+            row = cursor.fetchone()
+        return row[0] if row else None
+
     @staticmethod
     def _fts_query(query: str, op: str = "AND") -> str | None:
         """Build a safe FTS5 MATCH expression from a raw user query.
@@ -3121,6 +3142,16 @@ class DocumentParser:
         return body, {"parser": "fallback"}
 
     @staticmethod
+    async def parse_text(content: str, url: str) -> tuple[str, dict[str, Any]]:
+        """Parse a plain-text / markdown local file as-is (no HTML cleaning).
+
+        Returns the raw text for the chunker (which applies `_tidy_markdown_text`
+        itself), and tags the parser as "text" so downstream provenance can tell
+        a raw-text source from an HTML/binary one.
+        """
+        return (content or "").strip(), {"parser": "text"}
+
+    @staticmethod
     async def parse_binary(content_type: str, binary: bytes) -> tuple[str, dict[str, Any]]:
         """Route binary to appropriate parser based on content type."""
         parsers = {
@@ -3670,6 +3701,11 @@ class PluginManager:
 # 9. MAIN ORCHESTRATOR
 # =============================================================================
 
+# Local ingestion (--action local): the only file types read from
+# storage.local_dir, and only from that directory (containment enforced).
+_LOCAL_EXTENSIONS = frozenset({".pdf", ".docx", ".epub", ".html", ".htm",
+                               ".txt", ".md"})
+
 class HoardCore:
     """Main entry point for scraping, crawling, and searching."""
 
@@ -3677,7 +3713,24 @@ class HoardCore:
         self.config = ConfigManager()
         self.bus = EventBus()
         self.plugins = PluginManager(self.config).discover()
-        self.vault = VaultManager(self.config, vault_name, event_bus=self.bus)
+
+        # Cross-vault read: `vault_name` may be a comma/space list
+        # ("career,negros_ai_jobs"). The FIRST vault is the primary
+        # (self.vault): the only one that receives new ingest/discover/
+        # research-write traffic. The rest are read-only companions used by
+        # search/verify/audit (recall reads across all of them). A single
+        # name or None behaves exactly as before.
+        if isinstance(vault_name, str):
+            names = [n for n in re.split(r"[,\s]+", vault_name.strip()) if n]
+        elif isinstance(vault_name, (list, tuple)):
+            names = [str(n).strip() for n in vault_name if str(n).strip()]
+        else:
+            names = []
+        self.vault = VaultManager(self.config, names[0] if names else None,
+                                  event_bus=self.bus)
+        self.vaults = [self.vault] + [
+            VaultManager(self.config, n, event_bus=self.bus) for n in names[1:]
+        ]
         self.vault_name = self.vault.vault_name
         self.fetcher = NetworkFetcher(self.config)
         self.parser = DocumentParser()
@@ -3724,6 +3777,165 @@ class HoardCore:
 
         self.discovery.plugin_providers.update(self.plugins.providers)
         self.fetcher.plugin_fetchers.update(self.plugins.fetchers)
+
+    # --- Local directory ingestion (--action local) -------------------------
+    # Reads ONLY from storage.local_dir (default local_inputs/); any path that
+    # resolves outside that directory is refused (mirrors write_artifact's
+    # traversal guard). No network, no SSRF, no HTTP cache-TTL: freshness is
+    # content-based (a file whose extracted content is unchanged since the last
+    # ingest is skipped unless --force).
+
+    def _local_dir_root(self) -> str:
+        """Absolute root of the local ingestion directory."""
+        return os.path.abspath(str(self.config.get('storage.local_dir', 'local_inputs')))
+
+    def _local_url(self, relpath: str) -> str:
+        """Synthetic provenance URL for a local file. The host is fixed to
+        `local` so `documents.domain` is always "local" and the chunk carries a
+        recognizable, human-readable address (`local://local/papers/x.pdf`)."""
+        return f"local://local/{relpath}"
+
+    def _local_guard(self, relpath: str) -> str:
+        """Resolve `relpath` inside storage.local_dir, refusing escapes."""
+        root = self._local_dir_root()
+        abs_path = os.path.abspath(os.path.join(root, relpath))
+        if abs_path != root and os.path.commonpath([root, abs_path]) != root:
+            raise RuntimeError(
+                f"LOCAL_PATH_REFUSED: {relpath!r} escapes "
+                f"{self.config.get('storage.local_dir', 'local_inputs')}"
+            )
+        return abs_path
+
+    def _local_files(self, relpath: str = ".") -> list[str]:
+        """Every supported file under `relpath` of local_dir (sorted, recursive)."""
+        root = self._local_dir_root()
+        base = self._local_guard(relpath)
+        if os.path.isfile(base):
+            return [os.path.relpath(base, root)]
+        if not os.path.isdir(base):
+            raise RuntimeError(f"LOCAL_PATH_NOT_FOUND: {relpath!r}")
+        files: list[str] = []
+        for dirpath, _dirnames, filenames in os.walk(base):
+            for name in sorted(filenames):
+                if os.path.splitext(name)[1].lower() in _LOCAL_EXTENSIONS:
+                    files.append(os.path.relpath(os.path.join(dirpath, name), root))
+        return files
+
+    async def _process_local(self, relpath: str, force_refresh: bool = False) -> tuple[list[Chunk], dict[str, Any]]:
+        """Index one local file into the primary vault, bypassing the network
+        pipeline entirely (no fetch chain / SSRF / HTTP cache). Freshness is
+        content-based: a file whose extracted content is unchanged since the
+        last ingest is skipped unless `force_refresh`. Returns (chunks, meta);
+        meta may carry `cached`, `junk`, or `error`."""
+        try:
+            abs_path = self._local_guard(relpath)
+        except RuntimeError as e:
+            return [], {"error": str(e)}
+        if not os.path.isfile(abs_path):
+            return [], {"error": f"LOCAL_FILE_NOT_FOUND: {relpath!r}"}
+        ext = os.path.splitext(abs_path)[1].lower()
+        if ext not in _LOCAL_EXTENSIONS:
+            return [], {"error": f"LOCAL_UNSUPPORTED_EXT: {relpath!r}"}
+
+        url = self._local_url(relpath)
+        try:
+            with open(abs_path, "rb") as fh:
+                data = fh.read()
+        except OSError as e:
+            return [], {"error": f"LOCAL_READ_FAILED: {relpath!r}: {e}"}
+
+        text = data.decode("utf-8", errors="ignore")
+        parser_meta: dict[str, Any] = {
+            "source_type": "local", "local_path": abs_path, "url": url,
+        }
+        try:
+            if ext in (".html", ".htm"):
+                markdown, html_meta = await DocumentParser.clean_html(text, url)
+                parser_meta.update(html_meta)
+                parser_meta["content_type"] = "text/html"
+            elif ext == ".pdf":
+                markdown, pdf_meta = await DocumentParser.parse_pdf(data)
+                parser_meta.update(pdf_meta)
+                parser_meta["content_type"] = "application/pdf"
+            elif ext == ".docx":
+                markdown, doc_meta = await DocumentParser.parse_docx(data)
+                parser_meta.update(doc_meta)
+                parser_meta["content_type"] = (
+                    "application/vnd.openxmlformats-officedocument."
+                    "wordprocessingml.document"
+                )
+            elif ext == ".epub":
+                markdown, epub_meta = await DocumentParser.parse_epub(data)
+                parser_meta.update(epub_meta)
+                parser_meta["content_type"] = "application/epub+zip"
+            else:  # .txt / .md
+                markdown, _t = await DocumentParser.parse_text(text, url)
+                parser_meta["content_type"] = "text/plain"
+        except Exception as e:
+            return [], {"error": f"LOCAL_PARSE_FAILED: {relpath!r}: {e}"}
+
+        if not (markdown or "").strip():
+            markdown = "[No extractable content found]"
+
+        # Boilerplate detection applies to real HTML; raw text/markdown is
+        # ingested as-authored (a short note is still evidence).
+        if ext in (".html", ".htm"):
+            junk = self._detect_junk(markdown, text, parser_meta, 0.5)
+            if junk:
+                logger.info(f"local: skipping {relpath} (junk: {junk}).")
+                return [], {"junk": True, "junk_reason": junk}
+
+        chunks = await self.chunker.chunk(markdown, url, parser_meta)
+        # Content-hash basis matches the rest of the pipeline: a blake2b over the
+        # joined chunk texts. Identical extracted content -> identical hash ->
+        # no new WORM version is written unless --force.
+        content_hash = hashlib.blake2b(
+            "\n".join(c.text for c in chunks).encode("utf-8"),
+            digest_size=32,
+        ).hexdigest()
+        if not force_refresh and content_hash == self.vault.latest_content_hash(url):
+            logger.info(f"local: {relpath} unchanged (content-hash); skipping.")
+            return [], {"cached": True, "url": url, "content_hash": content_hash}
+        self.vault.ingest_chunks_parallel(url, chunks, parser_meta)
+        logger.info(f"local: indexed {relpath} ({len(chunks)} chunks, ext={ext}).")
+        return chunks, {**parser_meta, "content_hash": content_hash}
+
+    async def local_ingest(self, relpath: str = ".", force_refresh: bool = False) -> list[dict[str, Any]]:
+        """Index every supported local file under `relpath` of local_dir."""
+        try:
+            files = self._local_files(relpath)
+        except RuntimeError as e:
+            return [{"text": str(e), "metadata": {"error": str(e)}}]
+        results: list[dict[str, Any]] = []
+        for rel in files:
+            chunks, meta = await self._process_local(rel, force_refresh)
+            if meta.get("cached") or meta.get("junk"):
+                continue
+            if meta.get("error"):
+                results.append({"text": str(meta["error"]), "metadata": meta})
+            else:
+                results.extend(c.to_dict() for c in chunks)
+        return results
+
+    def scan_local(self, relpath: str = ".") -> list[dict[str, Any]]:
+        """Read-only listing of supported files under `relpath` of local_dir."""
+        root = self._local_dir_root()
+        try:
+            files = self._local_files(relpath)
+        except RuntimeError as e:
+            return [{"error": str(e)}]
+        entries: list[dict[str, Any]] = []
+        for rel in files:
+            try:
+                st = os.stat(os.path.join(root, rel))
+            except OSError:
+                continue
+            entries.append({
+                "path": rel,
+                "bytes": st.st_size,
+                "modified": st.st_mtime,
+            })
+        return entries
 
     @property
     def artifacts_dir(self) -> str:
@@ -3878,6 +4090,84 @@ class HoardCore:
                 kept_sources.add(src)
         return result
 
+    def _search_across_vaults(self, query: str, limit: int = 20,
+                             domain: str | None = None,
+                             hybrid: bool | None = None,
+                             max_per_source: int = 0) -> list[Chunk]:
+        """Cross-vault hybrid recall over every named vault.
+
+        Each vault's own `search_vault` already returns an RRF-fused ranking;
+        those rankings are fused again via Reciprocal Rank Fusion so every vault
+        contributes `1 / (k + rank + 1)`. Exact-duplicate text appearing in more
+        than one vault is deduped (first vault wins) while its scores accumulate,
+        confidence bands are recomputed set-relative over the fused set, and
+        `max_per_source` is enforced globally (the top-ranked hit is always
+        admitted). Every chunk is stamped with the vault that sourced it so
+        provenance can be traced per `[V#N]`. A single-vault run short-circuits
+        to the original `search_vault` path unchanged."""
+        if len(self.vaults) <= 1:
+            return self.vault.search_vault(query, limit, domain=domain,
+                                           hybrid=hybrid, max_per_source=max_per_source)
+        pool = max(limit, int(self.config.get('indexer.search_limit', 20)))
+        k = 60  # RRF constant (matches _search_hybrid)
+        score: dict[str, float] = {}
+        results: dict[str, Chunk] = {}
+        for vault in self.vaults:
+            per = vault.search_vault(query, limit=pool, domain=domain,
+                                     hybrid=hybrid, max_per_source=0)
+            for rank, c in enumerate(per):
+                text_norm = normalize_claim(c.text)
+                if not text_norm:
+                    continue
+                key = hashlib.blake2b(text_norm.encode("utf-8"),
+                                      digest_size=16).hexdigest()
+                score[key] = score.get(key, 0.0) + 1.0 / (k + rank + 1)
+                if key not in results:
+                    c.metadata.setdefault("vault", vault.vault_name or "(default)")
+                    results[key] = c
+
+        keys = sorted(score, key=score.get, reverse=True)
+        if max_per_source > 0:
+            selected: list[str] = []
+            per_src: dict[str, int] = {}
+            for key in keys:
+                if len(selected) >= limit:
+                    break
+                src = results[key].metadata.get('source_url') or '?'
+                if per_src.get(src, 0) >= max_per_source:
+                    continue
+                per_src[src] = per_src.get(src, 0) + 1
+                selected.append(key)
+            keys = selected[:limit]
+        else:
+            keys = keys[:limit]
+
+        chunks = []
+        for key in keys:
+            c = results[key]
+            c.metadata['hybrid_score'] = score[key]
+            c.metadata['retrieval'] = 'cross_vault'
+            chunks.append(c)
+
+        # Set-relative confidence bands over the fused set (mirrors the
+        # relative mode of _search_hybrid: top ~20% can be high, bottom ~half
+        # hugging the coincidence floor is low, the middle stays medium).
+        n = len(chunks)
+        if n:
+            top, tail = score[keys[0]], score[keys[-1]]
+            spread = max(top - tail, 1e-9)
+            n_high = max(1, (n * 2) // 10 + (1 if n % 10 >= 5 else 0))
+            n_low = max(1, n // 2)
+            for idx, key in enumerate(keys):
+                rel = (score[key] - tail) / spread
+                conf = "medium"
+                if rel >= 0.66 and idx < n_high:
+                    conf = "high"
+                elif rel <= 0.10 and idx >= n_low:
+                    conf = "low"
+                results[key].metadata['confidence'] = conf
+        return chunks
+
     async def research(self, question: str, out_path: str | None = None,
                        discover: int = 5, recall: int = 6,
                        strategy: str | None = None,
@@ -3911,8 +4201,9 @@ class HoardCore:
         # max_per_source keeps recall source-diverse (DeepResearch wants breadth,
         # not one rich page crowding out the rest); 0 disables it.
         max_per_source = int(self.config.get('research.max_per_source', 2) or 0)
-        raw_memory: list[Chunk] = self.vault.search_vault(
-            question, limit=recall, hybrid=True, max_per_source=max_per_source)
+        raw_memory: list[Chunk] = self._search_across_vaults(
+            question, limit=recall, domain=None, hybrid=True,
+            max_per_source=max_per_source)
         memory_chunks = (raw_memory if keep_low
                          else self._drop_low_confidence(raw_memory))
         answered = (answer_first and memory_chunks and any(
@@ -3937,8 +4228,9 @@ class HoardCore:
                 await self._discover_and_ingest(question, discover, strategy, force_refresh=False)
 
             print(f"\n[2/RECALL] hybrid-retrieving top {recall} chunks", flush=True)
-            raw_chunks = self.vault.search_vault(question, limit=recall, hybrid=True,
-                                                  max_per_source=max_per_source)
+            raw_chunks = self._search_across_vaults(
+                question, limit=recall, domain=None, hybrid=True,
+                max_per_source=max_per_source)
             chunks = raw_chunks if keep_low else self._drop_low_confidence(raw_chunks)
             # Track how many low-confidence hits filter_low actually removed, so
             # the grounding file explains the count honestly (chunks retained
@@ -3975,7 +4267,9 @@ class HoardCore:
                 score_s = f"{score:.4f}" if score is not None else "n/a"
                 cid = c.metadata.get("chunk_id")
                 cid_s = f" | chunk {cid}" if cid is not None else ""
-                f.write(f"### [{i}] {src}  (score {score_s} | {c.metadata.get('confidence', 'n/a')}{cid_s})\n")
+                vault = c.metadata.get("vault", "")
+                vault_s = f" | vault {vault}" if vault else ""
+                f.write(f"### [{i}] {src}  (score {score_s} | {c.metadata.get('confidence', 'n/a')}{cid_s}{vault_s})\n")
                 f.write(f"{c.text}\n\n")
             f.write(f"## Run budget\n- `--discover` {discover if discover is not None else '(config)'} | `--recall` {recall}\n\n")
             f.write(f"## Distinct sources in recall: {len(seen)}\n")
@@ -3992,7 +4286,7 @@ class HoardCore:
         return abs_path
 
     def verify_claim(self, claim: str) -> str:
-        """Programmatic adversarial-audit: confirm a claim against the vault.
+        """Programmatic adversarial-audit: confirm a claim against the vault(s).
 
         Checks the raw stored chunk text for the claim and reports whether it is
         supported. Returns one of:
@@ -4001,6 +4295,11 @@ class HoardCore:
           "partial"    - the vault has strong FTS5 keyword support for the
                          claim, but no verbatim match.
           "unverified" - no vault support for the claim.
+
+        With multiple vaults selected (`--vault a,b`), the verdict folds across
+        them: VERIFIED if ANY vault verifies, else PARTIAL if any is partial,
+        else UNVERIFIED — so a claim grounded in a companion vault audits clean
+        (the RF-Tech cross-vault pain point).
 
         This makes the [V] honor-system tag machine-checkable: the caller can
         refuse to tag [V] unless this returns "verified".
@@ -4012,18 +4311,21 @@ class HoardCore:
         """
         if not claim or not claim.strip():
             return "unverified"
+        best = "unverified"
+        for vault in self.vaults:
+            result = self._verify_against_vault(vault, claim)
+            if result == "verified":
+                return "verified"
+            if result == "partial":
+                best = "partial"
+        return best
 
-        # 1) Verbatim check against ALL stored chunk text (ground truth),
-        #    not just the top retrieval hits. Normalize on BOTH sides: stored
-        #    chunks may split a phrase across line breaks (e.g. "is \ndefined")
-        #    or use typographic dashes/quotes, so a raw LIKE against the raw
-        #    needle would miss verbatim text. Use the LIKE only as a cheap
-        #    candidate pre-filter — with whitespace *and* typographic variants
-        #    widened to % so newlines/dashes/quotes pass — and confirm the
-        #    exact `normalize_claim`'d needle in Python.
+    def _verify_against_vault(self, vault: VaultManager, claim: str) -> str:
+        """Verify a claim against a single VaultManager (the shared per-vault
+        logic behind `verify_claim`'s cross-vault fold)."""
         needle = normalize_claim(claim)
         candidates: list[str] = []
-        with self.vault._db() as (_conn, cursor):
+        with vault._db() as (_conn, cursor):
             # Slide a 60-char window across the needle so a claim whose
             # *distinctive* portion is not its first 60 chars still matches
             # verbatim (A1). Every windowed fragment is tested; the first hit
@@ -4065,9 +4367,9 @@ class HoardCore:
         #     -2.0 is unreachable at small scale and trivially passed at
         #     scale. The margin below is relative to the single-term floor,
         #     so a fixed ratio of separation is always required.
-        fts = self.vault._fts_query(claim)
+        fts = vault._fts_query(claim)
         if fts:
-            with self.vault._db() as (_conn, cursor):
+            with vault._db() as (_conn, cursor):
                 cursor.execute(
                     "SELECT rank FROM chunks_fts WHERE chunks_fts MATCH ? "
                     "ORDER BY rank LIMIT 1",
@@ -4106,19 +4408,47 @@ class HoardCore:
         `verify` is exact-phrasing by design: on PARTIAL/UNVERIFIED the caller
         is expected to re-express the claim in the source's own words. This
         returns a ready-to-print hint showing the closest stored phrase (best
-        fuzzy overlap versus the normalized claim) plus a reformulation nudge,
-        so the denial reads as an instruction instead of a dead-end. None when
-        the vault has nothing remotely similar.
+        fuzzy overlap versus the normalized claim, across every selected vault)
+        plus a reformulation nudge, so the denial reads as an instruction
+        instead of a dead-end. None when no vault has anything remotely similar.
         """
         if not claim or not claim.strip():
             return None
         needle = normalize_claim(claim)
         if not needle:
             return None
-        fts = self.vault._fts_query(claim)
+        best: tuple[float, str] | None = None  # (ratio, phrase)
+        for vault in self.vaults:
+            candidate = self._verify_hint_against(vault, claim, needle, recall)
+            if candidate is not None and (best is None or candidate[0] > best[0]):
+                best = candidate
+        if best is None:
+            return None
+        ratio, phrase = best
+        # Trim the normalized phrase to a tight window around the fuzzy match.
+        m = SequenceMatcher(None, needle, phrase).find_longest_match(
+            0, len(needle), 0, len(phrase))
+        lo_full = max(0, m.b - 40)
+        hi_full = min(len(phrase), m.b + m.size + 40)
+        window = phrase[lo_full:hi_full]
+        shown = (("…" if lo_full > 0 else "") + window +
+                 ("…" if hi_full < len(phrase) else ""))
+        matched = window[m.b - lo_full:m.b - lo_full + m.size] if m.size else ""
+        return (
+            f"  nearest vault phrase (overlap {ratio:.0%}):\n"
+            f"    “{shown}”\n"
+            f"  — reword your claim to match the source text exactly"
+            + (f" (the vault writes {matched!r} here)" if matched and matched not in needle else "")
+            + "\n  — then re-run this verify."
+        )
+
+    def _verify_hint_against(self, vault: VaultManager, claim: str,
+                             needle: str, recall: int) -> tuple[float, str] | None:
+        """Best (overlap_ratio, normalized_phrase) in a single VaultManager."""
+        fts = vault._fts_query(claim)
         top: list[str] = []
         if fts:
-            with self.vault._db() as (_conn, cursor):
+            with vault._db() as (_conn, cursor):
                 cursor.execute(
                     "SELECT text FROM chunks_fts WHERE chunks_fts MATCH ? "
                     "ORDER BY rank LIMIT ?",
@@ -4141,25 +4471,7 @@ class HoardCore:
                 continue
             phrase = normalize_claim(raw)
             best = (ratio, phrase) if best is None or ratio > best[0] else best
-        if best is None:
-            return None
-        ratio, phrase = best
-        # Trim the normalized phrase to a tight window around the fuzzy match.
-        m = SequenceMatcher(None, needle, phrase).find_longest_match(
-            0, len(needle), 0, len(phrase))
-        lo_full = max(0, m.b - 40)
-        hi_full = min(len(phrase), m.b + m.size + 40)
-        window = phrase[lo_full:hi_full]
-        shown = (("…" if lo_full > 0 else "") + window +
-                 ("…" if hi_full < len(phrase) else ""))
-        matched = window[m.b - lo_full:m.b - lo_full + m.size] if m.size else ""
-        return (
-            f"  nearest vault phrase (overlap {ratio:.0%}):\n"
-            f"    “{shown}”\n"
-            f"  — reword your claim to match the source text exactly"
-            + (f" (the vault writes {matched!r} here)" if matched and matched not in needle else "")
-            + "\n  — then re-run this verify."
-        )
+        return best
 
     def audit_artifact(self, path: str) -> dict[str, Any]:
         """Audit a synthesis artifact's `[V#N]` citation chain against the vault.
@@ -4270,7 +4582,10 @@ class HoardCore:
         if not unmapped:
             for n in used_n:
                 url = source_block[n]
-                if not self.vault.get_chunks_for_url(url):
+                # INGESTED is read across every selected vault: with
+                # `--vault a,b` a source living in a companion vault counts as
+                # ingested (the profile-spans-two-vaults case).
+                if not any(v.get_chunks_for_url(url) for v in self.vaults):
                     not_ingested.append((n, url))
 
         counts = {"verified": 0, "partial": 0, "unverified": 0}
@@ -4646,7 +4961,8 @@ class HoardCore:
                 hybrid = False
             elif mode == 'hybrid':
                 hybrid = True
-            chunks = self.vault.search_vault(query, limit, domain=domain, hybrid=hybrid)
+            chunks = self._search_across_vaults(query, limit, domain=domain,
+                                                hybrid=hybrid)
             self.bus.emit("search.completed", query=query,
                           n_results=len(chunks), domain=domain)
             return [c.to_dict() for c in chunks]
@@ -4805,6 +5121,9 @@ _EXAMPLES = (
     "  python hoardcore.py _ --action research --query 'sleep research' --vault sleep\n"
     "  python hoardcore.py _ --action verify --claim 'the Epoch doubling time is 6 months'\n"
     "  python hoardcore.py _ --action verify --claim '500-2000 stars' --hint  # nearest-vault coaching\n"
+    "  python hoardcore.py _ --action local --path docs/        # ingest local_inputs/docs/\n"
+    "  python hoardcore.py _ --action local --list              # read-only scan of local_inputs/\n"
+    "  python hoardcore.py _ --action research --vault career,negros_ai_jobs  # cross-vault read\n"
     "  python hoardcore.py _ --action check   # verify vault integrity\n"
     "  python hoardcore.py _ --action stats   # sources/chunks/vectors summary\n"
 )
@@ -4830,7 +5149,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--action", choices=["scrape", "crawl", "search", "ingest",
                              "discover", "research", "verify", "check", "stats",
-                             "audit"],
+                             "audit", "local"],
         default="scrape", help="Action to run (default: scrape).",
     )
     parser.add_argument(
@@ -4860,6 +5179,13 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Artifact output path for research.")
     parser.add_argument("--force", action="store_true",
                         help="Bypass the cache and re-fetch.")
+    parser.add_argument("--path", default=None, dest="local_path",
+                        help="With --action local: relative path (file or "
+                             "directory) inside storage.local_dir to process; "
+                             "defaults to the whole local_dir.")
+    parser.add_argument("--list", action="store_true", dest="list_only",
+                        help="With --action local: list supported files under "
+                             "--path without ingesting them.")
     parser.add_argument("--urls", default=None,
                         help="Comma/space-separated URL list for scrape/crawl/ingest.")
     parser.add_argument("--limit", type=int, default=0,
@@ -4940,7 +5266,11 @@ async def _main_impl(argv: list[str] | None = None) -> None:
     migrate_page_size = args.migrate
     mode = args.mode
 
-    scraper = HoardCore(vault_name=vault_name)
+    # --vault accepts a comma/space list ("career,negros_ai_jobs"); the first
+    # name is the primary (write) vault and the rest are read-only companions.
+    vault_names = ([n for n in re.split(r"[,\s]+", vault_name) if n]
+                   if vault_name else None)
+    scraper = HoardCore(vault_names or None)
     # --parallel overrides config indexer.parallel for this run only (in-memory,
     # never written to hoardcore.toml). Read after engine construction so the
     # per-run override is authoritative.
@@ -4950,7 +5280,16 @@ async def _main_impl(argv: list[str] | None = None) -> None:
     organized = scraper.organize_artifacts_by_day()
     if organized:
         print(f"   📂 Organized {len(organized)} artifact(s) into day folders")
-    print(f"   📁 Vault: {scraper.vault.root_dir}/vault.db | 🏛 Artifacts: {scraper.artifacts_dir}/")
+    vaults = getattr(scraper, 'vaults', None) or [scraper.vault]
+    vault_label = ", ".join(getattr(v, 'vault_name', None) or '(default)' for v in vaults)
+    print(f"   📁 Vault: {scraper.vault.root_dir}/vault.db"
+          + (f" + {len(vaults) - 1} read-only companion(s) [{vault_label}]"
+             if len(vaults) > 1 else "")
+          + f" | 🏛 Artifacts: {scraper.artifacts_dir}/")
+    if len(vaults) > 1:
+        print(f"   ⚠️  Cross-vault recall pools {len(vaults)} vault(s) [{vault_label}] — "
+              "only combine one coherent context; drop off-topic hits at recall "
+              "(each chunk is tagged | vault <name>).")
 
     if action == "research":
         if not query:
@@ -5057,6 +5396,27 @@ async def _main_impl(argv: list[str] | None = None) -> None:
         sys.exit(2 if (c["unverified"] or bad_map)
                  else (1 if c["partial"] else (0 if total else 0)))
 
+    if action == "local":
+        local_dir = scraper.config.get('storage.local_dir', 'local_inputs')
+        relpath = args.local_path or "."
+        if args.list_only:
+            print(f"=== Local scan: {local_dir}/ ({relpath}) ===")
+            entries = scraper.scan_local(relpath)
+            errors = [e for e in entries if "error" in e]
+            if errors:
+                for e in errors:
+                    print(f"  ⚠️  {e['error']}", file=sys.stderr)
+                sys.exit(2)
+            if not entries:
+                print(f"  (no supported files under {relpath!r})")
+            for e in entries:
+                print(f"  {e['path']}  ({e['bytes']} B)")
+            sys.exit(0)
+        print(f"=== Local ingest: {local_dir}/ ({relpath}) ===")
+        results = await scraper.local_ingest(relpath, force_refresh=args.force)
+        print(f"✅ Done. Ingested {len(results)} chunks from local files.")
+        sys.exit(0 if results else 1)
+
     if action == "check":
         if migrate_page_size:
             migrated = scraper.vault.migrate_page_size()
@@ -5065,24 +5425,27 @@ async def _main_impl(argv: list[str] | None = None) -> None:
         sys.exit(0 if ok else 1)
 
     if action == "stats":
-        st = scraper.vault.stats()
-        print(f"  Vault:      {st['vault'] or '(default)'}")
-        print(f"  Sources:    {st['sources']} distinct URLs")
-        print(f"  Versions:   {st['doc_versions']} document rows")
-        print(f"  Chunks:     {st['chunks']}")
-        print(f"  Vectors:    {st['vectors']}")
-        print(f"  Embedding:  {st['mode']}, dim {st['dim']}")
-        print(f"  Conf mode:  {st['conf_mode']}")
-        print(f"  Schema:     v{st['schema_version']} | page {st['page_size']} B")
-        mb = st['db_bytes'] / (1024 * 1024)
-        print(f"  DB size:    {mb:.1f} MiB")
-        try:
-            dist = scraper.vault.confidence_distribution()
-            if any(dist.values()):
-                print(f"  Conf probe: high {dist['high']} | medium {dist['medium']} | low {dist['low']} "
-                      "(sampled, set-relative)")
-        except Exception as e:
-            logger.debug(f"confidence probe skipped: {e}")
+        for vault in scraper.vaults:
+            if len(scraper.vaults) > 1:
+                print(f"\n  === {vault.vault_name or '(default)'} ===")
+            st = vault.stats()
+            print(f"  Vault:      {st['vault'] or '(default)'}")
+            print(f"  Sources:    {st['sources']} distinct URLs")
+            print(f"  Versions:   {st['doc_versions']} document rows")
+            print(f"  Chunks:     {st['chunks']}")
+            print(f"  Vectors:    {st['vectors']}")
+            print(f"  Embedding:  {st['mode']}, dim {st['dim']}")
+            print(f"  Conf mode:  {st['conf_mode']}")
+            print(f"  Schema:     v{st['schema_version']} | page {st['page_size']} B")
+            mb = st['db_bytes'] / (1024 * 1024)
+            print(f"  DB size:    {mb:.1f} MiB")
+            try:
+                dist = vault.confidence_distribution()
+                if any(dist.values()):
+                    print(f"  Conf probe: high {dist['high']} | medium {dist['medium']} | low {dist['low']} "
+                          "(sampled, set-relative)")
+            except Exception as e:
+                logger.debug(f"confidence probe skipped: {e}")
         sys.exit(0)
 
     try:

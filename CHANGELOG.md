@@ -3,6 +3,69 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.14.0
+
+### Added
+- **Cross-vault read (`--vault a,b,c`).** `--vault` accepts a comma/space list
+  of vault names: the first is the write-primary (`self.vault`), the rest are
+  read-only companions. `search` (via a new `_search_across_vaults`) fuses the
+  per-vault hybrid rankings with RRF (k=60), dedupes exact-duplicate chunk text
+  (blake2b over the normalized text, first vault wins while scores accumulate),
+  recomputes confidence bands set-relative over the fused set, enforces
+  `max_per_source` globally, and stamps every chunk with the vault that sourced
+  it (`meta['vault']`, surfaced as a `| vault <name>` column in research
+  grounding). A single vault name short-circuits to the original
+  `search_vault` path unchanged, so single-vault behavior is byte-identical.
+  `verify` folds across vaults (VERIFIED if any vault holds it verbatim,
+  PARTIAL if any is partial, else UNVERIFIED), `verify --hint` shows the best
+  phrase from any vault, and `audit`'s INGESTED link passes when the cited URL
+  has chunks in **any** named vault (so RF-Tech tags split across
+  `rftech_career`/`negros_ai_jobs` audit cleanly). `stats` prints a block per
+  named vault.
+- **Local directory ingestion (`--action local`).** Reads ONLY from
+  `storage.local_dir` (default `local_inputs/`, git-ignored); any path
+  resolving outside is refused (traversal guard mirroring `write_artifact`).
+  No network, no SSRF, no HTTP cache-TTL: freshness is content-based — a file
+  whose extracted content is unchanged since the last ingest is skipped unless
+  `--force` (the content hash is a blake2b over the joined chunk texts, the
+  same basis the rest of the pipeline stores). Supported types:
+  `.pdf .docx .epub .html .htm .txt .md` (recursive whole-dir
+  or `--path <file|dir>`). Chunks are stamped with a synthetic provenance URL
+  `local://local/<relpath>` (host fixed `local`). Markdown/plain text is
+  ingested as-authored; HTML goes through the boilerplate/junk filter.
+  `--list` is a read-only scan (path, size, mtime) without ingesting.
+  `VaultManager.latest_content_hash()` powers the skip-if-unchanged check.
+
+### Docs
+- **`skill.md`** gained the `local` action (with `--list`/`--path`/`--force`),
+  the cross-vault `--vault a,b,c` semantics for search/verify/audit/stats, the
+  "recall several past topics at once" workflow, and the `--discover 0`
+  recall-only pattern after a local ingest. `README.md` action/flag tables and
+  `[storage]` config docs list `local` and `local_dir`, and `--vault` documents
+  the companion-vault read. `AGENTS.md` repo map notes the local input dir.
+
+### Changed
+- **Cross-vault pollution guard.** Because `--vault a,b,c` pools recall across
+  every named vault (a context-mixing feature by design), the CLI now prints a
+  one-line warning whenever multiple vaults are named — "only combine one
+  coherent context; drop off-topic hits at recall" — and `skill.md` documents
+  the same discipline. Mixing stays opt-in (single vault is untouched),
+  relevance-gated (an unrelated companion only surfaces its own top
+  query-relevant chunks), and transparent (every chunk is tagged
+  `| vault <name>`).
+
+### Tests
+- `tests/test_multivault.py` (new, 10): primary+companion construction, comma
+  list, cross-vault fusion + dedup + vault stamping, single-name short-circuit
+  and backward compat, verify/hint folds, audit INGESTED across vaults, and
+  the search action routing through fusion.
+- `tests/test_local.py` (new, 9): txt/md/html/docx/pdf/epub ingest under
+  `local://local/` URLs, content-hash skip→re-index, `--force`, path-traversal
+  refusal, unsupported-extension handling, and the `--list` scan.
+- Existing verify tests construct HoardCore via `__new__`; they now set the
+  `vaults` invariant (`hc_obj.vaults = [vault]`), and a search fake accepts the
+  real `max_per_source` parameter. Suite: 192 passed.
+
 ## HoardCore v0.12.5
 
 ### Docs

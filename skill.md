@@ -99,7 +99,8 @@ Each `[V#N]` is attributed to the double-quoted passage ending nearest before it
 2. **Crawl** — ingest a whole site via sitemap.
 3. **Search** — query the local vault.
 4. **Discover** — live web-search (DuckDuckGo/Mojeek) + ingest top results.
-5. **Emit** — write deliverables into `artifacts/`.
+5. **Local** — ingest local files from `storage.local_dir` (no network).
+6. **Emit** — write deliverables into `artifacts/`.
 
 ## Hybrid Discovery — HoardCore + your harness's web tools
 
@@ -124,26 +125,29 @@ HoardCore's own DISCOVER (DuckDuckGo/Mojeek through the resilient fetch chain) i
 - "read/summarize/analyze" a website, PDF, or doc
 - build a local knowledge base from a site
 - find info in previously-ingested documents
+- ingest files the user drops into `local_inputs/` (`--action local`)
 - paywall/Cloudflare-blocked sources (resilient fetch chain)
 
 ## Available Actions
 
-Common: `url` positional = `_` for vault-only actions; `--vault NAME` scopes to `hoardcore_data/NAME/` (always use a dedicated vault per topic). `--strategy fast|balanced|aggressive` (default aggressive). CLI prefix: `venv/bin/python hoardcore.py _ --action <action> ...`
+Common: `url` positional = `_` for vault-only actions; `--vault NAME` scopes to `hoardcore_data/NAME/` (always use a dedicated vault per topic). **Cross-vault read:** `--vault a,b,c` (comma/space list) sets vault `a` as the write-primary and adds `b,c` as read-only companions — search/verify/audit/hint/hybrid-recall fuse across all of them, new ingest/discover only touches `a`; a single name or none behaves exactly as before (byte-identical single-vault path). **Pollution guard (read before pooling vaults):** cross-vault is a *context-mixing* feature by design — it pools every vault you name. Only combine vaults that share one coherent topic; never pool vaults with different contexts. An unrelated companion contributes little (recall is relevance-gated, so only its own top query-relevant chunks rise), and every recalled chunk is stamped `| vault <name>` so you can see provenance and drop off-topic hits at RECALL — but if you name a broad unrelated set, you are choosing to mix it. `--strategy fast|balanced|aggressive` (default aggressive). CLI prefix: `venv/bin/python hoardcore.py _ --action <action> ...`
 
 | Action | Purpose | Key flags |
 |---|---|---|
 | `scrape` | fetch+index one URL (or `--urls` batch) | `--urls`, `--strategy`, `--force` |
 | `crawl` | ingest whole site (or `--urls` batch) | `--urls`, `--strategy`, `--force` |
-| `search` | query vault | `--query`, `--mode fast\|hybrid`, `--limit` |
+| `search` | query vault (across every named vault) | `--query`, `--mode fast\|hybrid`, `--limit`, `--vault` |
 | `verify` | machine-check a claim (or a claim list) | `--claim`/`--claim-file`/`--claim-list`, `--hint`, `--recall` |
-| `ingest` | index explicit URLs | `--urls` |
-| `discover` | web-search + ingest | `--query`, `--limit` |
+| `ingest` | index explicit URLs (primary vault only) | `--urls` |
+| `discover` | web-search + ingest (primary vault only) | `--query`, `--limit` |
 | `research` | full loop in one cmd | `--query`, `--discover`, `--recall`, `--out`, `--vault`, `--no-answer-first`, `--keep-low` |
 | `check` | 3-phase vault integrity | `--migrate` (rebuild at 16 KB pages) |
-| `stats` | vault summary + confidence probe | `--vault` |
+| `stats` | vault summary + confidence probe (per named vault) | `--vault` |
 | `audit` | audit an artifact's `[V#N]` chain | `--artifact PATH` |
+| `local` | index local files from `storage.local_dir` | `--path`, `--list`, `--force` |
 
 ### verify — the programmatic audit
+- **Cross-vault fold**: with `--vault a,b,c` a claim is VERIFIED if ANY named vault holds it verbatim (PARTIAL if any vault is partial, else UNVERIFIED), and `--hint` shows the nearest phrase from the best-matching vault — so a fact vaulted only in a companion still verifies, and the recall covers every named vault.
 - **Exact phrasing, typography-blind**: folds en/em dashes, smart quotes, NBSP, full-width — but enforces token identity, word order, and `%`≠"percent". `PARTIAL`/`UNVERIFIED` = reword to source words; `--hint` prints nearest phrase.
 - **Exit codes (CI-wireable)**: `0` VERIFIED (verbatim, sliding 60-char window), `1` PARTIAL (top all-term FTS5 hit beats the corpus-scaled coincidence floor, but no verbatim), `2` UNVERIFIED. Refuse `[V]` unless `0`. **Never pipe `verify` through `tail`/`head`** — the shell then reports the pipe's exit, not the gate's; the observed claim-list `| tail` showed a false `0` over a real `2` (masked verdict).
 - Currency: escape `\$` in shells or use `--claim-file`.
@@ -161,7 +165,7 @@ venv/bin/python hoardcore.py _ --action verify --claim-list artifacts/2026-08-18
 
 1. **VERBATIM** — the claim verifies against the vault (`--action verify` semantics). A bare `[V]` (no `#N`) is verified but not mapping-checked.
 2. **MAPPED** — `N` appears in the artifact's Source Links / Citations block as `[#N] <url>`.
-3. **INGESTED** — the cited URL has chunks in the vault.
+3. **INGESTED** — the cited URL has chunks in **any** named vault (with `--vault a,b,c`, a source vaulted only in a companion still passes; `--vault` scopes which set is searched).
 
 Strictness: only the longest inline double-quoted passage (≥24 normalized chars) passes as a claim; paraphrased prose is `UNVERIFIED`. Repeated `[V#N]` of the same claim+source tag count once. Exit codes mirror `verify` (`0` verified / `1` partial / `2` unverified), plus `2` on any unmapped/not-ingested link. **Never pipe through `tail`/`head`** — the shell reports the pipe's exit, not the gate's. For each failing claim, the audit prints the nearest vault phrase under it (the same coaching `verify --hint` gives) so you can reword to the source's exact words without hunting.
 
@@ -172,11 +176,35 @@ Strictness: only the longest inline double-quoted passage (≥24 normalized char
 - `--no-answer-first`: force fresh DISCOVER even if vault has a high-confidence answer.
 - `filter_low` (config, default true): at EMIT drops duplicate `low` hits but keeps one `low` chunk per distinct source (all low → keep all); `--keep-low` retains them all. Grounding notes drops transparently.
 - `max_per_source` (config `research.max_per_source`, default 2): caps recall chunks per source URL so one rich page can't crowd out every other source — recall is source-diverse by default (helps hit the distinct-source quota); set `0` for single-source depth.
+- **Cross-vault recall**: with `--vault a,b,c`, RECALL and answer-first memory read across *every* named vault, but live DISCOVER/ingest only writes into the primary `a`. The grounding file tags each recalled chunk `| vault <name>` so you can trace which vault grounded a `[V]`.
 - **Distinct-URL ≠ independent source**: syndicated reprints (e.g. an aggregator mirroring a news wire piece) inflate the distinct-source count. Check for verbatim-duplicate chunks across URLs before treating two sources as corroboration; the vault stores both, so a reprint is still valid `[V]` grounding — just don't count it twice for independence.
 
 ```
 venv/bin/python hoardcore.py _ --action research \
   --query "<question>" --discover 6 --recall 8 --vault sleep
+```
+
+### local — ingest local files (no network)
+
+Reads ONLY from `storage.local_dir` (default `local_inputs/`, git-ignored). Any
+path resolving outside that directory is refused (mirrors `write_artifact`'s
+traversal guard). No SSRF, no HTTP cache-TTL — freshness is **content-based**:
+a file whose extracted content is unchanged since the last ingest is skipped
+unless `--force`. Supported: `.pdf .docx .epub .html .htm .txt .md`
+(recursive). Chunks are stamped as `local://local/<relpath>` so
+`documents.domain` is always `local`. Markdown/plain text is ingested
+as-authored (a short note is still evidence); HTML goes through the
+boilerplate/junk filter. After a local ingest, use `--action research
+--discover 0` to recall-only over the newly vaulted docs (verify/audit work on
+them like any source). To cite a local file in an artifact, use its synthetic
+`local://local/<relpath>` URL in the Source Links block — that is the
+`source_url` the audit's MAPPED/INGESTED checks resolve against, not the
+filesystem path.
+
+```
+venv/bin/python hoardcore.py _ --action local --list              # read-only scan
+venv/bin/python hoardcore.py _ --action local --path docs/        # ingest local_inputs/docs/
+venv/bin/python hoardcore.py _ --action local --force             # re-index even if unchanged
 ```
 
 ### check — integrity
@@ -190,7 +218,7 @@ Sources, doc versions, chunks, vectors, embedding dim/mode, schema version, page
 2. Docs site → `crawl` (may take minutes).
 3. Follow-up question → `search` (instant, no network).
 4. Blocked site → `--strategy aggressive` or set `cookie_string` in `hoardcore.toml`.
-5. Open-ended question → `research` (the loop). **Per-topic isolation**: use a dedicated `--vault NAME` per topic so recall isn't cross-polluted ("fetch poison"); repeat `--vault NAME` to recall a past topic.
+5. Open-ended question → `research` (the loop). **Per-topic isolation**: use a dedicated `--vault NAME` per topic so recall isn't cross-polluted ("fetch poison"); repeat `--vault NAME` to recall a past topic. To recall several past topics at once, name them together (`--vault a,b,c`) — the primary gets new ingest, the rest are read-only, and grounding/recall show which vault each chunk came from.
 6. Research deliverable → write into `artifacts/` with `[V]/[E]/[H]` on every quantitative claim.
 7. Integrity → `--action check` (and `--migrate` once on legacy vaults).
 8. Audit discipline → before finalizing, re-verify each quantitative claim against the vault; unverifiable → `[E]` or remove.
