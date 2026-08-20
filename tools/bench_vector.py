@@ -81,6 +81,9 @@ def main() -> None:
     ap.add_argument("--queries", type=int, default=5)
     ap.add_argument("--page-sizes", type=int, nargs="+", default=[4096, 16384])
     ap.add_argument("--csv", type=str, default="", help="append results to this CSV")
+    ap.add_argument("--max-ms", type=float, default=0.0,
+                    help="exit 1 if any float32/16KB ms-per-query exceeds this "
+                         "(0 disables; a CI regression gate)")
     args = ap.parse_args()
 
     print(f"# HoardCore vector benchmark — {args.vectors} vectors, dim={args.dim}, "
@@ -123,6 +126,14 @@ def main() -> None:
             for fmt, page, ms, qps, n, mb in rows:
                 f.write(f"{fmt},{page},{ms:.3f},{qps:.1f},{n},{mb:.3f}\n")
         print(f"\nAppended to {args.csv}")
+
+    if args.max_ms > 0:
+        worst = max(r[2] for r in rows)
+        if worst > args.max_ms:
+            print(f"\nBENCH FAIL: worst {worst:.2f}ms/query exceeds --max-ms {args.max_ms:.2f}",
+                  file=sys.stderr)
+            raise SystemExit(1)
+        print(f"\nbench OK: worst {worst:.2f}ms/query within --max-ms {args.max_ms:.2f}")
 
 
 if __name__ == "__main__":

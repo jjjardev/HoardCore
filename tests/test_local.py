@@ -187,3 +187,41 @@ def test_docx_pdf_epub_ingest(tmp_path, monkeypatch):
     assert scraper.vault.search_vault("pineapple", hybrid=False)
     assert scraper.vault.search_vault("mango", hybrid=False)
     assert scraper.vault.search_vault("coconut", hybrid=False)
+
+
+def test_corrupt_docx_degrades_gracefully(tmp_path, monkeypatch):
+    """A file that fails to parse must not crash: it is either surfaced as an
+    error or ingested as an empty-extraction placeholder — never an exception."""
+    hc.DocumentParser._import_binary_parsers()
+    if not hc.DOCX_AVAILABLE:
+        pytest.skip("python-docx not installed")
+    scraper, inputs = _scraper(tmp_path, monkeypatch)
+    _write(inputs, "bad.docx", b"this is definitely not a real docx container")
+    results = asyncio.run(scraper.local_ingest("bad.docx"))
+    assert isinstance(results, list)  # completed without raising
+
+
+def test_local_parse_exception_surfaces_error(tmp_path, monkeypatch):
+    """A parser that raises must be caught and surfaced as LOCAL_PARSE_FAILED
+    (the defensive branch of _process_local)."""
+    scraper, inputs = _scraper(tmp_path, monkeypatch)
+    _write(inputs, "boom.pdf", b"%PDF-1.4\nboom")
+
+    async def _explode(data):
+        raise RuntimeError("injected parse failure")
+
+    monkeypatch.setattr(hc.DocumentParser, "parse_pdf", staticmethod(_explode))
+    chunks, meta = asyncio.run(scraper._process_local("boom.pdf"))
+    assert chunks == []
+    assert meta["error"].startswith("LOCAL_PARSE_FAILED")
+
+
+def test_junk_html_skipped(tmp_path, monkeypatch):
+    """A boilerplate wall (sign-in prompt) must be skipped as junk, not vaulted."""
+    scraper, inputs = _scraper(tmp_path, monkeypatch)
+    _write(inputs, "wall.html",
+           "<html><body><p>Please sign in to continue viewing this page</p>"
+           "<p>Log in to see the full article</p></body></html>",
+           mode="w")
+    results = asyncio.run(scraper.local_ingest("wall.html"))
+    assert results == []  # junk -> skipped, nothing vaulted
