@@ -3,6 +3,34 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.14.3
+
+### Changed
+- **Production hardening.** Bumped the packaged version to `0.14.3` and added a
+  CI **version-sync gate** (`tools/check_version.py`): it asserts `__version__`
+  equals the `pyproject.toml` version on every run, and equals the git tag on
+  `v*` tag pushes — closing the drift where `pyproject.toml`/`__version__` were
+  left at `0.14.0` while releases advanced to `v0.14.2`.
+- **Coverage gate raised 66% → 70%** and the suite grew with new tests: CLI
+  end-to-end smoke for `--action local` (list/ingest/content-hash-skip/search)
+  and cross-vault `--vault a,b` (search + verify fold), a parser
+  crash-resistance suite feeding random bytes to every parser, corrupt-DOCX
+  graceful degradation, a `LOCAL_PARSE_FAILED` branch test, and a junk-HTML
+  skip test. Coverage is now 71% (70.9% in the base-deps CI environment).
+- **CI dependency cache + Dependabot.** The workflow caches `pip` and a
+  `dependabot.yml` tracks weekly `pip` and `github-actions` updates.
+- **CI benchmark job.** `tools/bench_vector.py` gained a `--max-ms` regression
+  gate; CI runs it (20k vectors, fail above 500 ms/query).
+- **`--log-level` CLI flag.** Override log verbosity per run
+  (`debug|info|warning|error`).
+- **Packaging correctness.** Replaced the deprecated PEP 621 license table with
+  the PEP 639 expression (`license = "MIT"`, `license-files`) and expanded
+  classifiers.
+
+### Docs
+- `README.md` and `CHANGELOG.md` updated for the new gates, flag, and coverage
+  level.
+
 ## HoardCore v0.14.2
 
 ### Fixed

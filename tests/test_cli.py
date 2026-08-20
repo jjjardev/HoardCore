@@ -323,3 +323,68 @@ def test_cli_audit_unmapped_source_exits_2(tmp_path, make_chunk):
                "--artifact", str(unmapped), cwd=cwd)
     assert res.returncode == 2
     assert "Source-link mapping MISSING" in res.stdout
+
+
+def _local_toml(tmp_path, extra: str = ""):
+    """A temp-rooted config with an isolated local_inputs dir for --action local."""
+    inputs = tmp_path / "inputs"
+    inputs.mkdir(exist_ok=True)
+    (tmp_path / "hoardcore.toml").write_text(
+        f"[storage]\nroot_dir = '{tmp_path / 'data'}'\n"
+        f"local_dir = '{inputs}'\n\n"
+        "[embeddings]\nenabled = true\nmode = 'sparse'\ndim = 64\n"
+        "hybrid_search = true\n\n"
+        "[network]\ndefault_strategy = 'fast'\nenable_preflight = false\n\n"
+        f"{extra}",
+        encoding="utf-8")
+    return str(tmp_path), inputs
+
+
+def test_cli_local_ingest_list_skip_and_search(tmp_path):
+    """`--action local` end-to-end through the real CLI: list, ingest, content-
+    hash skip on re-run, and search over the vaulted local file."""
+    cwd, inputs = _local_toml(tmp_path)
+    (inputs / "note.txt").write_text("pomegranate yields doubled this season",
+                                     encoding="utf-8")
+    res = _run("_", "--action", "local", "--list", cwd=cwd)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "note.txt" in res.stdout
+
+    res = _run("_", "--action", "local", cwd=cwd)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "Ingested 1 chunks" in res.stdout
+
+    res = _run("_", "--action", "local", cwd=cwd)
+    assert "Ingested 0 chunks" in res.stdout  # content-hash skip
+
+    res = _run("_", "--action", "search", "--query", "pomegranate", cwd=cwd)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "local://local/note.txt" in res.stdout
+
+
+def test_cli_cross_vault_search_and_verify(tmp_path):
+    """`--vault a,b` through the real CLI: ingest into each vault, then a
+    cross-vault search and a verify fold (verified with both, unverified with
+    the vault that lacks the claim)."""
+    cwd, inputs = _local_toml(tmp_path)
+    (inputs / "a.txt").write_text("pineapple harvest records for bohol",
+                                  encoding="utf-8")
+    assert _run("_", "--action", "local", "--vault", "va", cwd=cwd).returncode == 0
+    (inputs / "a.txt").unlink()
+    (inputs / "b.txt").write_text("orange blossom honey from visayas",
+                                  encoding="utf-8")
+    assert _run("_", "--action", "local", "--vault", "vb", cwd=cwd).returncode == 0
+
+    res = _run("_", "--action", "search", "--query", "pineapple honey",
+               "--vault", "va,vb", cwd=cwd)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "'vault': 'va'" in res.stdout or "vault va" in res.stdout
+
+    # Claim held only in va: verifies across va,vb, fails on vb alone.
+    claim = "pineapple harvest records for bohol"
+    res = _run("_", "--action", "verify", "--claim", claim,
+               "--vault", "va,vb", cwd=cwd)
+    assert res.returncode == 0, res.stdout + res.stderr
+    res = _run("_", "--action", "verify", "--claim", claim,
+               "--vault", "vb", cwd=cwd)
+    assert res.returncode == 2, res.stdout + res.stderr

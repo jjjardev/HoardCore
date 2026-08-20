@@ -46,7 +46,7 @@ typecheck:
 	venv/bin/pyright hoardcore.py --pythonpath venv/bin/python
 
 coverage:
-	@echo "📊 Coverage report (fail under 66%)..."
+	@echo "📊 Coverage report (fail under 70%)..."
 	venv/bin/python -m pytest tests/ -q --cov=hoardcore --cov-report=term-missing
 
 check: lint audit typecheck coverage

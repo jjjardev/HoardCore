@@ -1,21 +1,25 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "hoardcore"
-version = "0.14.0"
+version = "0.14.3"
 description = "Research toolkit for AI agents (single-file Python module + SQLite vault + CLI): DISCOVER→INGEST→RECALL→EMIT, hybrid retrieval, provenance tagging, Cloudflare-aware fetching."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "HoardCore contributors" }]
 keywords = ["agent", "llm", "sqlite", "fts5", "retrieval", "research", "scraping", "toolkit", "protocol", "knowledge-base"]
 classifiers = [
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Topic :: Software Development :: Libraries",
+    "Topic :: Text Processing",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
-    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
     "Operating System :: OS Independent",
     "Environment :: Console",
 ]
@@ -49,7 +53,7 @@ testpaths = ["tests"]
 source = ["hoardcore"]
 
 [tool.coverage.report]
-fail_under = 66
+fail_under = 70
 show_missing = true
 skip_covered = true
 

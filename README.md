@@ -630,6 +630,7 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 | `--list` | With `local`: read-only scan — list supported files under `--path` without ingesting. |
 | `--mode MODE` | For `search`: `fast` (FTS-only) or `hybrid` (vector+RRF). Default follows config. Note: with `embeddings.fts_fast_path=true` (default), `hybrid` still short-circuits to the FTS fast path whenever FTS5 alone fills the result set — hits are then tagged `retrieval='fts_fast'`, not `'hybrid'`. Set `fts_fast_path=false` to always force the vector+RRF path. |
 | `--parallel` / `--no-parallel` | Override threaded ingest for this run (in-memory only, not written to `hoardcore.toml`). Engages the parallel reader→embed→write pipeline for batches of 8+ chunks; default follows `indexer.parallel` (off). On smaller batches it is a silent no-op (sequential path). |
+| `--log-level LEVEL` | Override log verbosity for this run: `debug`, `info` (default), `warning`, or `error`. |
 | `--migrate` | With `check`: rebuild the vault at the configured `storage.page_size` (16 KB default) via `VACUUM INTO`. |
 | `--force` | Ignore the cache and re-fetch / re-index. |
 
@@ -847,7 +848,7 @@ Bug reports, feature requests, and pull requests are welcome.
 7. Push and open a pull request
 
 Areas open to contribution:
-- A `--log-level` flag and structured exit codes for `scrape`/`crawl`/`search`/`ingest`/`discover` (only `verify`/`check`/`research` emit meaningful exit codes today)
+- Structured exit codes for `scrape`/`crawl`/`search`/`ingest`/`discover` (only `verify`/`check`/`research` emit meaningful exit codes today)
 - Multi-process config reload
 - Expanded end-to-end test coverage (crawl with network, live discovery, plugin registration)
 

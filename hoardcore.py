@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.14.0"
+__version__ = "0.14.3"
 
 import argparse
 import asyncio
@@ -5205,6 +5205,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-answer-first", action="store_true",
                         help="With --action research: always run live DISCOVER, "
                              "even if the existing vault has a high-confidence answer.")
+    parser.add_argument("--log-level", choices=["debug", "info", "warning",
+                                                "error"], default=None,
+                        help="Override the log verbosity for this run "
+                             "(default: info).")
     parser.add_argument("--keep-low", action="store_true",
                         help="With --action research: retain low-confidence hits "
                              "in the grounding context (skip filter_low) — for "
@@ -5250,6 +5254,10 @@ async def main(argv: list[str] | None = None) -> None:
 
 async def _main_impl(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
+    if args.log_level:
+        level = getattr(logging, args.log_level.upper(), logging.INFO)
+        logging.getLogger().setLevel(level)
+        logger.setLevel(level)
     url = args.url
     action = args.action
     strategy = args.strategy
