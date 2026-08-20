@@ -4,7 +4,7 @@ Research toolkit for AI agents — give your agent a memory it can prove.
 
 Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo/Mojeek web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
 
-![Version](https://img.shields.io/badge/version-0.12.4-blue)
+![Version](https://img.shields.io/badge/version-0.14.3-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -52,7 +52,7 @@ Key characteristics:
 
 - **Single-file core.** The entire engine is one module, `hoardcore.py`, runnable as a CLI or imported as a library.
 - **Real semantic retrieval, dense by default.** An ONNX-quantized sentence-transformer (`BAAI/bge-small-en-v1.5`, 384-dim) runs on `onnxruntime` — no PyTorch, no GPU. Hybrid retrieval fuses FTS5 keyword search with dense vector similarity so both exact terms and *meaning* surface. A lightweight sparse hash (`mode = "sparse"`) is available as a fallback for environments without `fastembed`, and dense mode degrades to it automatically if the dependency is missing.
-- **Lightweight and self-hosted.** One file, local-first, everything on your machine. **FlareSolverr (Docker) is a required dependency**: the modern web is dominated by anti-bot protection, so the `aggressive` (default) strategy routes Cloudflare-shaped challenges through FlareSolverr rather than failing on them. Lazy binary imports mean HTML-only usage never pulls in PDF/DOCX/EPUB libraries.
+- **Lightweight and self-hosted.** One file, local-first, everything on your machine. **FlareSolverr (Docker) is required for Cloudflare-protected pages** — set `[solver] enabled = true` in `hoardcore.toml` and the `aggressive` (default) strategy routes Cloudflare-shaped challenges through FlareSolverr rather than failing on them. The shipped default config has `solver.enabled = false`; until you flip it, the FlareSolverr leg is a silent no-op and anti-bot pages will fail (open pages fetch fine). Lazy binary imports mean HTML-only usage never pulls in PDF/DOCX/EPUB libraries.
 - **Resilient fetch chain.** `fast` → aiohttp; `balanced`/`aggressive` → aiohttp and curl_cffi TLS-impersonation **concurrently** (the first leg that returns content wins); `aggressive` (default) → adds FlareSolverr as a serialized terminal leg for Cloudflare-shaped challenges. Discovery adds bounded retry with exponential backoff and automatic provider fallback.
 - **Hybrid retrieval.** Merges keyword (BM25-style FTS5) and vector-similarity ranks via RRF, so both exact terms and near-literal matches surface. The dense scan is a cached numpy matrix–vector product over the whole vector table — no per-row Python loop. Empty or punctuation-only queries return safely instead of crashing. Hits carry **confidence bands** (`high`/`medium`/`low`) surfaced in chunk metadata and grounding output; an optional cross-encoder (`embeddings.reranker_model`) can re-rank the final set.
 - **Research workflow.** A single `research` action runs `DISCOVER → INGEST → RECALL → EMIT`, writing a grounding-context file into the `artifacts/` directory for direct injection into an LLM.
@@ -72,11 +72,11 @@ Key characteristics:
 | **Python 3.11+** | Runtime (uses `tomllib`) | `python3 --version` |
 | **fastembed + onnxruntime** | Dense retrieval (ONNX-quantized sentence-transformer; no PyTorch/GPU) | Installed via Makefile |
 | **curl_cffi** | TLS-fingerprint impersonation for harder anti-bot pages | Installed via Makefile |
-| **FlareSolverr** *(required)* | Fetch Cloudflare-protected pages — the default `aggressive` strategy depends on it, since most sites run anti-bot protection | `docker run -d --name=flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr` |
+| **FlareSolverr** *(required for Cloudflare-protected pages)* | Fetch Cloudflare-protected pages — the `aggressive` strategy routes challenges through it once `[solver] enabled = true` in `hoardcore.toml`. The shipped default config has the solver disabled, so open pages work with no FlareSolverr at all | `docker run -d --name=flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr` |
 | **PyMuPDF / python-docx / ebooklib** *(optional)* | PDF, DOCX, EPUB parsing | Installed via Makefile |
 | **rapidocr_onnxruntime** *(optional)* | OCR fallback for scanned/image-only PDF pages (local ONNX, no system deps) | `pip install .[ocr]` |
 
-FlareSolverr is **required** for full fetch coverage: the default `aggressive` strategy routes Cloudflare-protected pages through it. It runs as a small Docker container on `http://localhost:8191/v1` (override the endpoint via `[solver] url` in `hoardcore.toml`). For environments that genuinely cannot run Docker, set `network.default_strategy = "balanced"` to fall back to curl_cffi TLS-impersonation — but expect more anti-bot blocks, since FlareSolverr is what actually clears the challenge.
+FlareSolverr is **required for Cloudflare-protected coverage**: run the container, set `[solver] enabled = true` in `hoardcore.toml`, and the default `aggressive` strategy routes anti-bot-protected pages through it. It runs as a small Docker container on `http://localhost:8191/v1` (override the endpoint via `[solver] url` in `hoardcore.toml`). The shipped default config has `solver.enabled = false`, so a stock install never calls FlareSolverr — open pages work, protected ones fail. For environments that cannot run Docker, keep the solver off and rely on the curl_cffi TLS-impersonation leg of `balanced`/`aggressive` — but expect more anti-bot blocks, since FlareSolverr is what actually clears the challenge.
 
 ---
 
@@ -113,13 +113,20 @@ venv/bin/python hoardcore.py https://example.com --action scrape
 
 The console script `hoardcore` (or `python -m hoardcore` / `python hoardcore.py`) all launch the same CLI. The vault is written to `hoardcore_data/vault.db` and deliverables to `artifacts/` (both configurable).
 
-**Start FlareSolverr (required for full coverage):**
+**Start FlareSolverr (required for Cloudflare-protected coverage):**
 
 ```bash
 docker run -d --name=flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr
 ```
 
-Without it, the `aggressive` strategy's FlareSolverr leg has nothing to hand the challenge to, and Cloudflare-protected pages will be blocked. HoardCore still works on open pages, but you will not be able to reach the many sites that gate their content behind a challenge.
+Then enable the solver so the `aggressive` strategy (the default) actually hands challenges to it:
+
+```toml
+[solver]
+enabled = true
+```
+
+Without the container **and** `enabled = true`, the `aggressive` strategy's FlareSolverr leg is a silent no-op, and Cloudflare-protected pages will be blocked. HoardCore still works on open pages either way — FlareSolverr is only needed to reach the many sites that gate their content behind a challenge.
 
 **Optional — OCR for scanned PDFs**:
 
@@ -436,7 +443,7 @@ Because dense retrieval runs on `onnxruntime` (no PyTorch, no GPU) and the `hoar
 
 The pipeline for each document:
 
-1. **Fetch** — tries the strategy chain (aiohttp ⟂ curl_cffi concurrently → FlareSolverr) until one returns content. With the default `aggressive` strategy, FlareSolverr is the terminal leg that clears Cloudflare-shaped challenges.
+1. **Fetch** — tries the strategy chain (aiohttp ⟂ curl_cffi concurrently → FlareSolverr) until one returns content. With the default `aggressive` strategy and `[solver] enabled = true`, FlareSolverr is the terminal leg that clears Cloudflare-shaped challenges.
 2. **Parse** — HTML via `trafilatura` + `readability` with a self-selecting-best fallback; PDF/DOCX/EPUB via lazy-loaded binaries; else raw-text strip. **Scanned PDFs:** pages with no extractable text are auto-OCRed via RapidOCR (optional `pip install .[ocr]`, fully local ONNX, no system deps); OCR'd pages are flagged in metadata (`parser: pymupdf+ocr`, `ocr_pages`).
 3. **Junk-filter** — boilerplate/redirect/404/captcha pages and near-empty extractions are detected and refused entry to the vault.
 4. **Chunk** — semantic splitting respecting headers (or paragraphs for binaries).
@@ -598,7 +605,7 @@ hoardcore [URL] [options]
 | `search` | Query the vault with `--query`; restrict to a domain by passing its host as the positional. `--limit` caps returned chunks. |
 | `ingest` | Index an explicit URL list given as a comma/space separated `--urls` string. |
 | `discover` | Web-search `--query`, ingest the top `--limit` results (default `discovery.top_rank`). |
-| `research` | Run `discover -> ingest -> recall -> emit` (memory-first: live DISCOVER is skipped when the vault already has a high-confidence answer, unless `--no-answer-first`); writes to `--out` or a day-sorted `artifacts/YYYY-MM-DD/grounding_context.md`. |
+| `research` | Run `discover -> ingest -> recall -> emit` (memory-first: live DISCOVER is skipped when the vault already has a high-confidence answer, unless `--no-answer-first`); writes to `--out` or a day-sorted `artifacts/YYYY-MM-DD/grounding/grounding_context.md` (the grounding subdir is configurable via `storage.grounding_subdir`). |
 | `verify` | Programmatic provenance audit: confirm `--claim` against vault text (exact phrasing, typography-blind; `--hint` prints the nearest vault phrase on denial). |
 | `audit` | Audit an artifact's `[V#N]` evidence chain (verbatim + source-link mapping + ingested). |
 | `check` | Run a three-phase vault integrity check (content hashes, counts, vector dims). |
@@ -629,7 +636,7 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 | `--path PATH` | With `local`: relative path (file or directory) inside `storage.local_dir` to process; defaults to the whole `local_dir`. |
 | `--list` | With `local`: read-only scan — list supported files under `--path` without ingesting. |
 | `--mode MODE` | For `search`: `fast` (FTS-only) or `hybrid` (vector+RRF). Default follows config. Note: with `embeddings.fts_fast_path=true` (default), `hybrid` still short-circuits to the FTS fast path whenever FTS5 alone fills the result set — hits are then tagged `retrieval='fts_fast'`, not `'hybrid'`. Set `fts_fast_path=false` to always force the vector+RRF path. |
-| `--parallel` / `--no-parallel` | Override threaded ingest for this run (in-memory only, not written to `hoardcore.toml`). Engages the parallel reader→embed→write pipeline for batches of 8+ chunks; default follows `indexer.parallel` (off). On smaller batches it is a silent no-op (sequential path). |
+| `--parallel` / `--no-parallel` | Override threaded ingest for this run (in-memory only, not written to `hoardcore.toml`). Engages the parallel reader→embed→write pipeline for batches of 8+ chunks; default follows `indexer.parallel` (on). On smaller batches it is a silent no-op (sequential path). |
 | `--log-level LEVEL` | Override log verbosity for this run: `debug`, `info` (default), `warning`, or `error`. |
 | `--migrate` | With `check`: rebuild the vault at the configured `storage.page_size` (16 KB default) via `VACUUM INTO`. |
 | `--force` | Ignore the cache and re-fetch / re-index. |
@@ -685,11 +692,11 @@ Created automatically on first run. Key sections:
 | `[general]` | `timeout_seconds`, `max_retries`, `user_agent` |
 | `[network]` | `default_strategy` (`fast`/`balanced`/`aggressive`), `enable_preflight`, `ssrf_protection` (block private/LAN/non-http(s) targets + re-validate redirects, default true) |
 | `[auth]` | `cookie_string` (e.g. `cf_clearance=...; session=...`) |
-| `[solver]` | `enabled` (default `true`), `url`, `solver_timeout` |
+| `[solver]` | `enabled` (default `false` — the FlareSolverr leg is a no-op until you set it to `true`), `url`, `solver_timeout` |
 | `[storage]` | `root_dir`, `artifacts_dir`, `artifacts_by_day`, `grounding_subdir` (research grounding contexts land in `artifacts/YYYY-MM-DD/<subdir>/` so they don't pollute the day folder of finished deliverables; default `grounding`), `local_dir` (read-only root for `--action local`; default `local_inputs/`, git-ignored), `save_binary`, `save_raw_html`, `page_size` (16 KB default) |
 | `[parsers]` | `enable_pdf`, `enable_docx`, `enable_epub`, `extract_pdf_tables`, `enable_pdf_ocr` (auto-OCR scanned PDF pages when `rapidocr_onnxruntime` is present, default true) |
 | `[crawler]` | `respect_robots`, `sitemap_limit`, `parallel_workers` |
-| `[indexer]` | `enable_fts`, `search_limit`, `parallel` (threaded ingest, default off), `near_dedup` (simhash dup filter, default off), `near_dedup_threshold` |
+| `[indexer]` | `enable_fts`, `search_limit`, `parallel` (threaded ingest, default on for batches of 8+ chunks), `near_dedup` (simhash dup filter, default off), `near_dedup_threshold` |
 | `[embeddings]` | `enabled`, `mode` (`sparse`/`dense`), `dense_model`, `dim`, `mrl_dims` (Matryoshka truncation, 0 = full), `hybrid_search`, `top_k`, `quantize`, `fts_fast_path`, `recency_half_life_days`, `conf_mode` (`relative` default / `absolute` legacy), `conf_high_abs`, `conf_low_abs`, `reranker_model` (optional cross-encoder re-ranker) |
 | `[discovery]` | `provider`, `top_rank`, `max_retries`, `backoff_seconds` |
 | `[research]` | `answer_first` (memory-first routing, default true), `filter_low` (at EMIT drops duplicate `low` hits but keeps one `low` chunk per distinct source, default true), `max_per_source` (cap recall chunks per source URL so one rich page can't crowd out others; 0 = unlimited, default 2) |
@@ -781,8 +788,13 @@ HoardCore/
         test_junk.py           boilerplate/empty/real-content detection
         test_crawler.py        sitemap/robots/discovery (no network I/O)
         test_ocr.py            OCR fallback path for scanned PDF pages
+        test_local.py          --action local list/ingest/content-hash-skip/search
+        test_multivault.py     cross-vault --vault a,b search + verify fold
+        test_audit.py          artifact [V#N] evidence-chain audit
+        test_parser_robust.py  parser crash-resistance (random bytes + corrupt binaries)
         test_regressions.py    regression coverage for past bugs
     tools/
+        check_version.py       CI version-sync gate (__version__ == pyproject == git tag)
         bench_vector.py        numpy matmul vector-scan benchmark (float32/int8 x page sizes)
         bench_hoardcore_full.py  full numeric benchmark: ingest throughput, search latency,
                                retrieval quality (P@1/P@5/MRR/nDCG), storage footprint,
@@ -848,7 +860,7 @@ Bug reports, feature requests, and pull requests are welcome.
 7. Push and open a pull request
 
 Areas open to contribution:
-- Structured exit codes for `scrape`/`crawl`/`search`/`ingest`/`discover` (only `verify`/`check`/`research` emit meaningful exit codes today)
+- Structured exit codes for `scrape`/`crawl`/`search`/`ingest`/`discover` (only `verify`, `check`, `research`, `audit`, and `local` emit meaningful exit codes today)
 - Multi-process config reload
 - Expanded end-to-end test coverage (crawl with network, live discovery, plugin registration)
 

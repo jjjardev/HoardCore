@@ -5200,7 +5200,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--parallel", action=argparse.BooleanOptionalAction, default=None,
         help="Override threaded ingest for this run (on/off). Engages the "
              "parallel reader->embed->write pipeline for batches of 8+ chunks. "
-             "Defaults to config indexer.parallel (false).",
+             "Defaults to config indexer.parallel (true).",
     )
     parser.add_argument("--no-answer-first", action="store_true",
                         help="With --action research: always run live DISCOVER, "
