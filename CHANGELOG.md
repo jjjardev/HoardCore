@@ -3,6 +3,19 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.14.4
+
+### Changed
+- **CI Actions bumped.** Dependabot raised `actions/checkout` `v4` → `v7` and
+  `actions/setup-python` `v5` → `v7` across the test and bench jobs (PRs #4/#5),
+  keeping the workflow on current runtimes.
+
+### Docs
+- `skill.md` condensed ~32% (240 → 164 lines) with the same instructions — fluff
+  removed, every rule intact (expected behaviors, provenance/tag grammar,
+  audit-clean authoring, verify/audit exits, research/local/check/stats,
+  constraints, release gates) for a lighter agent context load.
+
 ## HoardCore v0.14.3
 
 ### Changed
