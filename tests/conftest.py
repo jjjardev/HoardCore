@@ -31,7 +31,7 @@ class TempConfig:
             "auth": {"cookie_string": ""},
             "solver": {"enabled": False, "url": "http://localhost:8191/v1", "solver_timeout": 60},
             "storage": {"root_dir": self._root, "save_binary": False, "save_raw_html": False},
-            "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "extract_pdf_tables": True, "enable_pdf_ocr": True},
+            "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "enable_pdf_ocr": True},
             "crawler": {"respect_robots": False, "sitemap_limit": 500, "parallel_workers": 2},
             "indexer": {"enable_fts": True, "search_limit": 20, "near_dedup": False, "near_dedup_threshold": 3},
             "embeddings": {"enabled": True, "mode": "sparse", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 64, "mrl_dims": 0, "hybrid_search": True, "top_k": 40, "conf_mode": "relative", "conf_high_abs": 0.025, "conf_low_abs": 0.013},

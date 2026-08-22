@@ -32,6 +32,13 @@ def pyproject_version() -> str:
     return data["project"]["version"]
 
 
+def readme_badge_version() -> str:
+    """Parse the README version badge; empty string when absent."""
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    m = re.search(r"badge/version-([\d.]+)-", text)
+    return m.group(1) if m else ""
+
+
 def tag_version(ref: str | None) -> str | None:
     if not ref:
         return None
@@ -42,10 +49,17 @@ def tag_version(ref: str | None) -> str | None:
 def main() -> int:
     mv = module_version()
     pv = pyproject_version()
+    bv = readme_badge_version()
     tv = tag_version(os.environ.get("GITHUB_REF"))
     ok = True
     if mv != pv:
         print(f"VERSION MISMATCH: __version__={mv!r} != pyproject version={pv!r}",
+              file=sys.stderr)
+        ok = False
+    if bv and bv != mv:
+        # The badge has drifted twice (0.14.3, 0.14.4); it is checked so the
+        # README can never silently disagree with the shipped version again.
+        print(f"VERSION MISMATCH: README badge={bv!r} != __version__={mv!r}",
               file=sys.stderr)
         ok = False
     if tv is not None:
@@ -55,7 +69,7 @@ def main() -> int:
                       file=sys.stderr)
                 ok = False
     if ok:
-        print(f"version OK: {mv} (pyproject matches; tag {tv or 'n/a'})")
+        print(f"version OK: {mv} (pyproject matches; badge matches; tag {tv or 'n/a'})")
         return 0
     return 1
 
