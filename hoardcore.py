@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.15.0"
+__version__ = "0.15.1"
 
 import argparse
 import asyncio
@@ -114,8 +114,7 @@ DEFAULT_CONFIG = f"""
 
 [general]
 timeout_seconds = 30
-max_retries = 2
-user_agent = "HoardCore-Bot/5.0 (LLM Agent)"
+user_agent = "HoardCore/5.0"
 
 [network]
 default_strategy = "aggressive"   # fast, balanced, aggressive
@@ -158,7 +157,6 @@ page_size = 16384                # SQLite page size (bytes). 16 KB keeps 384-dim
 enable_pdf = true
 enable_docx = true
 enable_epub = true
-extract_pdf_tables = true
 enable_pdf_ocr = true            # auto-OCR scanned/image-only PDF pages (needs rapidocr_onnxruntime)
 
 [crawler]
@@ -218,8 +216,6 @@ max_per_source = 2       # cap recall chunks per source URL so one rich page
                          # can't crowd out every other source (0 = unlimited)
 
 [discovery]
-enabled = true
-provider = "duckduckgo_html"   # free HTML endpoint; runs through the existing fetch/FlareSolverr chain
 max_results = 10
 top_rank = 6                   # ingest only the top-N ranked results
 max_retries = 2                # per-provider transient-failure retries
@@ -288,18 +284,18 @@ class ConfigManager:
 
     def _defaults(self) -> dict[str, Any]:
         return {
-            "general": {"timeout_seconds": 30, "max_retries": 2, "user_agent": "HoardCore/5.0"},
+            "general": {"timeout_seconds": 30, "user_agent": "HoardCore/5.0"},
             "network": {"default_strategy": "aggressive", "enable_preflight": True, "ssrf_protection": True},
             "auth": {"cookie_string": ""},
             "solver": {"enabled": False, "url": "http://localhost:8191/v1", "solver_timeout": 60},
             "storage": {"root_dir": "hoardcore_data", "artifacts_dir": "artifacts", "artifacts_by_day": True, "grounding_subdir": "grounding", "local_dir": "local_inputs", "save_binary": True, "save_raw_html": False, "page_size": 16384},
-            "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "extract_pdf_tables": True, "enable_pdf_ocr": True},
+            "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "enable_pdf_ocr": True},
             "crawler": {"respect_robots": True, "sitemap_limit": 500, "parallel_workers": 5},
             "indexer": {"enable_fts": True, "search_limit": 20, "parallel": True,
                         "near_dedup": False, "near_dedup_threshold": 3},
             "embeddings": {"enabled": True, "mode": "dense", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 256, "mrl_dims": 0, "hybrid_search": True, "top_k": 40, "conf_mode": "relative", "conf_high_abs": 0.025, "conf_low_abs": 0.020, "quantize": "float32", "fts_fast_path": True, "recency_half_life_days": 0, "reranker_model": "", "batch_size": 16},
             "research": {"answer_first": True, "filter_low": True, "max_per_source": 2},
-            "discovery": {"enabled": True, "provider": "duckduckgo_html", "max_results": 10, "top_rank": 6, "max_retries": 2, "backoff_seconds": 1.5},
+            "discovery": {"max_results": 10, "top_rank": 6, "max_retries": 2, "backoff_seconds": 1.5},
             "chunking": {"max_tokens": 512, "overlap_tokens": 50, "strategy": "heading"},
             "plugins": {"enabled": True},
             "cache": {"ttl_seconds": 86400}
@@ -2893,12 +2889,16 @@ class DocumentParser:
     """Parses HTML, PDF, DOCX, EPUB into markdown text."""
 
     # Lazy/optional binary parsers. Imported on first use so that HTML-only
-    # scraping works without the heavy PDF/DOCX/EPUB libraries installed.
+    # usage works without the heavy PDF/DOCX/EPUB libraries installed.
     _fitz: Any = None
     _docx: Any = None
     _epub: Any = None
+    _RapidOCR: Any = None
     _ocr_engine: Any = None
     _ocr_engine_ready = False
+    # Config gate (wired v0.15.1): parsers.enable_pdf_ocr can switch OCR off
+    # even when rapidocr is installed (OCR is slow and expensive).
+    ocr_enabled = True
     # Plugin parsers keyed by content type (hoardcore.parsers entry points).
     _plugin_parsers: dict[str, Any] = {}
 
@@ -2946,7 +2946,7 @@ class DocumentParser:
     @classmethod
     def _get_ocr_engine(cls):
         """Return the shared RapidOCR engine (one instance, lazy) or None."""
-        if not RAPIDOCR_AVAILABLE:
+        if not RAPIDOCR_AVAILABLE or not cls.ocr_enabled:
             return None
         if not cls._ocr_engine_ready:
             try:
@@ -3816,6 +3816,9 @@ class HoardCore:
         self.vault_name = self.vault.vault_name
         self.fetcher = NetworkFetcher(self.config)
         self.parser = DocumentParser()
+        # Wire parsers.enable_pdf_ocr into the parser class (wired v0.15.1).
+        DocumentParser.ocr_enabled = bool(
+            self.config.get('parsers.enable_pdf_ocr', True))
         self.chunker = SemanticChunker(self.config)
         self.crawler = CrawlerPlanner(self.config)
         self.discovery = WebSearchProvider(self.config, self.fetcher)
@@ -3918,6 +3921,12 @@ class HoardCore:
         ext = os.path.splitext(abs_path)[1].lower()
         if ext not in _LOCAL_EXTENSIONS:
             return [], {"error": f"LOCAL_UNSUPPORTED_EXT: {relpath!r}"}
+        # parsers.enable_pdf/docx/epub gates apply to local ingestion too
+        # (wired v0.15.1).
+        ext_kind = {'.pdf': 'pdf', '.docx': 'docx', '.epub': 'epub'}.get(ext)
+        if ext_kind and not self._parser_enabled(ext_kind):
+            return [], {"error": f"LOCAL_PARSER_DISABLED: {relpath!r} "
+                                 f"(parsers.enable_{ext_kind}=false)"}
 
         url = self._local_url(relpath)
         try:
@@ -4287,10 +4296,13 @@ class HoardCore:
         # max_per_source keeps recall source-diverse (DeepResearch wants breadth,
         # not one rich page crowding out the rest); 0 disables it.
         max_per_source = int(self.config.get('research.max_per_source', 2) or 0)
+        # research.filter_low is a REAL toggle (wired v0.15.1): when false,
+        # low-confidence hits are retained exactly as --keep-low does.
+        apply_filter_low = bool(self.config.get('research.filter_low', True))
         raw_memory: list[Chunk] = self._search_across_vaults(
             question, limit=recall, domain=None, hybrid=True,
             max_per_source=max_per_source)
-        memory_chunks = (raw_memory if keep_low
+        memory_chunks = (raw_memory if (keep_low or not apply_filter_low)
                          else self._drop_low_confidence(raw_memory))
         answered = (answer_first and memory_chunks and any(
             c.metadata.get('confidence') == 'high' for c in memory_chunks))
@@ -4317,7 +4329,8 @@ class HoardCore:
             raw_chunks = self._search_across_vaults(
                 question, limit=recall, domain=None, hybrid=True,
                 max_per_source=max_per_source)
-            chunks = raw_chunks if keep_low else self._drop_low_confidence(raw_chunks)
+            chunks = raw_chunks if (keep_low or not apply_filter_low) \
+                else self._drop_low_confidence(raw_chunks)
             # Track how many low-confidence hits filter_low actually removed, so
             # the grounding file explains the count honestly (chunks retained
             # for source preservation are NOT counted as dropped). No-op when
@@ -4809,6 +4822,11 @@ class HoardCore:
             return nearest.strip(" \t.,;:!?’"), True
         return HoardCore._claim_text_from_line(cleaned0)
 
+    def _parser_enabled(self, kind: str) -> bool:
+        """Config gate for binary parsers (wired v0.15.1): parsers.enable_pdf/
+        docx/epub can refuse heavy formats even when their libraries exist."""
+        return bool(self.config.get(f'parsers.enable_{kind}', True))
+
     async def _process_document(self, url: str, strategy: str, force_refresh: bool) -> tuple[list[Chunk], dict[str, Any]]:
         """
         Core processing pipeline for a single URL.
@@ -4850,6 +4868,18 @@ class HoardCore:
         binary_path = None
         if binary and self.save_binary and content_type not in ['text/html', 'text/plain']:
             binary_path = self.vault.save_binary(url, content_type, binary)
+
+        # parsers.enable_pdf/docx/epub gates (wired v0.15.1): a disabled
+        # parser turns the document into junk instead of parsing it anyway.
+        kind = {'application/pdf': 'pdf',
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+                'application/epub+zip': 'epub'}.get(content_type)
+        if kind and not self._parser_enabled(kind):
+            logger.warning(f"Skipping index of {url} (parsers.enable_{kind}=false).")
+            return [Chunk(text="", metadata={
+                "source": url, "junk": True,
+                "junk_reason": f"parser_disabled:{kind}"})], {
+                "junk": True, "junk_reason": f"parser_disabled:{kind}"}
 
         # A body delivered alongside a 4xx/5xx status is an error page, not
         # content — refusing it keeps soft-404 bodies out of the vault.

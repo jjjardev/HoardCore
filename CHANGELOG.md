@@ -3,6 +3,25 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.15.1
+
+### Fixed
+- **`research.filter_low` is now honored.** The key was documented but never
+  read — low-confidence filtering ran unconditionally. `filter_low = false`
+  now retains all low-confidence hits in grounding output (same effect as
+  `--keep-low`), with regression coverage for both settings.
+- **`parsers.enable_pdf/docx/epub` now gate binary ingestion** at both the
+  fetch pipeline and local ingestion; a disabled format is refused as junk /
+  reported as an error instead of being parsed anyway.
+- **`parsers.enable_pdf_ocr` now gates the OCR fallback** even when
+  rapidocr is installed.
+- Default User-Agent drift unified to `HoardCore/5.0`.
+
+### Removed
+- Dead config keys that no code ever read: `general.max_retries`,
+  `discovery.enabled`, `discovery.provider`, `parsers.extract_pdf_tables`
+  (table extraction was hardcoded on regardless).
+
 ## HoardCore v0.15.0
 
 ### Removed

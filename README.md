@@ -689,17 +689,17 @@ Created automatically on first run. Key sections:
 
 | Section | Notable keys |
 |---|---|
-| `[general]` | `timeout_seconds`, `max_retries`, `user_agent` |
+| `[general]` | `timeout_seconds`, `user_agent` |
 | `[network]` | `default_strategy` (`fast`/`balanced`/`aggressive`), `enable_preflight`, `ssrf_protection` (block private/LAN/non-http(s) targets + re-validate redirects, default true) |
 | `[auth]` | `cookie_string` (e.g. `cf_clearance=...; session=...`) |
 | `[solver]` | `enabled` (default `false` — the FlareSolverr leg is a no-op until you set it to `true`), `url`, `solver_timeout` |
 | `[storage]` | `root_dir`, `artifacts_dir`, `artifacts_by_day`, `grounding_subdir` (research grounding contexts land in `artifacts/YYYY-MM-DD/<subdir>/` so they don't pollute the day folder of finished deliverables; default `grounding`), `local_dir` (read-only root for `--action local`; default `local_inputs/`, git-ignored), `save_binary`, `save_raw_html`, `page_size` (16 KB default) |
-| `[parsers]` | `enable_pdf`, `enable_docx`, `enable_epub`, `extract_pdf_tables`, `enable_pdf_ocr` (auto-OCR scanned PDF pages when `rapidocr_onnxruntime` is present, default true) |
+| `[parsers]` | `enable_pdf`, `enable_docx`, `enable_epub` (refuse heavy formats even when their libraries are installed; wired v0.15.1), `enable_pdf_ocr` (auto-OCR scanned PDF pages when `rapidocr_onnxruntime` is present, default true) |
 | `[crawler]` | `respect_robots`, `sitemap_limit`, `parallel_workers` |
 | `[indexer]` | `enable_fts`, `search_limit`, `parallel` (threaded ingest, default on for batches of 8+ chunks), `near_dedup` (simhash dup filter, default off), `near_dedup_threshold` |
 | `[embeddings]` | `enabled`, `mode` (`sparse`/`dense`), `dense_model`, `dim`, `mrl_dims` (Matryoshka truncation, 0 = full), `hybrid_search`, `top_k`, `quantize`, `fts_fast_path`, `recency_half_life_days`, `conf_mode` (`relative` default / `absolute` legacy), `conf_high_abs`, `conf_low_abs`, `reranker_model` (optional cross-encoder re-ranker) |
-| `[discovery]` | `provider`, `top_rank`, `max_retries`, `backoff_seconds` |
-| `[research]` | `answer_first` (memory-first routing, default true), `filter_low` (at EMIT drops duplicate `low` hits but keeps one `low` chunk per distinct source, default true), `max_per_source` (cap recall chunks per source URL so one rich page can't crowd out others; 0 = unlimited, default 2) |
+| `[discovery]` | `max_results`, `top_rank`, `max_retries`, `backoff_seconds` |
+| `[research]` | `answer_first` (memory-first routing, default true), `filter_low` (at EMIT drops duplicate `low` hits but keeps one `low` chunk per distinct source; set `false` to retain all low hits — honored since v0.15.1), `max_per_source` (cap recall chunks per source URL so one rich page can't crowd out others; 0 = unlimited, default 2) |
 | `[chunking]` | `max_tokens`, `overlap_tokens` (sliding window, CJK-aware), `strategy` (`heading` / `paragraph` / `plugin.<name>`) |
 | `[plugins]` | `enabled` (discover `hoardcore.*` entry-point plugins) |
 | `[cache]` | `ttl_seconds` |

@@ -247,3 +247,56 @@ def test_parallel_ingest_large_batch_slow_embed_does_not_deadlock(tmp_path):
         ).fetchall()
     assert len(rows) == n
     assert all(vec == b"x" * 32 for _, _, vec in rows)
+
+
+def _run_filter_low_case(tmp_path, monkeypatch, filter_low):
+    root = tmp_path / f"fl-{filter_low}"
+    cfg = TempConfig(str(root), {
+        "research.filter_low": filter_low,
+        "storage.artifacts_dir": str(root / "artifacts"),
+    })
+    monkeypatch.setattr(hc, "ConfigManager", lambda c=cfg: c)
+    scraper = hc.HoardCore(["flt"])
+
+    hi = hc.Chunk(text="anchor solid fact", metadata={
+        "source_url": "https://a.test/1", "confidence": "high"})
+    # Same source as the high hit: with filtering ON this duplicate-source
+    # low hit is dropped; with filtering OFF it must survive.
+    lo = hc.Chunk(text="weak tail claim", metadata={
+        "source_url": "https://a.test/1", "confidence": "low"})
+    monkeypatch.setattr(scraper, "_search_across_vaults",
+                        lambda *a, **k: [hi, lo])
+    out = asyncio.run(scraper.research("probe query", discover=0, recall=5))
+    assert out is not None
+    return open(out, encoding="utf-8").read()
+
+
+def test_research_filter_low_config_is_honored(tmp_path, monkeypatch):
+    """research.filter_low was documented but never read: low-confidence hits
+    were dropped even when the key was set to false. The toggle must now be
+    honored (false -> retain low hits; true/default -> drop duplicates)."""
+    body_off = _run_filter_low_case(tmp_path, monkeypatch, False)
+    assert "weak tail claim" in body_off          # retained
+    assert "dropped" not in body_off              # no filtering note
+
+    body_on = _run_filter_low_case(tmp_path, monkeypatch, True)
+    assert "weak tail claim" not in body_on       # dropped
+    assert "dropped" in body_on                   # honest note present
+
+
+def test_binary_parser_disabled_by_config(tmp_path, monkeypatch):
+    """parsers.enable_pdf=false must refuse PDF ingestion instead of parsing
+    it anyway (the toggles existed but were never read before v0.15.1)."""
+    cfg = TempConfig(str(tmp_path), {"parsers.enable_pdf": False,
+                                     "crawler.parallel_workers": 2})
+    monkeypatch.setattr(hc, "ConfigManager", lambda: cfg)
+    scraper = hc.HoardCore()
+
+    class FakeFetcher:
+        async def fetch(self, url, strategy):
+            return (None, b"%PDF-1.4 fake", "application/pdf", 200)
+
+    scraper.fetcher = FakeFetcher()
+    out = asyncio.run(scraper.fetch("https://x.test/doc.pdf",
+                                    action="scrape", strategy="fast"))
+    assert out and out[0]["metadata"].get("junk_reason") == "parser_disabled:pdf"
