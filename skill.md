@@ -63,7 +63,7 @@ Answer saturation (2 re-queries, no new `[V]`) · distinct-source quota (≥5/8/
 `scrape`/`search`/`ingest` directly (no loop) for "scrape this site", "search the vault", "summarize this PDF". Still prefer DeepResearch for deep, open-ended questions.
 
 ## Capabilities
-Scrape (one URL: HTML/PDF/DOCX/EPUB) · Crawl (whole site via sitemap) · Search (local vault) · Discover (live DuckDuckGo/Mojeek + ingest top results) · Local (ingest `storage.local_dir`, no network) · Emit (`artifacts/`).
+Scrape (one URL: HTML/PDF/DOCX/EPUB) · Crawl (whole site via sitemap) · Search (local vault) · Discover (live DuckDuckGo + ingest top results) · Local (ingest `storage.local_dir`, no network) · Emit (`artifacts/`).
 
 ## Hybrid Discovery — HoardCore + your harness's web tools
 - **Prime the hunt:** if you already hold the URLs, skip discovery and `ingest --urls "u1,u2"` (or `scrape`/`crawl` with `--urls`) — discovery is for *unknown* sources, not re-finding known ones.

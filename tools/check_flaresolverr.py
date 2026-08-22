@@ -77,8 +77,8 @@ def main() -> int:
         args.url, "https://html.duckduckgo.com/html/?q=hoardcore+health+check",
         args.timeout)
     if err:
-        print(f"WARN     : DDG solve failed ({err}) — discovery will degrade "
-              "to Mojeek/direct legs.")
+        print(f"WARN     : DDG solve failed ({err}) — the only built-in discovery "
+              "engine is unreachable; use harness-side search + `ingest --urls`.")
         return 1
     print(f"DDG OK   : solved in {elapsed:.1f}s")
     return 0

@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.14.5"
+__version__ = "0.15.0"
 
 import argparse
 import asyncio
@@ -219,7 +219,7 @@ max_per_source = 2       # cap recall chunks per source URL so one rich page
 
 [discovery]
 enabled = true
-provider = "duckduckgo_html"   # free HTML endpoint; uses the existing fetch/FlareSolverr chain (Mojeek auto-fallback)
+provider = "duckduckgo_html"   # free HTML endpoint; runs through the existing fetch/FlareSolverr chain
 max_results = 10
 top_rank = 6                   # ingest only the top-N ranked results
 max_retries = 2                # per-provider transient-failure retries
@@ -3526,11 +3526,13 @@ class SearchResult:
 class WebSearchProvider:
     """Discovers URLs from a live web query.
 
-    Tries providers in order (DuckDuckGo HTML -> Mojeek HTML), each driven
-    through the SAME resilient fetch chain as the crawler (aiohttp ->
-    curl_cffi -> FlareSolverr), with bounded retry + exponential backoff on
-    transient failures. Returns candidate SearchResults for the orchestrator
-    to feed into _ingest_many.
+    Queries the DuckDuckGo HTML endpoint through the SAME resilient fetch
+    chain as the crawler (aiohttp -> curl_cffi -> FlareSolverr), with bounded
+    retry + exponential backoff on transient failures and challenge-page
+    detection. Plugin providers (hoardcore.providers entry points) form the
+    fallback tail, so alternative engines can be added without touching the
+    core. Returns candidate SearchResults for the orchestrator to feed into
+    _ingest_many.
     """
 
     def __init__(self, config: ConfigManager, fetcher: NetworkFetcher):
@@ -3548,10 +3550,10 @@ class WebSearchProvider:
     def _looks_like_challenge(text: str) -> bool:
         """True when a search-page body is an anti-bot block, not results.
 
-        Providers serve these with HTTP 200 (Mojeek captcha) or alongside odd
-        statuses, so a body sniff is the only reliable signal. Detected pages
-        are never parsed as results and never retried against the same
-        provider — an IP block won't heal in 1.5s.
+        Providers serve these with HTTP 200 (e.g. a captcha interstitial) or
+        alongside odd statuses, so a body sniff is the only reliable signal.
+        Detected pages are never parsed as results and never retried against
+        the same provider — an IP block won't heal in 1.5s.
         """
         head = text[:4000].lower()
         if "<title>captcha" in head:
@@ -3609,26 +3611,6 @@ class WebSearchProvider:
                 break
         return results
 
-    @staticmethod
-    def _parse_mojeek(text: str, max_results: int) -> list[SearchResult]:
-        results: list[SearchResult] = []
-        for m in re.finditer(
-            r'<a class="ob"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
-            text, re.IGNORECASE | re.DOTALL
-        ):
-            href, title_raw = m.group(1), m.group(2)
-            if not href.startswith("http"):
-                continue
-            if is_ad_tracking_url(href):
-                continue  # ad-redirect/tracker URLs are not search content
-            results.append(SearchResult(
-                title=WebSearchProvider._clean_title(title_raw),
-                url=href
-            ))
-            if len(results) >= max_results:
-                break
-        return results
-
     async def _try_provider(self, url: str, strategy: str, max_results: int,
                             parser) -> list[SearchResult]:
         try:
@@ -3647,12 +3629,11 @@ class WebSearchProvider:
     async def search(self, query: str, max_results: int = 10,
                      strategy: str = "aggressive") -> list[SearchResult]:
         q = urlencode({"q": query.strip()})
-        # (label, url, parser) ordered by preference; later entries are fallbacks.
+        # (label, url, parser) ordered by preference; plugin providers form
+        # the fallback tail (see below).
         providers = [
             ("duckduckgo", f"https://html.duckduckgo.com/html/?q={q}",
              self._parse_duckduckgo),
-            ("mojeek", f"https://www.mojeek.com/search?q={q}",
-             self._parse_mojeek),
         ]
 
         for label, url, parser in providers:

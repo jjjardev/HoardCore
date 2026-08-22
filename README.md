@@ -2,7 +2,7 @@
 
 Research toolkit for AI agents — give your agent a memory it can prove.
 
-Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo/Mojeek web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
+Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
 
 ![Version](https://img.shields.io/badge/version-0.14.4-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
@@ -483,7 +483,7 @@ Queries are sanitized: operator characters (`" ( ) * ^ : -`) are stripped and to
 
 ### Discovery Mode
 
-`discover` turns a plain-language query into ingested sources. It hits DuckDuckGo's HTML endpoint via the same resilient fetch chain (so a rate-limited/shaped search page gets retried and can even be solved by FlareSolverr), with Mojeek as an automatic fallback provider. The top `--limit` results are ingested (`discovery.top_rank`, default 6, when no `--limit` is given), with bounded retry + exponential backoff on transient failures.
+`discover` turns a plain-language query into ingested sources. It hits DuckDuckGo's HTML endpoint via the same resilient fetch chain (so a rate-limited/shaped search page gets retried and can even be solved by FlareSolverr). The top `--limit` results are ingested (`discovery.top_rank`, default 6, when no `--limit` is given), with bounded retry + exponential backoff on transient failures. DuckDuckGo is the single built-in provider — alternative engines plug in via `hoardcore.providers`, and when discovery is fully blocked the documented rescue path is harness-side search + `ingest --urls`.
 
 ### Research Workflow
 
@@ -750,7 +750,7 @@ Each candidate contributes `1 / (k + rank + 1)`; results are sorted by the sum a
 
 ### Resilience & DB Hygiene
 
-A fetch chain runs `aiohttp` and `curl_cffi` concurrently (first leg that returns content wins), with `FlareSolverr` as a serialized terminal leg under the default `aggressive` strategy. With FlareSolverr running (the required Docker container), the chain fully covers Cloudflare-protected pages; discovery's DuckDuckGo hits also get retried and, if shaped, can be solved through the same container. Discovery wraps fetches in bounded retries with exponential backoff and falls back DuckDuckGo → Mojeek. All SQLite access flows through `VaultManager._db()`, which acquires a connection from a reusable **`ConnectionPool`** (default 8 connections, env-overridable via `HC_POOL_SIZE`):
+A fetch chain runs `aiohttp` and `curl_cffi` concurrently (first leg that returns content wins), with `FlareSolverr` as a serialized terminal leg under the default `aggressive` strategy. With FlareSolverr running (the required Docker container), the chain fully covers Cloudflare-protected pages; discovery's DuckDuckGo hits also get retried and, if shaped, can be solved through the same container. Discovery wraps fetches in bounded retries with exponential backoff, detects challenge/captcha bodies, and supports plugin providers as a fallback tail. All SQLite access flows through `VaultManager._db()`, which acquires a connection from a reusable **`ConnectionPool`** (default 8 connections, env-overridable via `HC_POOL_SIZE`):
 
 ```
 with self._db() as (conn, cursor):
@@ -837,8 +837,8 @@ venv/bin/python -m pytest tests/ -v     # run the pytest suite
 |---|---|---|
 | `Status 403 Blocked` on a protected site | Anti-bot challenging connection | Use `--strategy aggressive` (default); ensure FlareSolverr is running (`docker ps`), since it is required to clear Cloudflare challenges |
 | `FlareSolverr: Solving challenge...` then timeout | FlareSolverr container not started, or endpoint mismatch | `docker run -d --name=flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr`; verify `[solver] url = "http://localhost:8191/v1"` |
-| `aiohttp: Status 202` on discovery / FlareSolverr timeouts | Rate-limit or proxy-shaped search page | Discovery auto-retries with backoff and falls back to Mojeek; rerun or lower `--limit` |
-| Discovery returns nothing | Search provider empty | Mojeek fallback is automatic; increase `discovery.max_retries` / `backoff_seconds` |
+| `aiohttp: Status 202` on discovery / FlareSolverr timeouts | Rate-limit or proxy-shaped search page | Discovery auto-retries with backoff; ensure FlareSolverr is healthy (`tools/check_flaresolverr.py`), then rerun |
+| Discovery returns nothing | Built-in provider blocked or empty | There is one built-in engine (DuckDuckGo); when it is IP-blocked, rescue via harness-side search + `ingest --urls`, or add an engine through `hoardcore.providers` |
 | FlareSolverr API answers but every solve times out | Container egress/DNS wedged (systemd-resolved stub) or stale container filesystem | Recreate with the known-good config: `sudo docker compose -f deploy/docker-compose.flaresolverr.yml up -d --force-recreate`, then `venv/bin/python tools/check_flaresolverr.py` (exit 0 = healthy; it also explains the DNS root cause) |
 | `PyMuPDF (fitz) not installed` printed | Optional PDF lib missing | `make install` (installs PyMuPDF) or `pip install pymupdf` |
 | `python-docx` / `ebooklib` message | Optional binaries missing | `pip install python-docx ebooklib` |

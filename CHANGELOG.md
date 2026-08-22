@@ -3,6 +3,23 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.15.0
+
+### Removed
+- **Mojeek discovery fallback removed.** Live testing showed Mojeek serves a
+  captcha interstitial to flagged IPs *even through FlareSolverr* — the
+  "automatic fallback" never returned a result and masked the fact that
+  discovery has one working engine. Discovery is now honestly single-provider
+  (DuckDuckGo, solver-escalated); alternative engines plug in via
+  `hoardcore.providers` entry points, and the documented rescue path when
+  blocked is harness-side search + `ingest --urls`. `_parse_mojeek` deleted;
+  challenge-page detection retained and now provider-agnostic.
+
+### Docs
+- README/skill.md/architecture text updated to single-provider reality;
+  troubleshooting rows point at `tools/check_flaresolverr.py` and the
+  `ingest --urls` rescue pattern instead of the dead fallback.
+
 ## HoardCore v0.14.5
 
 ### Fixed

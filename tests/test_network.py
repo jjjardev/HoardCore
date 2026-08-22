@@ -294,12 +294,23 @@ def test_parse_duckduckgo_maps_uddg_links():
     assert res[0].title == "Example Title"
 
 
-def test_parse_mojeek_links():
-    html = '<a class="ob" href="https://mojeek-result.net">Mojeek Hit</a>'
-    res = hc.WebSearchProvider._parse_mojeek(html, 5)
-    assert len(res) == 1
-    assert res[0].url == "https://mojeek-result.net"
-    assert "Mojeek" in res[0].title
+def test_search_challenge_page_skips_provider_without_retries():
+    """A captcha/challenge page must be detected from the body, skipped
+    without same-provider retries (an IP block won't heal in 1.5s), and
+    produce an empty result when no plugin fallback exists."""
+    cfg = TempConfig("/tmp/challenge-skip", {"discovery.max_retries": 0})
+    calls = {"n": 0}
+
+    class FakeFetcher:
+        async def fetch(self, url, strategy):
+            calls["n"] += 1
+            return ('<html><head><title>Captcha</title></head>'
+                    '<body>prove you are human</body></html>', None, "text/html")
+
+    p = hc.WebSearchProvider(cfg, FakeFetcher())
+    res = asyncio.run(p.search("what is x", max_results=5))
+    assert res == []
+    assert calls["n"] == 1  # no retry storm against a hard block
 
 
 def test_parse_duckduckgo_filters_ad_tracking_links():
@@ -473,20 +484,21 @@ def test_process_document_skips_ad_tracking_url(tmp_path, monkeypatch):
     assert out[1].get("junk_reason") == "ad_tracking_url"
 
 
-def test_search_falls_back_across_providers(tmp_path):
-    """Provider 1 returns nothing -> provider 2 (mojeek) is used."""
+def test_search_falls_back_to_plugin_provider(tmp_path):
+    """Built-in provider returns nothing -> a registered plugin provider is
+    consulted (the plugin chain is the fallback tail)."""
     cfg = TempConfig(str(tmp_path), {"discovery.max_retries": 0})
 
     class FakeFetcher:
-        def __init__(self):
-            self.url = None
         async def fetch(self, url, strategy):
-            self.url = url
-            if "duckduckgo" in url:
-                return (None, None, "")
-            return ('<a class="ob" href="https://fallback.test/x">F</a>', None, "text/html")
+            return (None, None, "")
 
     p = hc.WebSearchProvider(cfg, FakeFetcher())
+
+    async def plugin(query, max_results):
+        return [hc.SearchResult(title="plugin hit", url="https://fallback.test/x")]
+
+    p.plugin_providers = {"custom": plugin}
     res = asyncio.run(p.search("what is x", max_results=5))
     assert len(res) == 1
     assert res[0].url == "https://fallback.test/x"

@@ -125,7 +125,7 @@ def test_ingest_many_serves_cached_chunks(tmp_path, monkeypatch):
 
 def test_discovery_plugin_providers_run_as_fallback_tail(tmp_path):
     """B5: plugin discovery providers were registered but never consulted;
-    search() only tried the hardcoded DuckDuckGo/Mojeek list. They must form
+    search() only tried the hardcoded DuckDuckGo provider. They must form
     the tail of the fallback chain."""
     provider = hc.WebSearchProvider(TempConfig(str(tmp_path)), object())
 
