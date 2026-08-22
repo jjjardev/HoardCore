@@ -33,7 +33,7 @@ class _FakeSession:
     async def __aexit__(self, *exc):
         return False
 
-    def get(self, url, timeout=None):
+    def get(self, url, timeout=None, **kwargs):
         return self._resp
 
 
@@ -168,3 +168,52 @@ def test_get_robots_urls_falls_back_to_default_only_on_failure(monkeypatch):
     planner = hc.CrawlerPlanner(TempConfig("/tmp/robots404", {"crawler.respect_robots": True}))
     out = asyncio.run(planner.get_robots_urls("https://a.test"))
     assert out == ["https://a.test/sitemap.xml"]
+
+
+def _rules_planner(rules_body: str):
+    planner = hc.CrawlerPlanner(TempConfig("/tmp/robots-rules", {"crawler.respect_robots": True}))
+    # Parse rules directly (bypasses the network fetch).
+    import re as _re
+    rules = []
+    for raw in rules_body.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip().lower()
+        value = value.strip()
+        if key not in ("disallow", "allow") or not value:
+            continue
+        anchored = value.endswith("$")
+        pat = value[:-1] if anchored else value
+        rx_text = ".*".join(_re.escape(p) for p in pat.split("*"))
+        rules.append((key == "allow", value,
+                      _re.compile("^" + rx_text + ("$" if anchored else ""))))
+    planner._robots_rules["site.test"] = rules
+    return planner
+
+
+def test_allowed_blocks_disallowed_prefix():
+    planner = _rules_planner("User-agent: *\nDisallow: /private/\n")
+    assert not planner.allowed("https://site.test/private/x")
+    assert planner.allowed("https://site.test/public/x")
+
+
+def test_allowed_longest_match_and_allow_wins_ties():
+    planner = _rules_planner("Disallow: /section\nAllow: /section/ok\n")
+    assert not planner.allowed("https://site.test/section/other")
+    assert planner.allowed("https://site.test/section/ok")
+
+
+def test_allowed_wildcard_and_dollar_anchor():
+    planner = _rules_planner("Disallow: *.pdf$\nAllow: /open/*.pdf$\n")
+    assert not planner.allowed("https://site.test/files/secret.pdf")
+    assert planner.allowed("https://site.test/open/free.pdf")
+    assert planner.allowed("https://site.test/files/secret.pdfx")
+
+
+def test_allowed_no_rules_or_disabled_means_allow():
+    planner = _rules_planner("")
+    assert planner.allowed("https://site.test/anything")
+    off = hc.CrawlerPlanner(TempConfig("/tmp/robots-off", {"crawler.respect_robots": False}))
+    assert off.allowed("https://elsewhere.test/private/")

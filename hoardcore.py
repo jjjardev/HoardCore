@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.14.4"
+__version__ = "0.14.5"
 
 import argparse
 import asyncio
@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from itertools import combinations
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlencode, urlparse
 
 # --- GUARANTEED DEPENDENCIES (Installed via Makefile) ---
 import aiohttp
@@ -199,6 +199,9 @@ batch_size = 16            # chunks per model forward pass at ingest (bit-identi
 quantize = "float32"       # "float32" (default) or "int8" (1 byte/dim, ~4x smaller, tiny recall cost)
 fts_fast_path = true       # skip the vector scan when FTS5 alone fills the result set (all-term AND match)
 recency_half_life_days = 0 # recency weighting in RRF: 0 = disabled; e.g. 30 halves an old hit's score per month
+conf_mode = "relative"     # confidence bands: "relative" (set-ordinal, default) or "absolute" (legacy)
+conf_high_abs = 0.025      # absolute mode: fused score >= this -> high
+conf_low_abs = 0.020       # absolute mode: fused score >= this -> medium, else low
 reranker_model = ""        # optional cross-encoder re-ranker applied to the final
                            # recalled set: e.g. "BAAI/bge-reranker-base" (MIT,
                            # English) or "jinaai/jina-reranker-v2-base-multilingual"
@@ -1680,7 +1683,6 @@ class VaultManager:
             "schema_version": schema_version,
             "page_size": page_size,
             "db_bytes": db_bytes,
-            "preferred_name": self.vault_name,
         }
 
     def confidence_distribution(self, probes: int = 4, recall: int = 6) -> dict[str, int]:
@@ -2271,6 +2273,7 @@ class VaultManager:
                     meta['source_url'] = url
                     meta['chunk_id'] = rid
                     meta['retrieval'] = 'fts_fast'
+                    meta['keyword_hit'] = True
                     meta['hybrid_score'] = None
                     # Confidence band is deliberately 'medium', not 'high':
                     # the vector scan was skipped, so semantic closeness is
@@ -2330,14 +2333,17 @@ class VaultManager:
                 rrf[rid] = rrf.get(rid, 0.0) + 1.0 / (k + rank + 1)
                 vec_rids.add(rid)
 
+            # URL per result, for source-diversity rebalancing and recency
+            # weighting (built once, shared by both).
+            url_by_rid: dict[int, str] = dict(fts_rows)
+            url_by_rid.update({rid: u for _s, rid, u in scored})
+
             # --- Recency weighting (P1.2) ---
             # Optionally dampen stale hits: rrf *= 0.5 ** (age_days / half_life).
             # Half-life is 0 (disabled) by default.
             half_life = float(self.config.get('embeddings.recency_half_life_days', 0) or 0)
             if half_life > 0 and rrf:
                 now = time.time()
-                url_by_rid = dict(fts_rows)
-                url_by_rid.update({rid: u for _s, rid, u in scored})
                 urls = list({u for u in url_by_rid.values() if u})
                 if urls:
                     placeholders = ",".join("?" * len(urls))
@@ -2355,11 +2361,6 @@ class VaultManager:
 
             if not rrf:
                 return []
-
-            # URL per result, for source-diversity rebalancing (built outside
-            # the recency block so `_diverse_order` always has it).
-            url_by_rid: dict[int, str] = dict(fts_rows)
-            url_by_rid.update({rid: u for _s, rid, u in scored})
 
             fused = sorted(rrf.items(), key=lambda kv: kv[1], reverse=True)
             order = self._diverse_order(fused, limit, max_per_source, url_by_rid)
@@ -2443,6 +2444,7 @@ class VaultManager:
                     url, _hp, text, meta_json = row
                     meta = json.loads(meta_json)
                     meta['hybrid_score'] = rrf.get(rid, 0.0)
+                    meta['keyword_hit'] = rid in fts_rids
                     meta['confidence'] = conf_by_rid.get(rid, "low")
                     meta['source_url'] = url
                     meta['chunk_id'] = rid
@@ -2508,7 +2510,6 @@ class NetworkFetcher:
         self._solver_timeout = config.get('solver.solver_timeout', 60)
         self._user_agent = config.get('general.user_agent', 'HoardCore/5.0')
         self._timeout = config.get('general.timeout_seconds', 30)
-        self._max_retries = config.get('general.max_retries', 2)
         self._enable_preflight = config.get('network.enable_preflight', True)
         # SSRF protection (network.ssrf_protection): refuse non-http(s) and
         # non-public fetch targets, and re-validate every redirect hop. Default
@@ -2587,6 +2588,14 @@ class NetworkFetcher:
         return cookies
 
     async def preflight(self, url: str) -> bool:
+        """Cookie-gate a target before the fetch chain touches it.
+
+        Returns True to proceed. Raises instead of returning False so callers
+        can distinguish WHY the probe failed: a block/403/429/captcha means
+        stale Cloudflare cookies (CF_COOKIE_EXPIRED), while any transport
+        error is surfaced as PREFLIGHT_ERROR — never misdiagnosed as an
+        expired cookie.
+        """
         if not self._enable_preflight or not self._parse_cookies():
             return True
         if self._ssrf_protected and not self.validate_url_target(url):
@@ -2609,15 +2618,19 @@ class NetworkFetcher:
                     resp.status in (302, 303)
                     and 'captcha' in resp.headers.get('Location', '').lower()
                 )
-                return not (blocked or captcha_redirect)
+                if blocked or captcha_redirect:
+                    raise RuntimeError("CF_COOKIE_EXPIRED")
+                return True
+        except RuntimeError:
+            raise
         except Exception as e:
             # Fail CLOSED: if the preflight itself errors (DNS, TLS, transient
-            # 5xx), the right default is to abort the fetch, not to proceed.
-            # Proceeding can hit Cloudflare with a request the probe could
-            # already have rejected, and failing open makes a soft-left case
-            # on any server deployment (C1).
+            # 5xx), abort the fetch rather than proceed — but under an honest
+            # marker, because proceeding can hit Cloudflare with a request the
+            # probe already rejected, and calling this "cookie expired" would
+            # send the user debugging the wrong thing (C1).
             logger.warning(f"Preflight check failed for {url}: {e}")
-            return False
+            raise RuntimeError("PREFLIGHT_ERROR") from e
 
     async def _fetch_aiohttp(self, url: str) -> tuple[str | None, bytes | None, str, int | None]:
         """Attempt 1: Standard aiohttp. Returns (text, binary, content_type, status).
@@ -2782,10 +2795,10 @@ class NetworkFetcher:
             logger.warning(f"SSRF guard refused fetch target: {url}")
             raise RuntimeError("SSRF_BLOCKED")
 
-        # Preflight validation
-        if (self._enable_preflight and self._parse_cookies()
-                and not await self.preflight(url)):
-            raise RuntimeError("CF_COOKIE_EXPIRED")
+        # Preflight validation (raises CF_COOKIE_EXPIRED / PREFLIGHT_ERROR /
+        # SSRF_BLOCKED with the specific cause).
+        if self._enable_preflight and self._parse_cookies():
+            await self.preflight(url)
 
         # Strategy dispatch
         text, binary, ctype, status = None, None, '', None
@@ -2833,8 +2846,8 @@ class NetworkFetcher:
         """Pick the first leg that produced content, preferring aiohttp on a tie
         (aiohttp's returned status is authoritative for soft-404 detection).
         Tolerates legacy 3-tuples from test doubles by padding status=None."""
-        aio = NetworkFetcher._pad(aio)
-        curl = NetworkFetcher._pad(curl)
+        aio = NetworkFetcher._normalize_fetch(aio)
+        curl = NetworkFetcher._normalize_fetch(curl)
         a_text, a_bin, a_ctype, a_status = aio
         c_text, c_bin, c_ctype, c_status = curl
         if (a_text is not None or a_bin is not None) and (
@@ -2849,14 +2862,6 @@ class NetworkFetcher:
         if a_text is not None or a_bin is not None:
             return aio
         return curl
-
-    @staticmethod
-    def _pad(result):
-        """Normalize a (text, binary, ctype) 3-tuple to a 4-tuple with
-        status=None (legacy test doubles and older legs)."""
-        if len(result) == 3:
-            return result[0], result[1], result[2], None
-        return result
 
     async def _try_plugin_fetchers(self, url: str) -> tuple[str | None, bytes | None, str, int | None]:
         """Try registered plugin fetchers in order (G1).
@@ -3356,6 +3361,9 @@ class CrawlerPlanner:
         self.config = config
         self.respect_robots = config.get('crawler.respect_robots', True)
         self.sitemap_limit = config.get('crawler.sitemap_limit', 500)
+        self._user_agent = config.get('general.user_agent', 'HoardCore/5.0')
+        # Parsed robots.txt rules per netloc: list of (allow, pattern, regex).
+        self._robots_rules: dict[str, list[tuple[bool, str, Any]]] = {}
 
     async def get_robots_urls(self, domain: str) -> list[str]:
         """Fetch robots.txt and extract sitemap URLs."""
@@ -3363,9 +3371,13 @@ class CrawlerPlanner:
             return []
 
         base_url = f"{domain}/robots.txt"
+        if not NetworkFetcher.validate_url_target(base_url):
+            logger.warning(f"SSRF guard refused crawler target: {base_url}")
+            return []
         try:
             async with aiohttp.ClientSession() as session, session.get(
-                base_url, timeout=ClientTimeout(total=10)
+                base_url, timeout=ClientTimeout(total=10),
+                headers={"User-Agent": self._user_agent},
             ) as resp:
                 if resp.status == 200:
                     text = await resp.text()
@@ -3382,6 +3394,69 @@ class CrawlerPlanner:
 
         # Fallback to default sitemap location
         return [f"{domain}/sitemap.xml"]
+
+    async def fetch_robots_rules(self, url: str) -> None:
+        """Download and parse the robots.txt rules for `url`'s origin.
+
+        Stores Disallow/Allow prefixes (all user-agent groups merged — a
+        deliberately conservative reading) keyed by netloc for `allowed()`.
+        A missing/unreachable robots.txt leaves no entry, which `allowed()`
+        treats as allow-all.
+        """
+        if not self.respect_robots:
+            return
+        parsed = urlparse(url)
+        host_root = f"{parsed.scheme}://{parsed.netloc}"
+        robots_url = f"{host_root}/robots.txt"
+        if not NetworkFetcher.validate_url_target(robots_url):
+            logger.warning(f"SSRF guard refused crawler target: {robots_url}")
+            return
+        try:
+            async with aiohttp.ClientSession() as session, session.get(
+                robots_url, timeout=ClientTimeout(total=10),
+                headers={"User-Agent": self._user_agent},
+            ) as resp:
+                body = await resp.text() if resp.status == 200 else ""
+        except Exception as e:
+            logger.warning(f"Failed to fetch robots.txt rules ({robots_url}): {e}")
+            return
+        rules: list[tuple[bool, str, Any]] = []
+        for raw in (body or "").splitlines():
+            line = raw.split("#", 1)[0].strip()
+            if ":" not in line:
+                continue
+            key, _, value = line.partition(":")
+            key = key.strip().lower()
+            value = value.strip()
+            if key not in ("disallow", "allow") or not value:
+                continue  # empty "Disallow:" means allow-all; nothing to store
+            anchored = value.endswith("$")
+            pat = value[:-1] if anchored else value
+            rx_text = ".*".join(re.escape(p) for p in pat.split("*"))
+            rules.append((key == "allow", value,
+                          re.compile("^" + rx_text + ("$" if anchored else ""))))
+        self._robots_rules[parsed.netloc] = rules
+
+    def allowed(self, url: str) -> bool:
+        """True if `url`'s path is permitted by the fetched robots.txt rules.
+
+        Longest matching prefix wins (Google's rule); on equal length, Allow
+        beats Disallow. No fetched rules -> allow.
+        """
+        if not self.respect_robots:
+            return True
+        rules = self._robots_rules.get(urlparse(url).netloc)
+        if not rules:
+            return True
+        path = urlparse(url).path or "/"
+        best_len = -1
+        best_allow = True
+        for allow, pattern, rx in rules:
+            if rx.match(path) and (len(pattern) > best_len
+                                   or (len(pattern) == best_len and allow)):
+                best_len = len(pattern)
+                best_allow = allow
+        return best_allow
 
     @staticmethod
     def _extract_locs(xml: str) -> list[str]:
@@ -3408,9 +3483,13 @@ class CrawlerPlanner:
 
     async def parse_sitemap(self, sitemap_url: str) -> list[str]:
         """Parse sitemap XML and extract URLs."""
+        if not NetworkFetcher.validate_url_target(sitemap_url):
+            logger.warning(f"SSRF guard refused crawler target: {sitemap_url}")
+            return []
         try:
             async with aiohttp.ClientSession() as session, session.get(
-                sitemap_url, timeout=ClientTimeout(total=30)
+                sitemap_url, timeout=ClientTimeout(total=30),
+                headers={"User-Agent": self._user_agent},
             ) as resp:
                 if resp.status != 200:
                     return []
@@ -3442,7 +3521,6 @@ class CrawlerPlanner:
 class SearchResult:
     title: str
     url: str
-    snippet: str = ""
 
 
 class WebSearchProvider:
@@ -3466,6 +3544,21 @@ class WebSearchProvider:
     def _clean_title(raw: str) -> str:
         return re.sub(r"<[^>]+>", "", raw).strip()
 
+    @staticmethod
+    def _looks_like_challenge(text: str) -> bool:
+        """True when a search-page body is an anti-bot block, not results.
+
+        Providers serve these with HTTP 200 (Mojeek captcha) or alongside odd
+        statuses, so a body sniff is the only reliable signal. Detected pages
+        are never parsed as results and never retried against the same
+        provider — an IP block won't heal in 1.5s.
+        """
+        head = text[:4000].lower()
+        if "<title>captcha" in head:
+            return True
+        # DuckDuckGo anomaly/challenge interstitials carry this canonical self-link.
+        return 'rel="canonical" href="https://duckduckgo.com/"' in head
+
     async def _fetch_with_backoff(self, url: str, strategy: str) -> str | None:
         """Fetch a search page, retrying transient failures with backoff."""
         last_exc: Exception | None = None
@@ -3474,6 +3567,11 @@ class WebSearchProvider:
                 data = await self.fetcher.fetch(url, strategy)
                 text = data[0] if data else None
                 if text:
+                    if self._looks_like_challenge(text):
+                        # Hard block: retrying identical requests against the
+                        # same blocked IP/provider cannot succeed — escalate
+                        # (or fall through to the next provider) immediately.
+                        raise RuntimeError("SEARCH_BLOCKED")
                     return text
                 raise RuntimeError("empty search response")
             except Exception as e:  # transient: rate-limit, 5xx, timeout
@@ -3533,14 +3631,22 @@ class WebSearchProvider:
 
     async def _try_provider(self, url: str, strategy: str, max_results: int,
                             parser) -> list[SearchResult]:
-        text = await self._fetch_with_backoff(url, strategy)
+        try:
+            text = await self._fetch_with_backoff(url, strategy)
+        except RuntimeError as e:
+            if str(e) == "SEARCH_BLOCKED":
+                logger.warning(
+                    f"Discovery provider BLOCKED us (challenge page at {url}); "
+                    "not retrying — trying fallback."
+                )
+            return []
         if not text:
             return []
         return parser(text, max_results)
 
     async def search(self, query: str, max_results: int = 10,
                      strategy: str = "aggressive") -> list[SearchResult]:
-        q = re.sub(r"\s+", "+", query.strip())
+        q = urlencode({"q": query.strip()})
         # (label, url, parser) ordered by preference; later entries are fallbacks.
         providers = [
             ("duckduckgo", f"https://html.duckduckgo.com/html/?q={q}",
@@ -3549,14 +3655,12 @@ class WebSearchProvider:
              self._parse_mojeek),
         ]
 
-        last_results: list[SearchResult] = []
         for label, url, parser in providers:
             results = await self._try_provider(url, strategy, max_results, parser)
             if results:
                 logger.info(f"Discovery provider '{label}' returned {len(results)} results.")
                 return results
             logger.warning(f"Discovery provider '{label}' returned nothing; trying fallback.")
-            last_results = results
 
         # Plugin-provided discovery backends form the tail of the fallback
         # chain (built-ins first). A plugin provider is a callable
@@ -3583,7 +3687,7 @@ class WebSearchProvider:
                     "trying fallback."
                 )
 
-        return last_results
+        return []
 
 
 # =============================================================================
@@ -3622,9 +3726,6 @@ class EventBus:
                 fn(**kwargs)
             except Exception as e:
                 logger.warning(f"Event handler '{event}' raised: {e}")
-
-    def handlers(self, event: str) -> list[Any]:
-        return list(self._handlers.get(event, []))
 
 
 class PluginManager:
@@ -4149,19 +4250,23 @@ class HoardCore:
             c.metadata['retrieval'] = 'cross_vault'
             chunks.append(c)
 
-        # Set-relative confidence bands over the fused set (mirrors the
-        # relative mode of _search_hybrid: top ~20% can be high, bottom ~half
-        # hugging the coincidence floor is low, the middle stays medium).
+        # Set-relative confidence bands over the fused set — mirroring the
+        # single-vault relative mode INCLUDING its keyword-backing gate: only
+        # a set whose top half contains a genuine FTS match may crown 'high'
+        # (a pure-vector/off-topic fused set stays medium, never high).
         n = len(chunks)
         if n:
             top, tail = score[keys[0]], score[keys[-1]]
             spread = max(top - tail, 1e-9)
             n_high = max(1, (n * 2) // 10 + (1 if n % 10 >= 5 else 0))
             n_low = max(1, n // 2)
+            keyword_backed = any(
+                results[key].metadata.get('keyword_hit') for key in keys[:max(1, (n + 1) // 2)]
+            )
             for idx, key in enumerate(keys):
                 rel = (score[key] - tail) / spread
                 conf = "medium"
-                if rel >= 0.66 and idx < n_high:
+                if keyword_backed and rel >= 0.66 and idx < n_high:
                     conf = "high"
                 elif rel <= 0.10 and idx >= n_low:
                     conf = "low"
@@ -4329,8 +4434,9 @@ class HoardCore:
             # Slide a 60-char window across the needle so a claim whose
             # *distinctive* portion is not its first 60 chars still matches
             # verbatim (A1). Every windowed fragment is tested; the first hit
-            # confirms the claim.
-            step = 60
+            # confirms the claim. Windows OVERLAP (step = window/2) so a
+            # distinctive phrase straddling a boundary is never missed.
+            step = 30
             window = 60
             # A short needle is one fragment; a long one is broken into
             # overlapping windows so a distinctive tail gets a chance.
@@ -4360,7 +4466,7 @@ class HoardCore:
         #    claim and measure the strength of the top hit. "Partial" is only
         #    reported when the top all-terms hit measurably beats the vault's
         #    coincidence floor — the best rank any single claim term achieves
-#     alone. Semantics are the same as an absolute-BM25 bar (co-
+        #    alone. Semantics are the same as an absolute-BM25 bar (co-
         #     occurrence of a few common stopwords is NOT evidence, A2) but
         #     corpus-size independent: raw FTS5 ranks are ~1e-6 on a small
         #     vault and ~-20 on a large one, so a fixed absolute cutoff like
@@ -4600,7 +4706,12 @@ class HoardCore:
         }
 
     def _extract_source_links(self, lines: list[str]) -> dict[str, str]:
-        """Map `[#N] url` entries in a markdown "Source Links / Citations" block."""
+        """Map `[#N] url` entries in a markdown "Source Links / Citations" block.
+
+        Tolerates both rendered forms of `citation_list`: a bare URL and a
+        labeled entry (`[#N] Label — url`), by taking the text after the em
+        dash when present, else the first token.
+        """
         source_block: dict[str, str] = {}
         in_links = False
         for ln in lines:
@@ -4608,9 +4719,14 @@ class HoardCore:
                 in_links = ("source link" in ln.lower() or "citation" in ln.lower())
                 continue
             if in_links:
-                m = re.match(r"\[\s*#\s*(\d+)\s*\](?::)?\s*(\S+)", ln)
+                m = re.match(r"\[\s*#\s*(\d+)\s*\](?::)?\s*(.+)", ln)
                 if m:
-                    source_block[m.group(1)] = m.group(2).rstrip(",;")
+                    rest = m.group(2).strip()
+                    if "—" in rest:
+                        url = rest.split("—")[-1].strip()
+                    else:
+                        url = rest.split()[0] if rest.split() else ""
+                    source_block[m.group(1)] = url.rstrip(",;")
         return source_block
 
     @staticmethod
@@ -4883,12 +4999,18 @@ class HoardCore:
 
         logger.info(f"Discovered {len(discovered_urls)} URLs for crawling.")
 
+        # Load robots.txt rules once for this origin, then gate every target.
+        await self.crawler.fetch_robots_rules(url)
+
         # Use semaphore to limit parallel workers
         max_workers = max(1, self.config.get('crawler.parallel_workers', 5))
         semaphore = asyncio.Semaphore(max_workers)
 
         async def _crawl_one(single_url: str) -> list[Chunk]:
             async with semaphore:
+                if not self.crawler.allowed(single_url):
+                    logger.warning(f"crawl: robots.txt disallows {single_url}; skipping.")
+                    return []
                 try:
                     chunks, meta = await self._process_document(single_url, strategy, force_refresh)
                     if meta.get('cached'):
@@ -5401,8 +5523,7 @@ async def _main_impl(argv: list[str] | None = None) -> None:
                       f"analysis line — move the tag to the verbatim quote "
                       f"in the body, or demote the line to [E]")
         bad_map = bool(audit["unmapped"] or audit["not_ingested"])
-        sys.exit(2 if (c["unverified"] or bad_map)
-                 else (1 if c["partial"] else (0 if total else 0)))
+        sys.exit(2 if (c["unverified"] or bad_map) else (1 if c["partial"] else 0))
 
     if action == "local":
         local_dir = scraper.config.get('storage.local_dir', 'local_inputs')
@@ -5423,7 +5544,10 @@ async def _main_impl(argv: list[str] | None = None) -> None:
         print(f"=== Local ingest: {local_dir}/ ({relpath}) ===")
         results = await scraper.local_ingest(relpath, force_refresh=args.force)
         print(f"✅ Done. Ingested {len(results)} chunks from local files.")
-        sys.exit(0 if results else 1)
+        # A cached/no-op run (nothing new to index) is a success, not a
+        # failure; only per-file errors fail the gate.
+        had_errors = any(r.get("metadata", {}).get("error") for r in results)
+        sys.exit(2 if had_errors else 0)
 
     if action == "check":
         if migrate_page_size:
@@ -5475,6 +5599,11 @@ async def _main_impl(argv: list[str] | None = None) -> None:
                   "string.", file=sys.stderr)
             print("  Update auth.cookie_string in hoardcore.toml (or raise "
                   "network.timeout_seconds) and retry.", file=sys.stderr)
+        elif marker == "PREFLIGHT_ERROR":
+            print("  ⚠️  Pre-flight probe failed (DNS / TLS / timeout) — fetch "
+                  "aborted before the chain ran.", file=sys.stderr)
+            print("  This is a network fault, NOT an expired cookie. Check "
+                  "connectivity or raise network.timeout_seconds.", file=sys.stderr)
         elif marker == "FETCH_FAILED":
             print("  ⚠️  Fetch chain exhausted (aiohttp →" +
                   (" curl_cffi →" if CURL_AVAILABLE else "") +

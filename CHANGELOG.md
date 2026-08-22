@@ -3,6 +3,57 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.14.5
+
+### Fixed
+- **Crawler SSRF gap closed.** `robots.txt` and sitemap fetches now go through
+  `NetworkFetcher.validate_url_target()` (the same gate as every content fetch)
+  and send the configured User-Agent — a `crawl` on an attacker-chosen URL can
+  no longer probe LAN/metadata endpoints via its sitemap path.
+- **`crawler.respect_robots` now enforces `Disallow`.** New robots.txt rule
+  parser (Allow/Disallow, `*` wildcards, `$` anchors, longest-match-wins,
+  Allow wins ties) gates every `_crawl_one` target; 4 new tests.
+- **Discovery queries are URL-encoded** (`urlencode`) — a query containing
+  `&`, `#`, or `%` no longer corrupts the search URL.
+- **verify's claim window genuinely overlaps** (`step = 30` for a 60-char
+  window): a distinctive phrase straddling a block boundary can no longer be
+  missed; comment and README wording now match behavior.
+- **Cross-vault confidence honors the keyword-backing gate**: a pure-vector
+  fused set across `--vault a,b,c` stays `medium` and can never crown `high`
+  (chunks carry a new `keyword_hit` provenance field).
+- **audit reads labeled citations correctly**: the Source Links extractor now
+  handles `[#N] Label — url`, so `citation_list({label: url})` artifacts no
+  longer fail MAPPED/INGESTED on the label token.
+- **Preflight failures are diagnosed honestly**: transport errors raise
+  `PREFLIGHT_ERROR` ("network fault, not an expired cookie") instead of being
+  misreported as `CF_COOKIE_EXPIRED`.
+- **`--action local` exits 0 on a cached/no-op run** (2 only on real per-file
+  errors) instead of failing CI after a clean skip.
+
+### Added
+- **Anti-bot block detection for discovery**: Mojeek captcha pages and
+  DuckDuckGo anomaly interstitials are detected from the body, logged as
+  "provider BLOCKED us", and skipped without futile same-provider retries.
+- **`tools/check_flaresolverr.py`** — solver health check that proves Chrome +
+  egress with a real solve (exit 0/1/2), distinguishing DNS failure, Chrome
+  launch failure, and timeouts.
+- **`deploy/docker-compose.flaresolverr.yml`** — known-good FlareSolverr config
+  (explicit public DNS vs the systemd-resolved loopback stub, `shm_size`,
+  debug logging) so recreations can't silently regress.
+
+### Removed
+- Dead code: unused `NetworkFetcher._max_retries`, `EventBus.handlers()`,
+  `SearchResult.snippet`, `stats()['preferred_name']`; redundant audit exit
+  expression and duplicate `url_by_rid` build in hybrid search.
+
+### Docs
+- README version badge synced (0.14.4 → shipped code), PEP 605 style note
+  corrected, `conf_high_abs`/`conf_low_abs` added to the generated default
+  config (code default `0.020` is canonical), FlareSolverr troubleshooting row
+  points at the compose file + health check. Makefile `install` now includes
+  the test toolchain (pytest/ruff/bandit/pyright); `clean` no longer deletes
+  your `hoardcore.toml`.
+
 ## HoardCore v0.14.4
 
 ### Changed

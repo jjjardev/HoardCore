@@ -4,7 +4,7 @@ Research toolkit for AI agents — give your agent a memory it can prove.
 
 Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo/Mojeek web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
 
-![Version](https://img.shields.io/badge/version-0.14.3-blue)
+![Version](https://img.shields.io/badge/version-0.14.4-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -827,7 +827,7 @@ venv/bin/python -m pytest tests/ -v     # run the pytest suite
 - **Minimal global mutable state** — `ConfigManager` is a singleton **only on the default config path**; constructing one with a non-default `config_path` builds a fresh, independent instance (fixing state bleed between separately-constructed managers), and tests isolate via a `TempConfig` stand-in
 - **DB access always through `_db()`** — the context manager guarantees commit/rollback/close
 - **Optional heavy dependencies lazy-imported** — HTML-only usage never pulls PDF/DOCX/EPUB libraries
-- **Annotated signatures** (`Optional`, `Tuple`, `List`) on all public methods
+- **Annotated signatures** (PEP 605 unions like `str | None` and builtin generics) on all public methods
 
 ---
 
@@ -839,6 +839,7 @@ venv/bin/python -m pytest tests/ -v     # run the pytest suite
 | `FlareSolverr: Solving challenge...` then timeout | FlareSolverr container not started, or endpoint mismatch | `docker run -d --name=flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr`; verify `[solver] url = "http://localhost:8191/v1"` |
 | `aiohttp: Status 202` on discovery / FlareSolverr timeouts | Rate-limit or proxy-shaped search page | Discovery auto-retries with backoff and falls back to Mojeek; rerun or lower `--limit` |
 | Discovery returns nothing | Search provider empty | Mojeek fallback is automatic; increase `discovery.max_retries` / `backoff_seconds` |
+| FlareSolverr API answers but every solve times out | Container egress/DNS wedged (systemd-resolved stub) or stale container filesystem | Recreate with the known-good config: `sudo docker compose -f deploy/docker-compose.flaresolverr.yml up -d --force-recreate`, then `venv/bin/python tools/check_flaresolverr.py` (exit 0 = healthy; it also explains the DNS root cause) |
 | `PyMuPDF (fitz) not installed` printed | Optional PDF lib missing | `make install` (installs PyMuPDF) or `pip install pymupdf` |
 | `python-docx` / `ebooklib` message | Optional binaries missing | `pip install python-docx ebooklib` |
 | Search returns empty for an unusual query | FTS operator / empty tokens | Search is safe now (returns `[]`, never raises); try hybrid mode |

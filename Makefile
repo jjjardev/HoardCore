@@ -17,6 +17,8 @@ install:
 	@test -d venv || $(PYTHON) -m venv venv
 	venv/bin/python -m pip install --upgrade pip
 	venv/bin/python -m pip install aiohttp curl_cffi trafilatura readability-lxml tomli PyMuPDF python-docx ebooklib lxml fastembed
+	@echo "🧰 Installing the test/lint toolchain (make test/lint/audit/typecheck)..."
+	venv/bin/python -m pip install pytest pytest-cov ruff bandit pyright
 	@echo "For OCR of scanned PDFs, install the optional fallback next:"
 	@echo "  venv/bin/python -m pip install rapidocr_onnxruntime"
 	@echo "✅ Lightweight install complete. Dense retrieval (ONNX, no torch) is on by default."
@@ -61,5 +63,4 @@ clean:
 	rm -rf hoardcore_data/
 	rm -rf __pycache__/
 	rm -rf .pytest_cache/
-	rm -f hoardcore.toml
-	@echo "✅ Clean complete."
+	@echo "✅ Clean complete. (hoardcore.toml is kept — delete it by hand if you want a pristine config.)"

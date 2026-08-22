@@ -1,0 +1,29 @@
+# FlareSolverr — deployment config that is known-good on this host.
+#
+# Why these flags matter (each one fixed a real outage):
+#   dns:        the host uses systemd-resolved (nameserver 127.0.0.53). Docker
+#               copies that into the container, where loopback points at the
+#               container itself -> Chrome gets ERR_NAME_NOT_RESOLVED and every
+#               solve times out. Explicit public DNS fixes it.
+#   shm_size:   Chromium needs more than Docker's 64 MB default /dev/shm or it
+#               can crash on tab startup.
+#
+# Recreate after image updates so a stale filesystem never persists:
+#   sudo docker compose -f deploy/docker-compose.flaresolverr.yml up -d --force-recreate
+#
+# Health check (exit 0 healthy / 1 degraded / 2 unreachable):
+#   venv/bin/python tools/check_flaresolverr.py
+
+services:
+  flaresolverr:
+    image: flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    ports:
+      - "8191:8191"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    shm_size: "1g"
+    environment:
+      - LOG_LEVEL=info
+    restart: unless-stopped
