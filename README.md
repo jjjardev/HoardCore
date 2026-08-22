@@ -744,7 +744,7 @@ Created automatically on first run. Key sections:
 - **FTS**: `SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank`.
 - **Vector**: a single numpy matrix–vector product over the whole vector table (`argpartition` for top-k, matrix cached when the table is unchanged), falling back to per-row cosine when numpy is absent. In dense mode this is an ONNX-quantized sentence-transformer embedding (384-dim); in sparse mode it is the FNV-1a lexical hash.
 
-Each candidate contributes `1 / (k + rank + 1)`; results are sorted by the sum and the top-N returned. Hits carry a **confidence band** (`high`/`medium`/`low`) derived per-recall-set rather than from a ratio-to-top (which stays ~0.9 even for weak queries because RRF scores cluster). The default relative mode ranks within the set: the top hit(s) clearly above the set's tail are `high`, the tail hugging the coincidence floor is `low`, and only a keyword-backed set can crown `high`. `conf_mode = "absolute"` restores the legacy thresholds (`conf_high_abs`/`conf_low_abs` on the fused score, plus the matched-both-lists signal). The vector scan is O(N) per query (one matmul + `argpartition`), but the numpy matrix form keeps the constant tiny — ideal for thousands of chunks, still fine at hundreds of thousands.
+Each candidate contributes `1 / (k + rank + 1)`; results are sorted by the sum and the top-N returned. Hits carry a **confidence band** (`high`/`medium`/`low`) derived per-recall-set rather than from a ratio-to-top (which stays ~0.9 even for weak queries because RRF scores cluster). The default relative mode ranks within the set: the top hit(s) clearly above the set's tail are `high`, the tail hugging the coincidence floor is `low`, and only a keyword-backed set can crown `high`. `conf_mode = "absolute"` restores the legacy thresholds (`conf_high_abs`/`conf_low_abs` on the fused score, plus the matched-both-lists signal). The vector scan is O(N) per query (one matmul + `argpartition`), but the numpy matrix form keeps the constant tiny — ideal for thousands of chunks, still fine at hundreds of thousands (measured: ~26 ms/query at 50 K vectors, int8, warm).
 
 **Dimension / embedding-config migration.** Each cached vector is keyed by an embedding fingerprint (`embed_fp` = model + dim + quantize). `backfill_vectors` recomputes rows whose fingerprint no longer matches the configured mode/`dense_model`/`dim` (e.g. switching sparse 256-dim ↔ dense 384-dim, or swapping models) *in place*, in batch transactions with stale-row cleanup — so stale vectors are never served and a config switch is resumable across interrupts, no destructive delete-all.
 
@@ -793,8 +793,12 @@ HoardCore/
         test_audit.py          artifact [V#N] evidence-chain audit
         test_parser_robust.py  parser crash-resistance (random bytes + corrupt binaries)
         test_regressions.py    regression coverage for past bugs
+    deploy/
+        docker-compose.flaresolverr.yml   known-good FlareSolverr container
+                                          (explicit DNS + shm; see troubleshooting)
     tools/
-        check_version.py       CI version-sync gate (__version__ == pyproject == git tag)
+        check_version.py       CI version-sync gate (__version__ == pyproject == git tag == README badge)
+        check_flaresolverr.py  solver health check (real solve test; exit 0/1/2)
         bench_vector.py        numpy matmul vector-scan benchmark (float32/int8 x page sizes)
         bench_hoardcore_full.py  full numeric benchmark: ingest throughput, search latency,
                                retrieval quality (P@1/P@5/MRR/nDCG), storage footprint,
