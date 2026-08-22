@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.16.0"
+__version__ = "0.16.1"
 
 import argparse
 import asyncio
@@ -2094,7 +2094,7 @@ class VaultManager:
             and self._vec_mat_cache.get("expected") == expected_bytes
             and self._vec_mat_cache.get("mat") is not None
         )
-        if cache_valid:
+        if cache_valid and _np is not None:
             mat = self._vec_mat_cache["mat"]
             rids = self._vec_mat_cache["rids"]
             urls = self._vec_mat_cache["urls"]

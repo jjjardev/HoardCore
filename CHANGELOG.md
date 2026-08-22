@@ -3,6 +3,14 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.16.1
+
+### Fixed
+- **CI pyright gate restored** (regression from v0.16.0): the new cache-hit
+  fast path in `_vector_scan` accessed `_np` attributes through an
+  intermediate boolean that pyright cannot type-narrow; the `_np is not None`
+  guard is now folded into the branch condition directly.
+
 ## HoardCore v0.16.0
 
 ### Fixed
