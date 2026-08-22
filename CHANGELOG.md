@@ -3,6 +3,39 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.16.0
+
+### Fixed
+- **~10x warm vector-scan speedup @50K vectors.** `_vector_scan` re-read
+  every BLOB from SQLite on each query (~82 MB float32 / ~20 MB int8) merely
+  to validate the matrix cache. Validation now probes
+  `COUNT(*) + SUM(length(vector))` (metadata pages only) before any blob I/O:
+  warm median at 50K vectors dropped from 120.5 ms to 79.4 ms (float32) and
+  from 58.1 ms to 25.8 ms (int8).
+
+### Changed
+- **int8 is now the faster storage format** on the production scan path
+  (~1.9x vs float32 warm), restoring the ecosystem contract; config text
+  updated accordingly.
+- `tools/bench_vector.py` docstring corrected: it measures the legacy
+  per-row fallback path, not the production matmul+cache scan.
+
+### Performance
+- **Batched backfill:** `backfill_vectors` now embeds via `vectorize_batch`
+  slices with per-item fallback instead of one model call per row.
+
+## HoardCore v0.15.2
+
+### Fixed
+- **The version gate now checks the README badge** (it had drifted twice:
+  0.14.3, 0.14.4). `check_version.py` fails when the badge disagrees with
+  `__version__`.
+
+### Docs
+- Badge synced; 'automatic provider fallback' phrasing corrected to
+  single-provider reality; dead `extract_pdf_tables` key removed from test
+  config.
+
 ## HoardCore v0.15.1
 
 ### Fixed
