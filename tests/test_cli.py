@@ -396,6 +396,7 @@ def test_ingest_ledger_reports_skips(tmp_path, capsys, monkeypatch):
     """The CLI surfaces a per-URL ledger so junk skips / failures are visible
     instead of hiding behind a lone 'Returned N chunks' line."""
     import asyncio
+
     from tests.conftest import TempConfig
     hc_inst = hc.HoardCore.__new__(hc.HoardCore)
     cfg = TempConfig(str(tmp_path))
@@ -426,6 +427,7 @@ def test_ingest_retry_sweep_recovers_transient_failures(tmp_path, monkeypatch):
     """A URL that fails once (network fault) gets exactly one retry inside the
     same batch; junk verdicts are never retried."""
     import asyncio
+
     from tests.conftest import TempConfig
     hc_inst = hc.HoardCore.__new__(hc.HoardCore)
     cfg = TempConfig(str(tmp_path))

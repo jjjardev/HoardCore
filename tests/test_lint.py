@@ -2,7 +2,6 @@
 
 import hoardcore as hc
 
-
 LINES_OK = [
     "# Report",
     "",
