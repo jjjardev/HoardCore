@@ -1951,6 +1951,53 @@ class VaultManager:
                           chunks=len(chunks), parallel=True)
         logger.info(f"Indexed {len(chunks)} chunks for {url} (v{version}, parallel)")
 
+    TRANSPORT_ERROR_RE = re.compile(
+        r"\bhttp error \d{3}\b|\berr_(?:timed_out|connection_[a-z]+|name_not_resolved)\b"
+        r"|this page isn['\u2019]t working|took too long to respond"
+        r"|gateway time-out|service unavailable|too many requests",
+        re.IGNORECASE,
+    )
+
+    def find_transport_error_sources(self) -> dict[str, int]:
+        """Distinct URLs whose stored chunks look like transport-error stubs
+        (historically indexed before the junk detector caught them)."""
+        found: dict[str, int] = {}
+        with self._db() as (_conn, cursor):
+            cursor.execute("SELECT url, text FROM chunks_fts")
+            for url, text in cursor.fetchall():
+                if text and self.TRANSPORT_ERROR_RE.search(text[:1200]):
+                    found[url] = found.get(url, 0) + 1
+        return found
+
+    def prune_urls(self, urls: list[str], dry_run: bool = True) -> list[dict[str, Any]]:
+        """Remove all indexed traces of the given URLs (documents row, FTS
+        chunks, vectors, simhash rows). Content-addressed shared rows in
+        chunks_ca/chunk_vectors_ca are left alone by design. Extracted-text
+        files on disk are not touched."""
+        report: list[dict[str, Any]] = []
+        with self._db() as (conn, cursor):
+            for url in urls:
+                counts = {}
+                for table in ("chunks_fts", "chunk_vectors", "chunks_simhash",
+                              "documents"):
+                    try:
+                        cursor.execute(f"SELECT COUNT(*) FROM {table} WHERE url = ?",
+                                       (url,))
+                        counts[table] = cursor.fetchone()[0]
+                    except sqlite3.OperationalError:
+                        counts[table] = 0
+                total = sum(counts.values())
+                entry = {"url": url, "rows": counts, "total": total,
+                         "deleted": 0}
+                if not dry_run and total:
+                    for table in ("chunks_fts", "chunk_vectors",
+                                  "chunks_simhash", "documents"):
+                        cursor.execute(f"DELETE FROM {table} WHERE url = ?", (url,))
+                    conn.commit()
+                    entry["deleted"] = total
+                report.append(entry)
+        return report
+
     def latest_content_hash(self, url: str) -> str | None:
         """Return the newest stored `content_hash` for a URL, or None.
 
@@ -5492,12 +5539,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--action", choices=["scrape", "crawl", "search", "ingest",
                              "discover", "research", "verify", "check", "stats",
-                             "audit", "lint", "local"],
+                             "audit", "lint", "prune",
+                             "local"],
         default="scrape", help="Action to run (default: scrape).",
     )
     parser.add_argument(
         "--strategy", choices=["fast", "balanced", "aggressive"], default=None,
         help="Fetch strategy (default: network.default_strategy).",
+    )
+    parser.add_argument(
+        "--apply", action="store_true",
+        help="With --action prune: actually delete (default is dry-run).",
     )
     parser.add_argument(
         "--strict", action="store_true",
@@ -5730,6 +5782,30 @@ async def _main_impl(argv: list[str] | None = None) -> None:
               f"(strict={'on' if report['strict'] else 'off'}) ===")
         sys.exit(2 if c.get("error") else
                  (1 if report["strict"] and c.get("warning") else 0))
+
+    if action == "prune":
+        apply_changes = bool(getattr(args, "apply", False))
+        urls: list[str] = [u for u in re.split(r"[,\s]+", args.urls or "") if u]
+        for vault in scraper.vaults:
+            targets = list(urls)
+            if not urls:
+                found = vault.find_transport_error_sources()
+                print(f"=== {vault.vault_name or '(default)'}: "
+                      f"{len(found)} transport-error source(s), "
+                      f"{sum(found.values())} chunk(s) ===")
+                targets = list(found)
+            else:
+                print(f"=== {vault.vault_name or '(default)'} ===")
+            if not targets:
+                print("  nothing to prune.")
+                continue
+            report = vault.prune_urls(targets, dry_run=not apply_changes)
+            mode = "PRUNED" if apply_changes else "DRY-RUN (use --apply)"
+            for r in report:
+                if r["total"] or not urls:
+                    print(f"  [{mode}] {r['url']} — {r['total']} row(s)"
+                          + (f", {r['deleted']} deleted" if r["deleted"] else ""))
+        sys.exit(0)
 
     if action == "audit":
         if not args.artifact:
