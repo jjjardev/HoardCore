@@ -207,6 +207,13 @@ python hoardcore.py _ --action verify --claim "the Epoch doubling time is 6 mont
 # Audit an artifact's [V#N] evidence chain (verbatim verify + source-link mapping + ingested)
 python hoardcore.py _ --action audit --artifact artifacts/2026-08-18/synthesis_x.md
 
+# Pre-audit authoring lint (no vault/network; --strict escalates warnings)
+python hoardcore.py _ --action lint --artifact artifacts/2026-08-18/synthesis_x.md
+
+# Detect & purge transport-error ghost sources (dry-run by default)
+python hoardcore.py _ --action prune            # scan all vaults in scope
+python hoardcore.py _ --action prune --apply    # actually delete rows
+
 # Run a three-phase vault integrity check (0=pass, 1=fail)
 python hoardcore.py _ --action check
 echo "exit code: $?"
@@ -445,7 +452,7 @@ The pipeline for each document:
 
 1. **Fetch** — tries the strategy chain (aiohttp ⟂ curl_cffi concurrently → FlareSolverr) until one returns content. With the default `aggressive` strategy and `[solver] enabled = true`, FlareSolverr is the terminal leg that clears Cloudflare-shaped challenges.
 2. **Parse** — HTML via `trafilatura` + `readability` with a self-selecting-best fallback; PDF/DOCX/EPUB via lazy-loaded binaries; else raw-text strip. **Scanned PDFs:** pages with no extractable text are auto-OCRed via RapidOCR (optional `pip install .[ocr]`, fully local ONNX, no system deps); OCR'd pages are flagged in metadata (`parser: pymupdf+ocr`, `ocr_pages`).
-3. **Junk-filter** — boilerplate/redirect/404/captcha pages and near-empty extractions are detected and refused entry to the vault.
+3. **Junk-filter** — boilerplate/redirect/404/captcha pages, near-empty extractions, and transport-error stubs rendered at HTTP 200 (`HTTP ERROR 429`, timed-out shells) are detected and refused entry to the vault; batch ingests close with an `--- INGEST LEDGER ---` naming every skipped/failed URL and reason.
 4. **Chunk** — semantic splitting respecting headers (or paragraphs for binaries).
 5. **Store** — chunks persisted to FTS5, mirrored as markdown + chunks JSON under `hoardcore_data/`, and embeddings backfilled.
 
@@ -606,19 +613,21 @@ hoardcore [URL] [options]
 | `ingest` | Index an explicit URL list given as a comma/space separated `--urls` string. |
 | `discover` | Web-search `--query`, ingest the top `--limit` results (default `discovery.top_rank`). |
 | `research` | Run `discover -> ingest -> recall -> emit` (memory-first: live DISCOVER is skipped when the vault already has a high-confidence answer, unless `--no-answer-first`); writes to `--out` or a day-sorted `artifacts/YYYY-MM-DD/grounding/grounding_context.md` (the grounding subdir is configurable via `storage.grounding_subdir`). |
-| `verify` | Programmatic provenance audit: confirm `--claim` against vault text (exact phrasing, typography-blind; `--hint` prints the nearest vault phrase on denial). |
+| `verify` | Programmatic provenance audit: confirm `--claim` against vault text (exact phrasing, typography-blind; `--hint` prints the nearest stored phrase to reword toward (OR-relaxed candidate rescue; opt-in `verify.hint_vector` semantic assist). |
 | `audit` | Audit an artifact's `[V#N]` evidence chain (verbatim + source-link mapping + ingested). |
+| `lint` | Static pre-audit authoring checks on an artifact (no vault/network): `[V#N]` inside table rows, tags sharing a line with earlier `[E]`/`[H]`, sub-24-char attributed quotes, unmapped `[#N]` refs, unclosed quotes. `--strict` escalates warnings to failures. |
+| `prune` | Detect & retro-purge transport-error ghost sources (429/timeout stubs that were indexed before the junk gate). Dry-run by default; `--apply` deletes. `--urls a,b` targets specific URLs instead of scanning. |
 | `check` | Run a three-phase vault integrity check (content hashes, counts, vector dims). |
 | `stats` | Vault summary in one command: sources, chunks, vectors, embedding dim/mode, schema version, DB size, plus a sampled confidence-band distribution (`high`/`medium`/`low`) to spot retrieval flatness. With `--vault a,b,c` prints a block per named vault. |
 | `local` | Index local files from `storage.local_dir` (default `local_inputs/`, git-ignored) — no network. Supported: `.pdf .docx .epub .html .htm .txt .md`, walked recursively. `--path` scopes to a file/folder inside it, `--list` is a read-only scan. Freshness is content-based (unchanged extracted content is skipped unless `--force`). |
 
-Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `audit`, `check`, `stats`) does not need a URL.
+Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `audit`, `lint`, `check`, `prune`, `stats`) does not need a URL.
 
 ### Flags
 
 | Flag | Description |
 |---|---|
-| `--action ACTION` | One of `scrape`, `crawl`, `search`, `ingest`, `discover`, `research`, `verify`, `audit`, `check`, `stats`, `local`. |
+| `--action ACTION` | One of `scrape`, `crawl`, `search`, `ingest`, `discover`, `research`, `verify`, `audit`, `lint`, `prune`, `check`, `stats`, `local`. |
 | `--strategy S` | `fast`, `balanced`, or `aggressive` (default from config). |
 | `--query Q` | Required for `search`, `discover`, `research`. |
 | `--limit N` | Top results to ingest for `discover` (default `discovery.top_rank`); max chunks returned for `search`. |
@@ -629,6 +638,9 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 | `--keep-low` | With `research`: retain low-confidence hits in the grounding context (skip `filter_low`) — for exhaustive/deep hunts that want the full evidence tail. |
 | `--out PATH` | Output file for `research` (default: `artifacts/YYYY-MM-DD/grounding/grounding_context.md`, suffixed `_N` when today's already exists). |
 | `--artifact PATH` | With `audit`: path to a synthesis artifact to audit. |
+| `--strict` | With `lint`: escalate warning-severity findings to failures (exit code). |
+| `--preview-chars N` | Characters shown per chunk in the CLI preview (default 300; `0` prints full text). |
+| `--apply` | With `prune`: actually delete detected rows (default is a dry-run report). |
 | `--claim C` | Claim text to verify for the `verify` action. In shells, escape `$` as `\$` (bash expands `$13` to empty); or use `--claim-file` to read the claim from a file so `$` survives untouched. |
 | `--claim-file PATH` | With `verify`: read the claim from this file instead of `--claim` (preserves `$`, e.g. `$13`). |
 | `--claim-list PATH` | With `verify`: batch-audit a file of claims (one per line; `#`/blank lines skipped). Prints a per-claim verdict table plus an aggregate **citation-accuracy %** (VERIFIED ÷ total) and exits with the worst verdict (2 on any UNVERIFIED) — so it doubles as a CI-wireable citation-accuracy gate. Mutually exclusive with `--claim`/`--claim-file`. |
@@ -847,7 +859,7 @@ venv/bin/python -m pytest tests/ -v     # run the pytest suite
 | `PyMuPDF (fitz) not installed` printed | Optional PDF lib missing | `make install` (installs PyMuPDF) or `pip install pymupdf` |
 | `python-docx` / `ebooklib` message | Optional binaries missing | `pip install python-docx ebooklib` |
 | Search returns empty for an unusual query | FTS operator / empty tokens | Search is safe now (returns `[]`, never raises); try hybrid mode |
-| Vault garbled / bad results | Indexed junk before detection | Junk detection now filters boilerplate/empty; re-ingest with `--force` after upgrade |
+| Vault garbled / bad results | Indexed junk before detection | Junk detection now filters boilerplate/empty/transport-errors; purge ghosts with `--action prune --apply`, then re-ingest with `--force` after upgrade |
 | Cache expiry surprises | `cache.ttl_seconds` | Default 24h (`86400`); set to `0` to never expire |
 
 ---
