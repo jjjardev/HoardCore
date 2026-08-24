@@ -878,13 +878,16 @@ class VaultManager:
         self.page_size = int(config.get('storage.page_size', 16384))
         self._pool = ConnectionPool(self.db_path, CONNECTION_POOL_SIZE, self.page_size)
         self._init_db()
+        # Brute-force vector-scan cache (numpy matmul): keyed on the vault's
+        # vector count so a rebuild happens exactly when a new row lands.
+        # MUST exist before backfill_vectors(): a pending rebuild clears this
+        # cache during __init__ (AttributeError on fresh/partially-vectorized
+        # vaults otherwise).
+        self._vec_mat_cache: dict[str, Any] = {"count": None}
         self.backfill_vectors()
 
         # Lazy-loaded cross-encoder reranker (embeddings.reranker_model).
         self._reranker = None
-        # Brute-force vector-scan cache (numpy matmul): keyed on the vault's
-        # vector count so a rebuild happens exactly when a new row lands.
-        self._vec_mat_cache: dict[str, Any] = {"count": None}
 
     @contextmanager
     def _db(self) -> Iterator[tuple[sqlite3.Connection, sqlite3.Cursor]]:

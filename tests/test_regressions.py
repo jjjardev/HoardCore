@@ -300,3 +300,22 @@ def test_binary_parser_disabled_by_config(tmp_path, monkeypatch):
     out = asyncio.run(scraper.fetch("https://x.test/doc.pdf",
                                     action="scrape", strategy="fast"))
     assert out and out[0]["metadata"].get("junk_reason") == "parser_disabled:pdf"
+
+
+def test_vaultmanager_init_backfill_cache_order(tmp_path):
+    """Regression: re-initializing a VaultManager whose vectors need a
+    backfill used to crash with AttributeError('_vec_mat_cache') because the
+    cache was created *after* backfill_vectors() ran."""
+    cfg = TempConfig(str(tmp_path))
+    v1 = hc.VaultManager(cfg)
+    v1.index_document(
+        "https://cache-order.test/1",
+        [hc.Chunk(text="vectorized prose for the backfill regression check",
+                  metadata={"header_path": "", "source": "https://cache-order.test/1"})],
+        {"quality_score": 1.0, "parser_used": "test"},
+    )
+    # Simulate a partially-backfilled state so init-time backfill has work.
+    with v1._db() as (_conn, cur):
+        cur.execute("DELETE FROM chunk_vectors WHERE url LIKE '%cache-order.test%'")
+    v2 = hc.VaultManager(cfg)  # must not raise
+    assert v2.stats()["vectors"] >= 1
