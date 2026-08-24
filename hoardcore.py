@@ -4630,7 +4630,8 @@ class HoardCore:
         # Vector assist (opt-in via verify.hint_vector): when the keyword pool
         # is still thin, semantic recall can surface paraphrased sources that
         # share no claim tokens at all.
-        if self.config.get("verify.hint_vector", False) and len(top) < 3:
+        cfg = getattr(self, "config", None)
+        if cfg is not None and cfg.get("verify.hint_vector", False) and len(top) < 3:
             try:
                 hybrid = vault._search_hybrid(claim, recall, None, {})
                 top.extend(c.text for c in hybrid)
