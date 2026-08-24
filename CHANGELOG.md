@@ -13,6 +13,9 @@ All notable changes to this project are documented here. This project adheres to
   misparsed as test-ID lists.
 - **Test imports sorted** (`ruff I001`): split asyncio/conftest import
   blocks in test_cli.py; stray blank line dropped in test_lint.py.
+- **pyright clean.** Hint vector-assist passes `max_per_source` as int;
+  CLI `urls` binding no longer declared twice / shadowed by the ingest
+  ledger block.
 
 ## HoardCore v0.16.3
 

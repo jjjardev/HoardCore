@@ -4697,7 +4697,7 @@ class HoardCore:
         cfg = getattr(self, "config", None)
         if cfg is not None and cfg.get("verify.hint_vector", False) and len(top) < 3:
             try:
-                hybrid = vault._search_hybrid(claim, recall, None, {})
+                hybrid = vault._search_hybrid(claim, recall, None, 0)
                 top.extend(c.text for c in hybrid)
             except Exception as e:  # pragma: no cover - best-effort assist
                 logger.debug(f"hint vector assist skipped: {e}")
@@ -5699,8 +5699,10 @@ async def _main_impl(argv: list[str] | None = None) -> None:
     query = args.query
     claim = args.claim
     force_refresh = args.force
-    urls = re.split(r'[,\s]+', args.urls.strip()) if args.urls else None
-    urls = [u for u in urls if u] if urls else None
+    urls: list[str] | None = (
+        [u for u in re.split(r'[,\s]+', args.urls.strip()) if u]
+        if args.urls else None
+    )
     max_results = args.limit
     discover = args.discover
     recall = args.recall
@@ -5816,10 +5818,12 @@ async def _main_impl(argv: list[str] | None = None) -> None:
 
     if action == "prune":
         apply_changes = bool(getattr(args, "apply", False))
-        urls: list[str] = [u for u in re.split(r"[,\s]+", args.urls or "") if u]
+        prune_targets_input: list[str] = [
+            u for u in re.split(r"[,\s]+", args.urls or "") if u
+        ]
         for vault in scraper.vaults:
-            targets = list(urls)
-            if not urls:
+            targets = list(prune_targets_input)
+            if not prune_targets_input:
                 found = vault.find_transport_error_sources()
                 print(f"=== {vault.vault_name or '(default)'}: "
                       f"{len(found)} transport-error source(s), "
@@ -5833,7 +5837,7 @@ async def _main_impl(argv: list[str] | None = None) -> None:
             report = vault.prune_urls(targets, dry_run=not apply_changes)
             mode = "PRUNED" if apply_changes else "DRY-RUN (use --apply)"
             for r in report:
-                if r["total"] or not urls:
+                if r["total"] or not prune_targets_input:
                     print(f"  [{mode}] {r['url']} — {r['total']} row(s)"
                           + (f", {r['deleted']} deleted" if r["deleted"] else ""))
         sys.exit(0)
@@ -5988,11 +5992,11 @@ async def _main_impl(argv: list[str] | None = None) -> None:
     report = getattr(scraper, "last_ingest_report", None)
     if report:
         summ = report.get("summary", {})
-        urls = report.get("urls", {})
+        ledger_urls = report.get("urls", {})
         print("\n--- INGEST LEDGER ---")
         print(f"  ingested {summ.get('ingested', 0)} · cached {summ.get('cached', 0)} · "
               f"skipped_junk {summ.get('skipped_junk', 0)} · failed {summ.get('failed', 0)}")
-        for u, entry in urls.items():
+        for u, entry in ledger_urls.items():
             st = entry.get("status")
             if st == "ingested":
                 continue
