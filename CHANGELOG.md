@@ -3,6 +3,13 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.16.3
+
+### Changed
+- **Ingest-ledger cache-hits print as info, not warnings.** The `--- INGEST
+  LEDGER ---` block flagged healthy cache hits (`· cached: <url>`) with the
+  same ⚠ glyph as skips/failures; only skips and failures warn now.
+
 ## HoardCore v0.16.2
 
 ### Added
