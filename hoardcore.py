@@ -5024,6 +5024,23 @@ class HoardCore:
         # Very short extracted body is almost always a mis-hit.
         if quality_score < 0.02 and len(stripped) < 60:
             return "near_empty_extraction"
+
+        # Transport-layer error bodies rendered at HTTP 200 (observed live:
+        # Chromium/FlareSolverr stubs like "This page isn't working — HTTP
+        # ERROR 429" and timed-out connection shells). These defeat the
+        # quality_ratio heuristics because tiny body / tiny raw ≈ 1.0, so an
+        # explicit marker check is the only reliable refusal. Length-bounded
+        # so a legit article *quoting* an error string is never refused.
+        transport_markers = (
+            "this page isn't working", "this page isn’t working",
+            "http error ", "took too long to respond",
+            "err_timed_out", "err_connection_", "err_name_not_resolved",
+            "gateway time-out", "service unavailable", "too many requests",
+            "rate limited", "unexpected token", "failed to fetch",
+        )
+        if len(stripped) < 1200 and any(mk in lower for mk in transport_markers):
+            return "transport_error"
+
         if matched and len(stripped) < 600:
             return f"boilerplate:{matched[0]}"
 

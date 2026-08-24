@@ -78,3 +78,37 @@ def test_not_junk_findagrave_citation():
             "Silay City Cemeterio Municipal, Silay, Negros Occidental Province, "
             "Western Visayas, Philippines; Maintained by David Hopper.")
     assert not hc.HoardCore._detect_junk(text, None, {}, 0.5)
+
+
+def test_junk_transport_error_pages():
+    """Real transport-error stubs captured during live research crawls. These
+    arrive at HTTP 200 with a near-perfect quality ratio and were indexed as
+    real sources before the transport_error rule existed."""
+    trabajo_429 = (
+        "This page isn’t working\nIf the problem continues, contact the site "
+        "owner.\nHTTP ERROR 429\nReload\nIf the problem continues, contact the "
+        "site owner."
+    )
+    careerjet_timeout = (
+        "# This site can’t be reached\n\nwww.careerjet.ph took too long to "
+        "respond.\nTry:\n- Checking the connection"
+    )
+    gateway = "Gateway time-out — the server did not respond in time."
+    rate_limited = "Too many requests. Please slow down and try again later."
+    for text in (trabajo_429, careerjet_timeout, gateway, rate_limited):
+        reason = hc.HoardCore._detect_junk(text, None, {}, 1.0)
+        assert reason == "transport_error", f"{reason!r} for {text[:60]!r}"
+
+
+def test_not_junk_long_article_quoting_error_strings():
+    """A long legitimate article that merely quotes an error string must not
+    be refused by the transport rule (length guard)."""
+    article = (
+        "Researchers studying web reliability catalogued dozens of failure "
+        "modes. One screenshot showed the message HTTP ERROR 429 beside a "
+        "rate-limiter postmortem, while another reproduced a browser stub "
+        "reading this page isn't working. The paper's dataset spans several "
+        "years of crawl telemetry and includes mitigation guidance. " * 6
+    )
+    assert len(article) > 1200
+    assert not hc.HoardCore._detect_junk(article, None, {}, 0.9)
