@@ -388,3 +388,33 @@ def test_cli_cross_vault_search_and_verify(tmp_path):
     res = _run("_", "--action", "verify", "--claim", claim,
                "--vault", "vb", cwd=cwd)
     assert res.returncode == 2, res.stdout + res.stderr
+
+
+def test_ingest_ledger_reports_skips(tmp_path, capsys, monkeypatch):
+    """The CLI surfaces a per-URL ledger so junk skips / failures are visible
+    instead of hiding behind a lone 'Returned N chunks' line."""
+    import asyncio
+    from tests.conftest import TempConfig
+    hc_inst = hc.HoardCore.__new__(hc.HoardCore)
+    cfg = TempConfig(str(tmp_path))
+    hc_inst.config = cfg
+    hc_inst.bus = hc.EventBus()
+    hc_inst.last_ingest_report = None
+    hc_inst.vault = hc.VaultManager(cfg, None, event_bus=hc_inst.bus)
+    hc_inst.vaults = [hc_inst.vault]
+
+    async def fake_process(url, strategy, force_refresh):
+        if "junk" in url:
+            return ([], {"junk": True, "junk_reason": "transport_error"})
+        return ([hc.Chunk(text="real content here", metadata={
+            "header_path": "", "source": url})],
+            {"quality_score": 1.0, "parser_used": "test"})
+
+    monkeypatch.setattr(hc_inst, "_process_document", fake_process)
+    out = asyncio.run(hc_inst.fetch("_", action="ingest", urls=[
+        "https://ok.test/1", "https://bad.test/junk"]))
+    assert any("real content" in c["text"] for c in out)
+    report = hc_inst.last_ingest_report
+    assert report["summary"] == {"ingested": 1, "cached": 0,
+                                 "skipped_junk": 1, "failed": 0}
+    assert report["urls"]["https://bad.test/junk"]["status"] == "skipped_junk"

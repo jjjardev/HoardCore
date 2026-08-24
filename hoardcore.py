@@ -3842,6 +3842,7 @@ class HoardCore:
 
     def __init__(self, vault_name: str | list[str] | tuple[str, ...] | None = None):
         self.config = ConfigManager()
+        self.last_ingest_report: dict[str, Any] | None = None
         self.bus = EventBus()
         self.plugins = PluginManager(self.config).discover()
 
@@ -5235,6 +5236,7 @@ class HoardCore:
         max_workers = max(1, self.config.get('crawler.parallel_workers', 5))
         semaphore = asyncio.Semaphore(max_workers)
         results: list[dict[str, Any]] = []
+        ledger: dict[str, dict[str, Any]] = {}
 
         async def _ingest_one(target: str) -> None:
             async with semaphore:
@@ -5244,24 +5246,43 @@ class HoardCore:
                         # Cache hit: the pipeline fetched nothing, so serve the
                         # vaulted chunks back (mirrors _scrape_single) instead
                         # of silently reporting zero content for the URL.
+                        ledger[target] = {"status": "cached",
+                                          "chunks": len(chunks) or None}
                         results.extend(
                             c.to_dict() for c in self.vault.get_chunks_for_url(target)
                         )
                         return
                     if meta.get('error'):
+                        ledger[target] = {
+                            "status": "failed",
+                            "reason": str(meta.get('junk_reason')
+                                          or meta.get('error') or 'fetch_error')}
                         if chunks:
                             results.append(chunks[-1].to_dict())
                         return
-                    if not meta.get('junk'):
-                        results.extend(c.to_dict() for c in chunks)
+                    if meta.get('junk'):
+                        ledger[target] = {
+                            "status": "skipped_junk",
+                            "reason": str(meta.get('junk_reason') or 'junk')}
+                        return
+                    ledger[target] = {"status": "ingested", "chunks": len(chunks)}
+                    results.extend(c.to_dict() for c in chunks)
                 except Exception as e:
                     logger.error(f"Failed to ingest {target}: {e}")
+                    ledger[target] = {"status": "failed", "reason": str(e)}
                     results.append({
                         "text": f"Error ingesting {target}: {e}",
                         "metadata": {"source": target, "error": True}
                     })
 
         await asyncio.gather(*[_ingest_one(u) for u in urls], return_exceptions=True)
+        # Per-URL yield ledger: surfaced by the CLI so silent skips (junk,
+        # empty extraction, fetch errors) are visible instead of a lone
+        # "Returned N chunks" line.
+        self.last_ingest_report = {
+            "urls": ledger,
+            "summary": _summarize_ingest_ledger(ledger),
+        }
         return results
 
     async def _discover_and_ingest(self, query: str, max_results: int,
@@ -5308,6 +5329,16 @@ class HoardCore:
 # =============================================================================
 # 9. CLI ENTRYPOINT
 # =============================================================================
+
+def _summarize_ingest_ledger(ledger: dict[str, dict[str, Any]]) -> dict[str, int]:
+    """Count statuses across a per-URL ingest ledger."""
+    summary = {"ingested": 0, "cached": 0, "skipped_junk": 0, "failed": 0}
+    for entry in ledger.values():
+        st = entry.get("status")
+        if st in summary:
+            summary[st] += 1
+    return summary
+
 
 def citation_list(sources: list[str] | dict[str, str]) -> str:
     """Module-level alias for the artifacts **Source Links / Citations** block.
@@ -5732,6 +5763,21 @@ async def _main_impl(argv: list[str] | None = None) -> None:
 
     if len(result) > 3:
         print(f"\n... and {len(result) - 3} more chunks.")
+
+    # Ingest yield ledger: make skips/failures impossible to miss.
+    report = getattr(scraper, "last_ingest_report", None)
+    if report:
+        summ = report.get("summary", {})
+        urls = report.get("urls", {})
+        print("\n--- INGEST LEDGER ---")
+        print(f"  ingested {summ.get('ingested', 0)} · cached {summ.get('cached', 0)} · "
+              f"skipped_junk {summ.get('skipped_junk', 0)} · failed {summ.get('failed', 0)}")
+        for u, entry in urls.items():
+            st = entry.get("status")
+            if st in ("ingested",):
+                continue
+            reason = entry.get("reason", "")
+            print(f"  ⚠ {st}: {u}" + (f" ({reason})" if reason else ""))
 
 if __name__ == "__main__":
     asyncio.run(main())
