@@ -3,6 +3,51 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.16.2
+
+### Added
+- **Per-URL ingest ledger.** Every `ingest`/`discover` batch now ends with an
+  `--- INGEST LEDGER ---` summary (`ingested · cached · skipped_junk · failed`)
+  plus explicit ⚠ lines naming each dropped URL and reason — silent 0-chunk
+  sources are no longer invisible.
+- **`--action lint [--strict]`.** Static pre-audit authoring checks (no vault,
+  no network): `[V#N]` inside markdown table rows (error), tags sharing a line
+  with earlier `[E]`/`[H]` markers (warning; error under `--strict`),
+  sub-24-char attributed quotes, unmapped `[#N]` references, unclosed quotes,
+  and unquoted tags on bullets.
+- **`--action prune [--apply]`.** Detects and retro-purges transport-error
+  ghost sources (HTTP-429/timeout stubs indexed before the junk gate existed).
+  Dry-run by default; `--urls a,b` targets specific URLs.
+- **`--preview-chars N`** CLI flag (default 300; `0` = full chunk text).
+
+### Fixed
+- **Transport-error junk detection.** Chromium/proxy stubs rendered at HTTP
+  200 ("This page isn't working — HTTP ERROR 429", timed-out shells) defeat
+  the quality-ratio heuristics (tiny body / tiny raw ≈ 1.0) and were indexed
+  as real sources. A length-bounded marker rule now refuses them
+  (`transport_error`), with fixtures from live crawls.
+- **Claim-aware hints.** `verify --hint` previously built its candidate pool
+  from AND-ranked FTS plus arbitrary oldest rows — long claims produced zero
+  AND hits and hints quoted unrelated boilerplate. An OR-relaxed rescue pass
+  unions topical candidates (opt-in `verify.hint_vector` adds semantic
+  assist), and hint ranking switched from symmetric similarity to
+  **needle coverage**, so long-but-topical chunks (full abstracts) outrank
+  short headings.
+- **Init-order crash on fresh/re-initialized vaults.** `_vec_mat_cache` was
+  created *after* `backfill_vectors()`, so any vault with pending vectors at
+  construction crashed with `AttributeError`.
+- **One bounded retry sweep for failed ingests.** Transient FETCH_FAILED /
+  preflight errors get exactly one second chance per batch; recovered URLs are
+  flagged in the ledger. Junk verdicts are never retried.
+- **FlareSolverr diagnostics never blank.** Solver-endpoint HTTP statuses,
+  solve failures (`status`/`message` fields), post-solve site statuses, and
+  empty-stringifying exceptions (class name always included) are all logged.
+
+### Docs
+- skill.md: lint/prune actions documented; tag-placement rules (no tables,
+  own-line discipline); backticked-tag audit exemption stated; ingest-ledger
+  and preview-flag notes; hint upgrade note.
+
 ## HoardCore v0.16.1
 
 ### Fixed
