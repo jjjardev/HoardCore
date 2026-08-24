@@ -5418,6 +5418,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Fetch strategy (default: network.default_strategy).",
     )
     parser.add_argument(
+        "--preview-chars", type=int, default=300, metavar="N",
+        help="Characters shown per chunk in the CLI preview (0 = full text; "
+             "default: 300).",
+    )
+    parser.add_argument(
         "--query", default=None, help="Search/research query."
     )
     parser.add_argument(
@@ -5755,11 +5760,16 @@ async def _main_impl(argv: list[str] | None = None) -> None:
     print(f"✅ Done. Returned {len(result)} chunks.")
 
     # Preview
+    preview_chars = max(0, int(getattr(args, "preview_chars", 300) or 0))
     for i, chunk in enumerate(result[:3]):
         print(f"\n--- CHUNK {i+1} ---")
         print(f"Metadata: {chunk['metadata']}")
-        preview = chunk['text'][:300] + "..." if len(chunk['text']) > 300 else chunk['text']
-        print(f"Preview: {preview}")
+        if preview_chars == 0:
+            print(f"Preview: {chunk['text']}")
+        else:
+            preview = (chunk['text'][:preview_chars] + "..."
+                       if len(chunk['text']) > preview_chars else chunk['text'])
+            print(f"Preview: {preview}")
 
     if len(result) > 3:
         print(f"\n... and {len(result) - 3} more chunks.")
