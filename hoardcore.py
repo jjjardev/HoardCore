@@ -421,14 +421,22 @@ def _tidy_markdown_text(text: str) -> str:
 
 
 def _nearest_phrase_probe(text: str, needle: str) -> tuple[float, int, int]:
-    """Best fuzzy overlap of `needle` in `text`; returns (ratio, start, size)."""
+    """Best fuzzy overlap of `needle` in `text`.
+
+    Returns (score, start, size). Score is *needle coverage* — the fraction of
+    the claim's normalized length covered by the best matching block — not a
+    symmetric similarity. Symmetric ratios punish long-but-topical candidates
+    (a full abstract containing every claim keyword scored below an unrelated
+    short heading); coverage ranks the chunk that actually explains the claim
+    highest regardless of its own length.
+    """
     hay = normalize_claim(text)
     if not hay:
         return (0.0, 0, 0)
     m = SequenceMatcher(None, needle, hay).find_longest_match(
         0, len(needle), 0, len(hay))
-    ratio = (2.0 * m.size) / (len(needle) + len(hay)) if (len(needle) + len(hay)) else 0.0
-    return (ratio, m.b, m.size)
+    score = m.size / len(needle) if len(needle) else 0.0
+    return (score, m.b, m.size)
 
 
 def _fts_token(token: str) -> str:
