@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## HoardCore v0.16.3
+## HoardCore v0.16.4
 
 ### Fixed
 - **Bandit CI gate restored.** `prune_urls` interpolated table names into
@@ -11,6 +11,8 @@ All notable changes to this project are documented here. This project adheres to
   statements. All 10 `# nosec B608` directives reconciled to their true
   detection lines and stripped of parenthetical prose that bandit 1.9.x
   misparsed as test-ID lists.
+- **Test imports sorted** (`ruff I001`): split asyncio/conftest import
+  blocks in test_cli.py; stray blank line dropped in test_lint.py.
 
 ## HoardCore v0.16.3
 
