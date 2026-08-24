@@ -6004,7 +6004,11 @@ async def _main_impl(argv: list[str] | None = None) -> None:
               f"skipped_junk {summ.get('skipped_junk', 0)} · failed {summ.get('failed', 0)}")
         for u, entry in urls.items():
             st = entry.get("status")
-            if st in ("ingested",):
+            if st == "ingested":
+                continue
+            if st == "cached":
+                # Cache hits are healthy behavior, not warnings.
+                print(f"  · cached: {u}")
                 continue
             reason = entry.get("reason", "")
             print(f"  ⚠ {st}: {u}" + (f" ({reason})" if reason else ""))
