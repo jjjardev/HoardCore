@@ -5,6 +5,15 @@ All notable changes to this project are documented here. This project adheres to
 
 ## HoardCore v0.16.3
 
+### Fixed
+- **Bandit CI gate restored.** `prune_urls` interpolated table names into
+  SQL f-strings (B608 ×2, Medium); tables are now compile-time constant
+  statements. All 10 `# nosec B608` directives reconciled to their true
+  detection lines and stripped of parenthetical prose that bandit 1.9.x
+  misparsed as test-ID lists.
+
+## HoardCore v0.16.3
+
 ### Changed
 - **Ingest-ledger cache-hits print as info, not warnings.** The `--- INGEST
   LEDGER ---` block flagged healthy cache hits (`· cached: <url>`) with the
