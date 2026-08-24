@@ -48,6 +48,7 @@ Every quantitative claim / date / unique term in a synthesis gets a tag:
 - Artifact closes with a **Source Links / Citations** block: each `[#N] URL` on its own line with **no `- ` bullet prefix** (the extractor `re.match`es `[#N]` at line start — bullets silently fail MAPPED).
 - Cross-source conflicts → keep both verbatim quotes `[V#N]`, flag the discrepancy as `[H]`/`[E]`, never assert either as `[V]`.
 - Before tagging: draft, then `verify --claim-list` the exact quote strings; only VERIFIED strings carry `[V#N]`. The audit prints the nearest vault phrase under any failing claim — reword your quote to that exact stored text and re-run.
+- Never place `[V#N]` inside a markdown **table row** or on a line that also carries earlier `[E]`/`[H]` markers — put the verbatim quote + tag on its own body-prose line. Run `--action lint --artifact PATH` (`--strict` escalates warnings) before the full audit.
 
 **Adversarial audit before output:** re-verify every number; unverifiable → demote to `[E]` or strike. Reputation depends on truth.
 
@@ -98,10 +99,12 @@ Read/summarize/analyze a site, PDF, or doc · build a local knowledge base from 
 | `check` | 3-phase vault integrity | `--migrate` (rebuild at 16 KB pages) |
 | `stats` | vault summary + confidence probe | `--vault` |
 | `audit` | audit an artifact's `[V#N]` chain | `--artifact PATH` |
+| `lint` | static pre-audit authoring checks (no vault/network): table-cell tags, `[V]` on analysis lines, short quotes, unmapped refs, unclosed quotes | `--artifact PATH`, `--strict` |
+| `prune` | detect & retro-purge transport-error ghost sources (429/timeout stubs indexed pre-v0.16.2); dry-run default | `--apply`, `--urls a,b` (explicit targets) |
 | `local` | index local files from `storage.local_dir` | `--path`, `--list`, `--force` |
 
 ### verify — programmatic audit
-- **Cross-vault fold** (`--vault a,b,c`): VERIFIED if ANY named vault holds it verbatim; PARTIAL if any vault is partial; else UNVERIFIED. `--hint` shows the nearest phrase from the best-matching vault.
+- **Cross-vault fold** (`--vault a,b,c`): VERIFIED if ANY named vault holds it verbatim; PARTIAL if any vault is partial; else UNVERIFIED. `--hint` shows the nearest phrase from the best-matching vault (OR-relaxed candidate rescue since v0.16.2; opt-in `verify.hint_vector` adds semantic assist).
 - **Exact phrasing, typography-blind** — folds en/em dashes, smart quotes, NBSP, full-width; enforces token identity, word order, `%`≠"percent". `PARTIAL`/`UNVERIFIED` = reword to source words; `--hint` prints the nearest phrase.
 - **Exit codes (CI-wireable):** `0` VERIFIED (verbatim, sliding 60-char window) · `1` PARTIAL (top all-term FTS5 hit beats the corpus-scaled coincidence floor, no verbatim) · `2` UNVERIFIED. Refuse `[V]` unless `0`. **Never pipe through `tail`/`head`.**
 - Escape `\$` in shells or use `--claim-file` for currency.
@@ -159,6 +162,7 @@ Sources, doc versions, chunks, vectors, embedding dim/mode, schema version, page
 - **Fetch chain** (`balanced`/`aggressive`): aiohttp ∥ curl_cffi concurrently, first leg wins; a curl_cffi `200` beats an aiohttp anti-bot `404`/`403` body; FlareSolverr is the serialized terminal leg.
 - **Plugins:** `hoardcore.*` entry-point plugins auto-discovered (`plugins.enabled`); chunker via `chunking.strategy = "plugin.<name>"`; lifecycle hooks on `hoardcore.EventBus`.
 - **Discovery failure playbook:** one built-in engine (DuckDuckGo, solver-escalated). If discover fails: run `venv/bin/python tools/check_flaresolverr.py` (exit 0=healthy, 1=degraded, 2=unreachable); if degraded, recreate the container with `deploy/docker-compose.flaresolverr.yml` (needs sudo docker); meanwhile use the harness-search → `ingest --urls` rescue pattern above.
+- CLI chunk previews show 300 chars by default; pass `--preview-chars 0` for full text.
 - **Python 3.11+** — on failure run `make install`.
 - **Release gates (CI-enforced):** `tools/check_version.py` must report OK (`__version__` == `pyproject.toml` version, and == the git tag on `v*` pushes) and coverage ≥70% (`--cov-fail-under=70`). Run `venv/bin/python tools/check_version.py` and `make coverage` before tagging.
 
