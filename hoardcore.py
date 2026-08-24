@@ -2847,9 +2847,17 @@ class NetworkFetcher:
                 self._solver_url, json=payload, timeout=timeout
             ) as resp:
                 if resp.status != 200:
+                    logger.warning(
+                        f"FlareSolverr: solver endpoint returned HTTP {resp.status}"
+                    )
                     return None, None, '', None
                 data = await resp.json()
                 if data.get("status") != "ok":
+                    logger.warning(
+                        "FlareSolverr: solve failed — "
+                        f"status={data.get('status')!r} "
+                        f"message={data.get('message')!r}"
+                    )
                     return None, None, '', None
                 solution = data.get("solution", {})
                 if solution.get("status") == 200:
@@ -2866,9 +2874,16 @@ class NetworkFetcher:
                     else:
                         # FlareSolverr usually returns binary as b64, but we handle text mostly
                         return None, response.encode('utf-8'), content_type, int(solution.get('status', 200))
+                logger.warning(
+                    f"FlareSolverr: target site returned "
+                    f"HTTP {solution.get('status')!r} after solve"
+                )
                 return None, None, '', None
         except Exception as e:
-            logger.error(f"FlareSolverr failed: {e}")
+            # Some client exceptions stringify empty (bare timeouts); always
+            # include the class name so the log is never a blank message.
+            detail = str(e) or e.__class__.__name__
+            logger.error(f"FlareSolverr failed ({e.__class__.__name__}): {detail}")
             return None, None, '', None
 
     @staticmethod
@@ -5416,6 +5431,21 @@ class HoardCore:
                     })
 
         await asyncio.gather(*[_ingest_one(u) for u in urls], return_exceptions=True)
+
+        # One bounded retry sweep: transient network failures (FETCH_FAILED,
+        # preflight errors) get exactly one second chance before being
+        # reported as final. Junk skips are never retried — they are verdicts,
+        # not faults.
+        retry_targets = [u for u, e in ledger.items()
+                         if e.get("status") == "failed"]
+        if retry_targets:
+            logger.info(f"Retrying {len(retry_targets)} failed ingest URL(s) once.")
+            await asyncio.gather(*[_ingest_one(u) for u in retry_targets],
+                                 return_exceptions=True)
+            for u in retry_targets:
+                if ledger[u].get("status") != "failed":
+                    ledger[u]["retried"] = True
+
         # Per-URL yield ledger: surfaced by the CLI so silent skips (junk,
         # empty extraction, fetch errors) are visible instead of a lone
         # "Returned N chunks" line.

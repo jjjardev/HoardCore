@@ -420,3 +420,44 @@ def test_ingest_ledger_reports_skips(tmp_path, capsys, monkeypatch):
     assert report["summary"] == {"ingested": 1, "cached": 0,
                                  "skipped_junk": 1, "failed": 0}
     assert report["urls"]["https://bad.test/junk"]["status"] == "skipped_junk"
+
+
+def test_ingest_retry_sweep_recovers_transient_failures(tmp_path, monkeypatch):
+    """A URL that fails once (network fault) gets exactly one retry inside the
+    same batch; junk verdicts are never retried."""
+    import asyncio
+    from tests.conftest import TempConfig
+    hc_inst = hc.HoardCore.__new__(hc.HoardCore)
+    cfg = TempConfig(str(tmp_path))
+    hc_inst.config = cfg
+    hc_inst.bus = hc.EventBus()
+    hc_inst.last_ingest_report = None
+    hc_inst.vault = hc.VaultManager(cfg, None, event_bus=hc_inst.bus)
+    hc_inst.vaults = [hc_inst.vault]
+
+    attempts: dict[str, int] = {"flaky": 0}
+
+    async def fake_process(url, strategy, force_refresh):
+        if "flaky" in url:
+            attempts["flaky"] += 1
+            if attempts["flaky"] == 1:
+                return ([], {"error": True, "junk_reason": "FETCH_FAILED"})
+            return ([hc.Chunk(text="recovered content", metadata={
+                "header_path": "", "source": url})],
+                {"quality_score": 1.0, "parser_used": "test"})
+        if "junk" in url:
+            return ([], {"junk": True, "junk_reason": "transport_error"})
+        return ([hc.Chunk(text="normal", metadata={
+            "header_path": "", "source": url})],
+            {"quality_score": 1.0, "parser_used": "test"})
+
+    monkeypatch.setattr(hc_inst, "_process_document", fake_process)
+    out = asyncio.run(hc_inst.fetch("_", action="ingest", urls=[
+        "https://ok.test/1", "https://flaky.test/x", "https://bad.test/junk"]))
+    assert any("recovered content" in c["text"] for c in out)
+    ledger = hc_inst.last_ingest_report["urls"]
+    assert ledger["https://flaky.test/x"]["status"] == "ingested"
+    assert ledger["https://flaky.test/x"].get("retried") is True
+    assert attempts["flaky"] == 2
+    # Junk verdict must not be retried.
+    assert ledger["https://bad.test/junk"]["status"] == "skipped_junk"

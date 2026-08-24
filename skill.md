@@ -48,6 +48,7 @@ Every quantitative claim / date / unique term in a synthesis gets a tag:
 - Artifact closes with a **Source Links / Citations** block: each `[#N] URL` on its own line with **no `- ` bullet prefix** (the extractor `re.match`es `[#N]` at line start — bullets silently fail MAPPED).
 - Cross-source conflicts → keep both verbatim quotes `[V#N]`, flag the discrepancy as `[H]`/`[E]`, never assert either as `[V]`.
 - Before tagging: draft, then `verify --claim-list` the exact quote strings; only VERIFIED strings carry `[V#N]`. The audit prints the nearest vault phrase under any failing claim — reword your quote to that exact stored text and re-run.
+- Backtick-wrapped tags (`` `[V#13]` ``) are treated as narrative mentions — audit and lint ignore them by design. Use bare tags only where you mean the chain to be checked.
 - Never place `[V#N]` inside a markdown **table row** or on a line that also carries earlier `[E]`/`[H]` markers — put the verbatim quote + tag on its own body-prose line. Run `--action lint --artifact PATH` (`--strict` escalates warnings) before the full audit.
 
 **Adversarial audit before output:** re-verify every number; unverifiable → demote to `[E]` or strike. Reputation depends on truth.
