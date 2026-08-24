@@ -4780,6 +4780,88 @@ class HoardCore:
             "accuracy": (counts["verified"] / total) if total else 0.0,
         }
 
+    def lint_artifact(self, path: str, strict: bool = False) -> dict[str, Any]:
+        """Static authoring checks for an artifact — no vault, no network.
+
+        Catches the recurring `[V#N]` citation mistakes *before* the full
+        audit runs: tags inside table cells, tags riding on analysis lines,
+        sub-minimum quote spans, unmapped `[#N]` references, unclosed quotes,
+        and unquoted tags on bullets. Severity: `error` findings always fail;
+        `warning` findings fail only under `--strict`.
+
+        Returns {path, findings, counts, strict}.
+        """
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        source_block = self._extract_source_links(lines)
+        findings: list[dict[str, Any]] = []
+
+        def add(ln: int, severity: str, kind: str, message: str) -> None:
+            findings.append({"line": ln, "severity": severity,
+                             "type": kind, "message": message})
+
+        used_n: set[str] = set()
+        for unit_text, ln_no in self._logical_lines(lines):
+            if not unit_text.strip():
+                continue
+            if re.match(r"^#{1,6}\s", unit_text) and (
+                    "source link" in unit_text.lower()
+                    or "citation" in unit_text.lower()):
+                break  # everything after the links block is out of scope
+            is_table = unit_text.lstrip().startswith("|")
+            is_bullet = bool(re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", unit_text))
+            raw_tags = list(re.finditer(
+                r"\[(V)(?:#(\d+))?\](?!\()", unit_text.replace("`", "")))
+            if not raw_tags:
+                continue
+            if self._unclosed_quotes(unit_text):
+                add(ln_no, "error", "unclosed_quotes",
+                    "odd number of double quotes on a tagged line")
+            scan = re.sub(r"`[^`]*`", " ", unit_text)
+            cleaned0 = re.sub(r"^#+\s*", "", scan.strip())
+            cleaned0 = re.sub(r"\s+", " ", cleaned0).strip()
+            first_vn = next((m for m in raw_tags), None)
+            analysis_before = any(
+                m.group(0) in ("[E]", "[H]")
+                for m in re.finditer(r"\[(E|H)\]", unit_text[:first_vn.start()])
+            ) if first_vn else False
+            for m in re.finditer(r"\[(V(?:#\d+)?)\]", cleaned0):
+                tag = m.group(1)
+                n_m = re.search(r"#(\d+)", tag)
+                n = n_m.group(1) if n_m else None
+                if n:
+                    used_n.add(n)
+                if is_table:
+                    add(ln_no, "error", "tag_in_table",
+                        f"[{tag}] sits in a table row — move the verbatim "
+                        "quote + tag into body prose")
+                elif is_bullet and '"' not in cleaned0[:m.start()]:
+                    add(ln_no, "warning", "unquoted_tag_on_bullet",
+                        f"[{tag}] on a bullet without a preceding verbatim "
+                        'double-quoted span')
+                if analysis_before:
+                    sev = "error" if strict else "warning"
+                    add(ln_no, sev, "v_on_analysis_line",
+                        f"[{tag}] shares a line with earlier [E]/[H] markers "
+                        "— likely riding on paraphrase")
+                text_cand, is_quote = self._claim_text_for_tag(cleaned0, m.start())
+                if is_quote and len(normalize_claim(text_cand)) < 24:
+                    add(ln_no, "warning", "short_quote",
+                        f"[{tag}] attributed quote is under the 24-char "
+                        "audit minimum")
+
+        unmapped = sorted(n for n in used_n if n not in source_block)
+        for n in unmapped:
+            add(0, "error", "unmapped_tag",
+                f"[V#{n}] has no matching [# {n}] line in the Source Links block"
+                .replace("[# ", "[#"))
+
+        counts = {"error": 0, "warning": 0}
+        for f in findings:
+            counts[f["severity"]] = counts.get(f["severity"], 0) + 1
+        return {"path": path, "findings": findings, "counts": counts,
+                "strict": strict}
+
     def _extract_source_links(self, lines: list[str]) -> dict[str, str]:
         """Map `[#N] url` entries in a markdown "Source Links / Citations" block.
 
@@ -5410,12 +5492,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--action", choices=["scrape", "crawl", "search", "ingest",
                              "discover", "research", "verify", "check", "stats",
-                             "audit", "local"],
+                             "audit", "lint", "local"],
         default="scrape", help="Action to run (default: scrape).",
     )
     parser.add_argument(
         "--strategy", choices=["fast", "balanced", "aggressive"], default=None,
         help="Fetch strategy (default: network.default_strategy).",
+    )
+    parser.add_argument(
+        "--strict", action="store_true",
+        help="With --action lint: escalate warnings to failures.",
     )
     parser.add_argument(
         "--preview-chars", type=int, default=300, metavar="N",
@@ -5627,6 +5713,23 @@ async def _main_impl(argv: list[str] | None = None) -> None:
                 print(hint)
         # exit codes: 0=verified, 1=partial, 2=unverified (CI-wireable)
         sys.exit(0 if result == "verified" else (1 if result == "partial" else 2))
+
+    if action == "lint":
+        if not args.artifact:
+            print("  ⚠️  --artifact PATH required for --action lint", file=sys.stderr)
+            sys.exit(2)
+        if not os.path.exists(args.artifact):
+            print(f"  ⚠️  artifact not found: {args.artifact}", file=sys.stderr)
+            sys.exit(2)
+        report = scraper.lint_artifact(args.artifact, strict=bool(getattr(args, "strict", False)))
+        print(f"=== Lint: {report['path']} ===")
+        for f in report["findings"]:
+            print(f"  [{f['severity']:^7}] line {f['line']}: {f['type']} — {f['message']}")
+        c = report["counts"]
+        print(f"=== {c.get('error', 0)} error(s), {c.get('warning', 0)} warning(s) "
+              f"(strict={'on' if report['strict'] else 'off'}) ===")
+        sys.exit(2 if c.get("error") else
+                 (1 if report["strict"] and c.get("warning") else 0))
 
     if action == "audit":
         if not args.artifact:
