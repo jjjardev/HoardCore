@@ -4596,8 +4596,8 @@ class HoardCore:
         """Best (overlap_ratio, normalized_phrase) in a single VaultManager."""
         fts = vault._fts_query(claim)
         top: list[str] = []
-        if fts:
-            with vault._db() as (_conn, cursor):
+        with vault._db() as (_conn, cursor):
+            if fts:
                 cursor.execute(
                     "SELECT text FROM chunks_fts WHERE chunks_fts MATCH ? "
                     "ORDER BY rank LIMIT ?",
@@ -4611,10 +4611,40 @@ class HoardCore:
                     (recall,),
                 )
                 top.extend(row[0] for row in cursor.fetchall())
-        best: tuple[float, str] | None = None  # (ratio, phrase)
+                # OR-relaxed rescue: long claims routinely produce ZERO AND
+                # hits (every token must match), which left only the arbitrary
+                # oldest-rows above as candidates — and hints that quoted
+                # unrelated boilerplate. Union OR-ranked rows whenever the
+                # strict pool is thin so the fuzzy probe sees topical text.
+                or_q = vault._fts_query(claim, op="OR")
+                if or_q and len(top) < recall * 2:
+                    try:
+                        cursor.execute(
+                            "SELECT text FROM chunks_fts WHERE chunks_fts MATCH ? "
+                            "ORDER BY rank LIMIT ?",
+                            (or_q, recall * 3),
+                        )
+                        top.extend(row[0] for row in cursor.fetchall())
+                    except sqlite3.OperationalError:
+                        pass
+        # Vector assist (opt-in via verify.hint_vector): when the keyword pool
+        # is still thin, semantic recall can surface paraphrased sources that
+        # share no claim tokens at all.
+        if self.config.get("verify.hint_vector", False) and len(top) < 3:
+            try:
+                hybrid = vault._search_hybrid(claim, recall, None, {})
+                top.extend(c.text for c in hybrid)
+            except Exception as e:  # pragma: no cover - best-effort assist
+                logger.debug(f"hint vector assist skipped: {e}")
+        seen: set[str] = set()
+        pool: list[str] = []
         for raw in top:
-            if not raw or raw.isspace():
-                continue
+            key = raw[:256]
+            if raw and not raw.isspace() and key not in seen:
+                seen.add(key)
+                pool.append(raw)
+        best: tuple[float, str] | None = None  # (ratio, phrase)
+        for raw in pool:
             ratio, _start, size = _nearest_phrase_probe(raw, needle)
             if size == 0:
                 continue
