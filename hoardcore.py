@@ -1556,13 +1556,7 @@ class VaultManager:
                         f"Cleared {cursor.rowcount} stale CA cache entries "
                         f"(embedding config changed)."
                     )
-            sql = f"""
-                SELECT c.rowid, c.url, c.text
-                FROM chunks_fts c
-                LEFT JOIN chunk_vectors v ON v.chunk_rowid = c.rowid
-                WHERE v.chunk_rowid IS NULL
-                   OR length(v.vector) != {expected_bytes}
-            """  # nosec B608 (expected_bytes is an int, not user input)
+            sql = f"SELECT c.rowid, c.url, c.text FROM chunks_fts c LEFT JOIN chunk_vectors v ON v.chunk_rowid = c.rowid WHERE v.chunk_rowid IS NULL OR length(v.vector) != {expected_bytes}"  # nosec B608
             cursor.execute(sql)
             while True:
                 rows = cursor.fetchmany(1000)
@@ -1986,14 +1980,26 @@ class VaultManager:
         chunks_ca/chunk_vectors_ca are left alone by design. Extracted-text
         files on disk are not touched."""
         report: list[dict[str, Any]] = []
+        # Table names are compile-time constants below (never interpolated),
+        # so every statement is fully static apart from the bound ? parameter.
+        count_sql = {
+            "chunks_fts": "SELECT COUNT(*) FROM chunks_fts WHERE url = ?",
+            "chunk_vectors": "SELECT COUNT(*) FROM chunk_vectors WHERE url = ?",
+            "chunks_simhash": "SELECT COUNT(*) FROM chunks_simhash WHERE url = ?",
+            "documents": "SELECT COUNT(*) FROM documents WHERE url = ?",
+        }
+        delete_sql = {
+            "chunks_fts": "DELETE FROM chunks_fts WHERE url = ?",
+            "chunk_vectors": "DELETE FROM chunk_vectors WHERE url = ?",
+            "chunks_simhash": "DELETE FROM chunks_simhash WHERE url = ?",
+            "documents": "DELETE FROM documents WHERE url = ?",
+        }
         with self._db() as (conn, cursor):
             for url in urls:
                 counts = {}
-                for table in ("chunks_fts", "chunk_vectors", "chunks_simhash",
-                              "documents"):
+                for table, sql in count_sql.items():
                     try:
-                        cursor.execute(f"SELECT COUNT(*) FROM {table} WHERE url = ?",
-                                       (url,))
+                        cursor.execute(sql, (url,))
                         counts[table] = cursor.fetchone()[0]
                     except sqlite3.OperationalError:
                         counts[table] = 0
@@ -2001,9 +2007,8 @@ class VaultManager:
                 entry = {"url": url, "rows": counts, "total": total,
                          "deleted": 0}
                 if not dry_run and total:
-                    for table in ("chunks_fts", "chunk_vectors",
-                                  "chunks_simhash", "documents"):
-                        cursor.execute(f"DELETE FROM {table} WHERE url = ?", (url,))
+                    for sql in delete_sql.values():
+                        cursor.execute(sql, (url,))
                     conn.commit()
                     entry["deleted"] = total
                 report.append(entry)
@@ -2088,13 +2093,7 @@ class VaultManager:
                 params.append(f'%{domain}%')
 
             # FTS5 query with ranking
-            sql = f"""
-                SELECT url, header_path, text, metadata_json, rank, rowid
-                FROM chunks_fts
-                WHERE {where}
-                ORDER BY rank
-                LIMIT ?
-            """  # nosec B608 (where is a fixed clause; values are bound)
+            sql = f"SELECT url, header_path, text, metadata_json, rank, rowid FROM chunks_fts WHERE {where} ORDER BY rank LIMIT ?"  # nosec B608
             cursor.execute(sql, (*params, limit))
 
             for row in cursor.fetchall():
@@ -2136,8 +2135,8 @@ class VaultManager:
         # COUNT + SUM(length()) reads metadata pages instead, cutting warm
         # scans from ~120-230 ms to the ~13-15 ms matmul itself.
         row = cursor.execute(
-            "SELECT COUNT(*), COALESCE(SUM(length(vector)), 0) "
-            "FROM chunk_vectors" + vec_where,  # nosec B608
+            "SELECT COUNT(*), COALESCE(SUM(length(vector)), 0) "  # nosec B608
+            "FROM chunk_vectors" + vec_where,
             vec_params,
         ).fetchone()
         cnt, total_bytes = row if row else (0, 0)
@@ -2322,13 +2321,7 @@ class VaultManager:
             fts_rows: list[tuple[int, str]] = []
             row_by_id: dict[int, tuple[str, str, str, str]] = {}
             if fts_match:
-                sql = f"""
-                    SELECT rowid, url, header_path, text, metadata_json
-                    FROM chunks_fts
-                    WHERE {fts_where}
-                    ORDER BY rank
-                    LIMIT ?
-                """  # nosec B608 (fts_where is a fixed clause; values are bound)
+                sql = f"SELECT rowid, url, header_path, text, metadata_json FROM chunks_fts WHERE {fts_where} ORDER BY rank LIMIT ?"  # nosec B608
                 cursor.execute(sql, (*fts_params, fts_pool))
                 full_rows = cursor.fetchall()
                 fts_rows = [(rid, url) for rid, url, _hp, _text, _mj in full_rows]
@@ -2533,10 +2526,7 @@ class VaultManager:
                 fetched_by_id: dict[int, tuple[str, str, str, str]] = {}
                 if missing:
                     placeholders = ",".join("?" * len(missing))
-                    sql = f"""
-                        SELECT rowid, url, header_path, text, metadata_json
-                        FROM chunks_fts WHERE rowid IN ({placeholders})
-                    """  # nosec B608 (placeholders are positional ? marks)
+                    sql = f"SELECT rowid, url, header_path, text, metadata_json FROM chunks_fts WHERE rowid IN ({placeholders})"  # nosec B608
                     cursor.execute(sql, missing)
                     fetched_by_id = {rid: (url, hp, text, mj)
                                      for rid, url, hp, text, mj in cursor.fetchall()}
