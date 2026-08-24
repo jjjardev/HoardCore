@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+import hoardcore as hc  # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent
 MODULE = REPO / "hoardcore.py"
 
