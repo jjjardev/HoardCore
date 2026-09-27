@@ -3,6 +3,136 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.16.5
+
+### Fixed
+- **Sitemap URLs are canonicalized before fetching.** WordPress emits malformed
+  locs with a literal `/./` path segment (`https://host/./projects/ulat/`) whose
+  canonical form is `https://host/projects/ulat/`. Left alone, the real page is
+  never discovered — a crawl silently misses the content and stores a URL nothing
+  links to — and a page listed under both spellings is fetched twice, which on a
+  Cloudflare site is two serialized solver round-trips. Dot segments, duplicate
+  slashes, fragments and default ports are now resolved *before* dedupe, so both
+  spellings collapse onto one fetch.
+- **FlareSolverr reuses one browser session per run.** Every `request.get`
+  without a session spins up a fresh browser context, so each URL re-paid the
+  Cloudflare challenge from scratch — the ~50 s/URL cost that made a large crawl
+  impractical. HoardCore now creates one session per run and reuses it, so only
+  the first solve is slow; a session rejected mid-batch (expired or dropped) is
+  abandoned and that URL retried statelessly once, and the session is destroyed
+  at the end of the run so no browser context is leaked. Measured against the
+  live solver: **8.6 s → 4.5 s for three solves**, per-URL 3.4/2.2/3.0 s →
+  2.2/1.1/1.0 s. `solver.session_reuse = false` restores stateless solving.
+- **`solver.urls` appends to `solver.url` instead of replacing it.** An extra
+  endpoint list was meant to add failover/throughput candidates, but it
+  overwrote the primary, orphaning an existing single-endpoint config. Commands
+  are now tried in order (`url` first), so one dead container degrades throughput
+  rather than failing every fetch.
+- **Cross-vault chrome demotion is batched.** The per-vault ledger lookup issued
+  one query *per chunk* (dozens of pool acquires for a two-vault recall); it now
+  issues one query per vault for the whole group.
+- **The CLI warns when an artifact lands outside `artifacts/`.** Such a path is
+  deliberately honoured as asked, but it is not day-foldered and a later run's
+  `organize_artifacts_by_day` re-homes it, silently invalidating the path the
+  caller is holding. The warning names the path and says why it may move.
+- **`verify` never folded straight/curly quotes, so typography-blind matching
+  silently did not work.** `normalize_claim` folds curly quotes to ASCII, but
+  the SQL candidate prefilter widened only the *Unicode* quote characters. The
+  normalized needle therefore carried a straight `"` while the raw stored text
+  still held `“`, so such a row was never even a candidate and could only ever
+  return `PARTIAL` — despite `verify` being documented as typography-blind.
+  Dashes were unaffected (both forms were already in the class), which is why
+  the en-dash case worked and hid the defect. The widening class now carries the
+  ASCII fold targets as well, and matching is symmetric: straight-in-stored vs
+  curly-in-claim verifies, and so does the reverse.
+- **`verify` was quadratic-ish in corpus size.** The sliding 60-char windows ran
+  an unbounded `LIKE '%…%'` per window, and on a 20k-chunk vault a claim built
+  from common words pulled **~113k candidate rows** into Python across the
+  windows — 5.5 s per claim, and `audit` runs this once per `[V#N]` tag (a
+  34-tag artifact on a large vault spent minutes per audit). A sound *necessary*
+  condition (`_verdict_prefilter`: the longest fold-free, ASCII-only run of the
+  needle) is now AND-ed into the same SQL statement, so impossible rows are
+  rejected in C. Worst case drops to ~1.5 s, typical claims to ~0.04 s. The
+  authoritative `normalize_claim` comparison is unchanged and still decides
+  every verdict — a `LIMIT` was deliberately rejected, because truncating
+  candidates could deny a real match and corrupt the provenance verdict. The
+  prefilter is withheld for non-ASCII claims (SQLite's `lower()` is ASCII-only)
+  and for claims with no long enough run.
+- **`prune` now clears the cross-URL ledger.** `prune_urls` deleted a URL's
+  chunks but left its `chunk_urls` rows behind, so every chrome count stayed
+  inflated after a prune and content that had become unique kept being demoted as
+  if it were still a site-wide template.
+- **Cross-vault recall demotes site chrome too.** The single-vault demotion
+  stopped at the vault boundary, so a nav block pooled from two vaults could
+  still outrank content. Counts are now resolved per source vault.
+- **Crawls no longer fetch images to discover they are images.** WordPress
+  sitemaps list every attachment; each one cost a full round-trip — and against
+  a Cloudflare site a serialized FlareSolverr solve, ~50 s apiece. URLs whose
+  path ends in a known binary extension are dropped at discovery (the
+  `binary_as_text` backstop still covers extensionless or mislabelled binaries).
+  Measured on `asti.dost.gov.ph`: **2,343 non-text URLs skipped before fetching**,
+  and the crawl still reported 12/12 content pages.
+- **`crawl` no longer reports a green pass when it captured nothing.** A crawl
+  that discovered URLs but indexed zero of them was exiting 0. The crawl now
+  tracks a per-URL outcome ledger and logs `Crawl complete: N/M URL(s)
+  contributed content`, or an **error** naming the per-URL reasons when the
+  yield is zero (most often: the site serves a sitemap index — see below).
+- **Sitemap indexes are now recursed.** Sites past 50k pages / 50 MB emit a
+  `<sitemapindex>` listing *child sitemaps* instead of pages. HoardCore treated
+  those children as pages, fetched them, discarded them as junk XML, and
+  reported a successful crawl with an empty vault — a silent no-op. The index is
+  now detected by root-element name and followed depth-first
+  (`crawler.sitemap_index_depth`, default 3); only leaf URL sets reach the
+  fetcher, and `sitemap_limit` is applied to the expanded page budget. Verified
+  live on `asti.dost.gov.ph`: 9 URLs discovered → **500**, and a bounded crawl
+  went from 0 content pages to 6/6.
+- **Decoded binary is never indexed as text.** Images/binaries listed in a
+  sitemap decode "successfully" with `errors='ignore'` into mostly control
+  characters, and the quality ratio cannot detect it (garbage ÷ garbage ≈ 1.0).
+  A document with >10% non-printable characters is now refused as
+  `binary_as_text`. On one real crawl this took binary chunks from **93% of the
+  vault (146/156) to 0** — the single largest recall-quality defect found in
+  live use.
+- **Bulk ingest no longer stalls or spins.** `crawler.parallel_workers` (5) ×
+  the four-thread embedding pipeline all entering one ONNX session drove a batch
+  to **427% CPU with no forward progress**, requiring a manual kill. ONNX forward
+  passes are now serialized by an internal lock (a single InferenceSession is
+  already internally multi-threaded, so concurrency only oversubscribed cores).
+- **Bulk ingest is no longer silent.** `ingest --urls` streams
+  `[ingest n/N] <status>: <url> — elapsed Xs, ~Ys left` to stderr per URL. A
+  Cloudflare-protected batch is slow by nature (a serialized FlareSolverr round
+  trip per URL), which made a working run indistinguishable from a hang; the ETA
+  lets a caller decide when to intervene.
+- **Site chrome no longer crowds out real content at RECALL.** Template
+  boilerplate (nav menus, accessibility statements, footers) is byte-identical
+  on every page of a site, so it embedded near-perfectly for generic queries and
+  displaced the pages' actual prose. A cross-URL occurrence ledger
+  (`chunk_urls`, populated at ingest and backfilled once on upgrade) now demotes
+  any chunk stored under ≥ `retrieval.chrome_min_urls` (default 3) distinct URLs
+  to the tail of the result set, flagged `chrome=True` / `chrome_urls=N`.
+  Nothing is deleted — the text stays in the vault and stays verifiable for
+  `[V]` — and an all-chrome set is still returned rather than emptied.
+  `chrome_min_urls = 0` disables.
+- **Embedding model is downloaded once, not on every reboot.** `TextEmbedding`
+  was constructed with no `cache_dir`, so `fastembed` fell back to
+  `<tempdir>/fastembed_cache` — a path under `/tmp` that the OS wipes at reboot.
+  Every boot therefore re-downloaded the ~65 MB ONNX model. HoardCore now
+  passes an explicit **persistent** cache (`embeddings.cache_dir`, default
+  `~/.cache/hoardcore/models`, created on demand), so the model is fetched
+  exactly once and reused forever. Startup with a warm cache drops from ~17 s to
+  ~3 s. The optional `reranker_model` weights now share the same cache instead of
+  re-downloading from `/tmp` too. The cache path is intentionally **not** part of
+  the embedding fingerprint, so relocating it never invalidates stored vectors.
+
+### Added
+- **`embeddings.offline`.** `true` loads the model from the cache directory only
+  and never contacts HuggingFace (skips the per-run revision check; works with no
+  network). Unlike the online path — which still degrades to sparse hashing when
+  the model can't be loaded — an offline load failure now **raises** instead of
+  silently demoting, so a missing model can never quietly degrade recall quality.
+- **`crawler.sitemap_index_depth`** and **`retrieval.chrome_min_urls`** config
+  knobs, documented in the config table and `skill.md`.
+
 ## HoardCore v0.16.4
 
 ### Fixed

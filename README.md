@@ -76,7 +76,11 @@ Key characteristics:
 | **PyMuPDF / python-docx / ebooklib** *(optional)* | PDF, DOCX, EPUB parsing | Installed via Makefile |
 | **rapidocr_onnxruntime** *(optional)* | OCR fallback for scanned/image-only PDF pages (local ONNX, no system deps) | `pip install .[ocr]` |
 
-FlareSolverr is **required for Cloudflare-protected coverage**: run the container, set `[solver] enabled = true` in `hoardcore.toml`, and the default `aggressive` strategy routes anti-bot-protected pages through it. It runs as a small Docker container on `http://localhost:8191/v1` (override the endpoint via `[solver] url` in `hoardcore.toml`). The shipped default config has `solver.enabled = false`, so a stock install never calls FlareSolverr — open pages work, protected ones fail. For environments that cannot run Docker, keep the solver off and rely on the curl_cffi TLS-impersonation leg of `balanced`/`aggressive` — but expect more anti-bot blocks, since FlareSolverr is what actually clears the challenge.
+FlareSolverr is **required for Cloudflare-protected coverage**: run the container, set `[solver] enabled = true` in `hoardcore.toml`, and the default `aggressive` strategy routes anti-bot-protected pages through it. It runs as a small Docker container on `http://localhost:8191/v1` (override the endpoint via `[solver] url`).
+
+**Session reuse (the default) is what makes bulk crawls practical.** Every `request.get` without a session spins up a fresh browser context, so each URL re-pays the Cloudflare challenge — the ~50 s/URL cost that turns a few dozen pages into an overnight job. HoardCore therefore creates **one browser session per run** (`[solver] session_reuse = true`) and reuses it, so only the first solve is slow; a session rejected mid-batch is dropped and that URL retried statelessly once, and the session is destroyed at the end of the run so no browser context is left holding memory. Measured against a live solver: three solves went from **8.6 s to 4.5 s** (per-URL 3.4/2.2/3.0 s → 2.2/1.1/1.0 s); the gap widens on a site that challenges harder.
+
+**More throughput:** `[solver] urls` takes extra endpoints (comma/space separated) and *appends* to `url`, which is always tried first. Commands fall through in order, so a second container doubles throughput on a large protected crawl and a dead one degrades instead of failing every fetch. The shipped default config has `solver.enabled = false`, so a stock install never calls FlareSolverr — open pages work, protected ones fail. For environments that cannot run Docker, keep the solver off and rely on the curl_cffi TLS-impersonation leg of `balanced`/`aggressive` — but expect more anti-bot blocks, since FlareSolverr is what actually clears the challenge.
 
 ---
 
@@ -137,6 +141,8 @@ make install && venv/bin/python -m pip install rapidocr_onnxruntime   # or: pip 
 Once installed, image-only/scanned PDF pages are OCR'd automatically (RapidOCR, local ONNX, no system deps); without it, those pages degrade gracefully. See [Ingest](#ingest-mode-scrape--crawl).
 
 **Retrieval modes.** Dense retrieval is **on by default** — `make install` includes `fastembed`, so hybrid search uses an ONNX-quantized sentence-transformer (default `BAAI/bge-small-en-v1.5`, 384-dim, runs on `onnxruntime` — no PyTorch, no GPU) for meaning-based matching. If `fastembed` is unavailable in a given environment, dense mode **degrades gracefully to the lightweight sparse hash** — it never crashes. To force the sparse hash explicitly, set `mode = "sparse"` in the `[embeddings]` section of `hoardcore.toml`. Switching modes rebuilds the vector table automatically (resumable across interrupts). See [Hybrid Retrieval](#hybrid-retrieval) and [Configuration](#configuration-file-hoardcoretoml).
+
+**Model downloads once, then never again.** The ONNX model (~65 MB) is stored on disk in a *persistent* location — `~/.cache/hoardcore/models` by default (`embeddings.cache_dir`). `fastembed`'s own default lives under `/tmp`, which is wiped on every reboot, so before this the model was re-downloaded at every boot; now it is fetched exactly once and reused forever. Set `embeddings.offline = true` to load strictly from that directory — it skips the per-run revision check, works with no network at all, and *fails loudly* (instead of silently demoting to sparse hashing) if the model was never downloaded. Both the embedding model and the optional `reranker_model` share the same cache. The cache path is deliberately **not** part of the embedding fingerprint, so moving or deleting the cache never invalidates stored vectors.
 
 ---
 
@@ -448,6 +454,12 @@ Because dense retrieval runs on `onnxruntime` (no PyTorch, no GPU) and the `hoar
 
 **Scrape** fetches a single URL (HTML, PDF, DOCX, EPUB), cleans it, chunks it semantically by headings, and indexes it. **Crawl** discovers a site's URLs via `robots.txt` / sitemap and ingests them with a bounded, semaphore-limited worker pool (`crawler.parallel_workers`).
 
+**Sitemap indexes are recursed.** Once a site passes 50k pages or 50 MB, WordPress/Yoast-style plugins emit a `<sitemapindex>` that lists *child sitemaps* instead of pages. A non-recursive crawler fetches those children as if they were pages, discards them as junk XML, and reports a **green crawl that captured nothing**. HoardCore detects the index by root-element name and follows it depth-first (`crawler.sitemap_index_depth`, default 3); only leaf URL sets are handed to the fetcher. Relatedly, **a crawl that discovers URLs but indexes none is an error, not a pass** — the crawl log states the per-URL outcomes and names the sitemap-index cause.
+
+**Bulk ingest is not silent.** `ingest --urls` streams one `[ingest n/N] status: url — elapsed Xs, ~Ys left` line to stderr per URL. A Cloudflare-protected batch is slow by nature (every URL costs a serialized FlareSolverr round-trip), so a quiet run is indistinguishable from a hang; the ETA lets a supervisor decide when to intervene. ONNX forward passes are also **serialized** by an internal lock: a single InferenceSession is already multi-threaded, so concurrent embed callers only oversubscribe the CPU (observed: 427% with no forward progress).
+
+**Decoded binary is never indexed.** Images and other binaries listed in a sitemap decode "successfully" with `errors='ignore'` into strings that are mostly control bytes; the quality ratio can't see this (garbage over garbage ≈ 1.0), so character-class composition is the signal — a document with >10% non-printable characters is refused as `binary_as_text`. On one real crawl this cut binary chunks from **93% of the vault to 0**.
+
 The pipeline for each document:
 
 1. **Fetch** — tries the strategy chain (aiohttp ⟂ curl_cffi concurrently → FlareSolverr) until one returns content. With the default `aggressive` strategy and `[solver] enabled = true`, FlareSolverr is the terminal leg that clears Cloudflare-shaped challenges.
@@ -487,6 +499,8 @@ Empty and whitespace-only queries return `[]` instead of raising. A punctuation-
 The dense vector scan is a single numpy matrix–vector product over the whole vector table (`argpartition` for top-k, cached when the table is unchanged) instead of a per-row Python loop. Optionally, `embeddings.reranker_model` runs a cross-encoder over the final recalled set, loaded lazily and degrading to input order on any failure.
 
 Queries are sanitized: operator characters (`" ( ) * ^ : -`) are stripped and tokens quoted, so free-text input cannot alter query semantics or raise FTS syntax errors.
+
+**Site chrome is demoted, never deleted.** On a template-driven site the extracted navigation menu, accessibility statement and footer are byte-identical on every page, so they embed near-perfectly for a generic query and crowd the real content out of the recall set. HoardCore records a cross-URL occurrence ledger at ingest (`chunk_urls`, backfilled once on upgrade) and demotes any chunk whose text is stored under ≥ `retrieval.chrome_min_urls` (default 3) distinct URLs to the tail of the set, flagged `chrome=True` / `chrome_urls=N`. Nothing is removed: the text stays in the vault and stays verifiable for `[V]`, and a set whose *only* matches are chrome is still returned rather than emptied. Set `chrome_min_urls = 0` to disable.
 
 ### Discovery Mode
 
@@ -704,15 +718,16 @@ Created automatically on first run. Key sections:
 | `[general]` | `timeout_seconds`, `user_agent` |
 | `[network]` | `default_strategy` (`fast`/`balanced`/`aggressive`), `enable_preflight`, `ssrf_protection` (block private/LAN/non-http(s) targets + re-validate redirects, default true) |
 | `[auth]` | `cookie_string` (e.g. `cf_clearance=...; session=...`) |
-| `[solver]` | `enabled` (default `false` — the FlareSolverr leg is a no-op until you set it to `true`), `url`, `solver_timeout` |
 | `[storage]` | `root_dir`, `artifacts_dir`, `artifacts_by_day`, `grounding_subdir` (research grounding contexts land in `artifacts/YYYY-MM-DD/<subdir>/` so they don't pollute the day folder of finished deliverables; default `grounding`), `local_dir` (read-only root for `--action local`; default `local_inputs/`, git-ignored), `save_binary`, `save_raw_html`, `page_size` (16 KB default) |
 | `[parsers]` | `enable_pdf`, `enable_docx`, `enable_epub` (refuse heavy formats even when their libraries are installed; wired v0.15.1), `enable_pdf_ocr` (auto-OCR scanned PDF pages when `rapidocr_onnxruntime` is present, default true) |
-| `[crawler]` | `respect_robots`, `sitemap_limit`, `parallel_workers` |
+| `[solver]` | `enabled` (default `false` — the FlareSolverr leg is a no-op until you set it to `true`), `url` (always tried first), `urls` (extra endpoints, appended in order for failover/throughput), `solver_timeout`, `session_reuse` (one browser session per run; false solves statelessly) |
+| `[crawler]` | `respect_robots`, `sitemap_limit`, `sitemap_index_depth` (recurse into `<sitemapindex>` children, 0 = off), `parallel_workers` |
 | `[indexer]` | `enable_fts`, `search_limit`, `parallel` (threaded ingest, default on for batches of 8+ chunks), `near_dedup` (simhash dup filter, default off), `near_dedup_threshold` |
-| `[embeddings]` | `enabled`, `mode` (`sparse`/`dense`), `dense_model`, `dim`, `mrl_dims` (Matryoshka truncation, 0 = full), `hybrid_search`, `top_k`, `quantize`, `fts_fast_path`, `recency_half_life_days`, `conf_mode` (`relative` default / `absolute` legacy), `conf_high_abs`, `conf_low_abs`, `reranker_model` (optional cross-encoder re-ranker) |
+| `[embeddings]` | `enabled`, `mode` (`sparse`/`dense`), `dense_model`, `dim`, `mrl_dims` (Matryoshka truncation, 0 = full), `cache_dir` (ONNX model on disk; empty = `~/.cache/hoardcore/models`, must be persistent), `offline` (`true` = load from cache only, never hit HuggingFace), `hybrid_search`, `top_k`, `quantize`, `fts_fast_path`, `recency_half_life_days`, `conf_mode` (`relative` default / `absolute` legacy), `conf_high_abs`, `conf_low_abs`, `reranker_model` (optional cross-encoder re-ranker) |
 | `[discovery]` | `max_results`, `top_rank`, `max_retries`, `backoff_seconds` |
 | `[research]` | `answer_first` (memory-first routing, default true), `filter_low` (at EMIT drops duplicate `low` hits but keeps one `low` chunk per distinct source; set `false` to retain all low hits — honored since v0.15.1), `max_per_source` (cap recall chunks per source URL so one rich page can't crowd out others; 0 = unlimited, default 2) |
 | `[chunking]` | `max_tokens`, `overlap_tokens` (sliding window, CJK-aware), `strategy` (`heading` / `paragraph` / `plugin.<name>`) |
+| `[retrieval]` | `chrome_min_urls` (recall-time demotion of site chrome replicated across ≥ N distinct URLs; 0 = off) |
 | `[plugins]` | `enabled` (discover `hoardcore.*` entry-point plugins) |
 | `[cache]` | `ttl_seconds` |
 
