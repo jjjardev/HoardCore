@@ -3,6 +3,30 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.16.6
+
+### Fixed
+- **`verify` denied claims that were present verbatim (regression from v0.16.5).**
+  The candidate prefilter introduced in v0.16.5 built a *whitespace-spanning* run
+  of the needle and AND-ed it into the SQL. Extracted PDF text is hard-wrapped,
+  so a span containing spaces can never match the raw row — a claim present
+  verbatim in a PDF was denied. It surfaced as `PARTIAL` on an arXiv abstract
+  whose stored text wraps mid-sentence. In a provenance gate a denial is worse
+  than a slowdown: it pushes an author to demote a true claim to `[E]`.
+  Candidate selection is now the single authoritative scan with no narrowing.
+  Two faster variants were measured and **rejected**: AND-ing the filter into SQL
+  added full table scans (11.3 s vs 5.5 s for no filter at all), and a per-row
+  pre-check gave no selectivity on common-word claims. A `LIMIT` remains ruled
+  out, since truncating candidates could deny a real match.
+- **`audit` and `lint` stopped checking claims after any heading containing the
+  word "citation".** The Source Links block was detected by substring, so an
+  artifact *about* citations had every claim after the first such heading
+  silently skipped — while still reporting 100% accuracy over the handful it did
+  check. An artifact in this repository's own research on grounding was audited
+  as 6/6 when it carried 29 tags. The detector now requires a heading that *is*
+  the links block ("Source Links", "Citations", "Sources", or the pair with a
+  slash), so 20/20 were genuinely verified.
+
 ## HoardCore v0.16.5
 
 ### Fixed
