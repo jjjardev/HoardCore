@@ -3,7 +3,23 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## HoardCore v0.16.7
+## HoardCore v0.16.8
+
+### Added
+- **`tests/test_skill_contract.py` — the agent operating manual is now enforced
+  as a contract.** skill.md states behaviour an agent acts on, and it drifted
+  twice: v0.16.5 shipped a provenance regression while the manual still
+  described the old behaviour, and v0.16.6 fixed an audit blind spot the manual
+  never mentioned. Both were caught by *using* the tool, not reading it. The
+  suite parses skill.md and asserts that every action, CLI flag and config key
+  it names exists (in both directions), and re-asserts its behavioural promises
+  executably: chrome demotion at >=3 URLs that never deletes, the 8+ chunk
+  parallel gate, two-direction quote folding, hyphen-split words not being
+  silently rejoined, `[V#N]` being audited wherever it appears, the Source
+  Links heading rule, `solver.urls` appending to `url`, sitemap-index recursion,
+  and content-hash skips on local re-ingest. Validated by deliberate breakage.
+
+## HoardCore v0.16.8
 
 ### Fixed
 - **`skill.md` no longer documents behaviour that v0.16.5/0.16.6 invalidated.**

@@ -177,6 +177,7 @@ Sources, doc versions, chunks, vectors, embedding dim/mode, schema version, page
 - CLI chunk previews show 300 chars by default; pass `--preview-chars 0` for full text.
 - **Python 3.11+** — on failure run `make install`.
 - **Release gates (CI-enforced):** `tools/check_version.py` must report OK (`__version__` == `pyproject.toml` version, and == the git tag on `v*` pushes) and coverage ≥70% (`--cov-fail-under=70`). Run `venv/bin/python tools/check_version.py` and `make coverage` before tagging.
+- **This file is treated as code.** `tests/test_skill_contract.py` parses `skill.md` and asserts it: every action, CLI flag and config key it names must exist, and every behavioural promise above is re-asserted executably (chrome is demoted at 3 URLs and never deleted, the parallel pipeline is gated at 8+ chunks, quotes fold both ways, a hyphen-split word is not silently rejoined, `[V#N]` is audited wherever it appears, solver `urls` appends to `url`, local re-runs skip by content hash). A behaviour change breaks that suite instead of quietly making this manual wrong — which is what happened in v0.16.5. **If you change behaviour, change this file and that suite in the same commit.**
 
 ## Remember
 You are not just a browser — you are a **knowledge hoarder**. Build a permanent, local memory for yourself and the user.
