@@ -335,3 +335,51 @@ def test_audit_warns_h_analysis_with_unverified_prose(scraper, tmp_path):
     assert out["warnings"], "expected an authoring-smell warning"
     assert out["claims"][0]["verdict"] == "unverified"
     assert out["accuracy"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Source Links block detection must not swallow earlier claims
+# ---------------------------------------------------------------------------
+
+def test_links_heading_requires_the_phrase_not_the_word():
+    """REGRESSION: the block detector used `"citation" in heading`, so ANY heading
+    mentioning citations ended claim scanning. An artifact *about* citations had
+    every claim after the first such heading silently skipped — while the audit
+    still reported 100% over the handful it did check."""
+    H = hc.HoardCore._is_links_heading
+    for heading in ("## Source Links / Citations", "## Source Links",
+                    "## Citations", "## Sources", "# source links"):
+        assert H(heading), heading
+    for heading in ("## Grounding techniques that raise citation quality",
+                    "## 3. The verification mechanism: entailment",
+                    "## 9. HoardCore re-test",
+                    "## Citations and grounding",
+                    "## Source Links are mapped by N"):
+        assert not H(heading), heading
+
+
+def test_audit_checks_claims_after_a_heading_that_mentions_citation(tmp_path, monkeypatch):
+    """The end-to-end consequence: a claim AFTER a citation-mentioning heading
+    must still be audited, not skipped."""
+    scraper = _build_scraper(tmp_path, monkeypatch)
+    vault = scraper.vault
+    text = "The Philippine Earth Data Resource Observation Center installed an antenna."
+    vault.index_document("https://e.test/p", [hc.Chunk(
+        text=text, metadata={"header_path": "A", "source": "https://e.test/p"})], {})
+
+    body = (
+        "# Report\n\n"
+        "## 1. Early claim\n\n"
+        f'It says "{text}" [V#1].\n\n'
+        "## 2. Grounding techniques that raise citation quality\n\n"
+        "## 3. Conclusion\n\n"
+        f'It also says "{text}" [V#2].\n\n'
+        "## Source Links / Citations\n\n"
+        "[#1] https://e.test/p\n"
+        "[#2] https://e.test/p\n"
+    )
+    path = _make_artifact(tmp_path, body=body)
+    report = scraper.audit_artifact(path)
+    # BOTH tags must be analysed; before the fix only the first was.
+    assert {c["n"] for c in report["claims"]} == {"1", "2"}, report["claims"]
+    assert report["counts"]["unverified"] == 0

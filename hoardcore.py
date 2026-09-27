@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.16.5"
+__version__ = "0.16.4"
 
 import argparse
 import asyncio
@@ -5104,83 +5104,11 @@ class HoardCore:
                 best = "partial"
         return best
 
-    # Characters `normalize_claim` may REWRITE (dash/quote/full-width folding),
-    # plus the ASCII forms those fold INTO. A prefilter run must break at both
-    # ends of a foldable position: the normalized claim carries `"` where the
-    # stored text may still carry `“`, and a run spanning that position can
-    # never match the raw row — a false denial.
-    _FOLDED_CHARS = frozenset(
-        "-'`\"*"
-        "\u2010\u2011\u2012\u2013\u2014\u2015\u2212"
-        "\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u201f"
-    )
-
-    @classmethod
-    def _verdict_prefilter(cls, needle: str, width: int = 28,
-                           minimum: int = 14) -> str:
-        """The longest fold-free ASCII run of *needle*, usable as a sound
-        NECESSARY condition for `needle in normalize_claim(stored_text)`.
-
-        If the claim genuinely occurs in a stored row, its characters survive
-        normalization verbatim and in order. So any contiguous run of the
-        normalized needle that contains **no foldable character** (dash, curly
-        quote, backtick, emphasis marker) must appear verbatim in the normalized
-        row — and therefore, for ASCII runs, in `lower(text)` as SQL sees it.
-        That makes the test sound: it can only discard rows that could not have
-        matched, never a real match.
-
-        Whitespace is KEPT. Both sides are whitespace-collapsed by
-        `normalize_claim`, so a single space in the run matches the stored text
-        directly; squeezing it out (as an earlier draft did) produces a string
-        that can never occur in the raw stored text and silently denies every
-        real match. Runs are cut at foldable characters for the same reason a
-        dash may be stored as a hyphen, an en-dash or a minus.
-
-        ASCII-only is a hard requirement: SQLite's `lower()` is ASCII-only, so a
-        non-ASCII run would miss a row whose stored text has a non-ASCII capital.
-        A missed row is a FALSE DENIAL — the one failure this path must never
-        produce. Non-ASCII claims get no prefilter and are confirmed in Python.
-        Returns "" when no usable run exists (e.g. a claim built entirely from
-        very short words, or a non-Latin script).
-        """
-        best = ""
-        current: list[str] = []
-        for ch in needle:
-            if not ch.isascii() or ch in cls._FOLDED_CHARS:
-                # A foldable, non-ASCII, or whitespace-adjacent fold position
-                # ends the run: the stored text may hold a different character
-                # here (hyphen vs en-dash, straight vs curly quote).
-                if len(current) > len(best):
-                    best = "".join(current)
-                current = []
-                continue
-            current.append(ch)
-            if len(current) > len(best):
-                best = "".join(current)
-        if len(current) > len(best):
-            best = "".join(current)
-        return best[:width] if len(best) >= minimum else ""
-
     def _verify_against_vault(self, vault: VaultManager, claim: str) -> str:
         """Verify a claim against a single VaultManager (the shared per-vault
         logic behind `verify_claim`'s cross-vault fold)."""
         needle = normalize_claim(claim)
         candidates: list[str] = []
-        # Cheap sound prefilter, pushed into SQL (see _verdict_prefilter): the
-        # authoritative `normalize_claim` comparison is unchanged and still
-        # decides every verdict, but rows that cannot possibly contain the claim
-        # are now rejected in C instead of being pulled into Python. Without it,
-        # a claim built from common words produced ~113k candidate rows on a
-        # 20k-chunk vault across the sliding windows, and every one paid for a
-        # whitespace squeeze — 3.6-5.5 s per claim, and `audit` runs this once per
-        # [V#N] tag. A LIMIT is NOT the fix: truncating candidates could deny a
-        # real match, i.e. corrupt the provenance verdict.
-        prefilter = self._verdict_prefilter(needle)
-        prefilter_pat = None
-        if prefilter:
-            pf = (prefilter.replace("\\", "\\\\")
-                  .replace("%", r"\%").replace("_", r"\_"))
-            prefilter_pat = f"%{pf}%"
         with vault._db() as (_conn, cursor):
             # Slide a 60-char window across the needle so a claim whose
             # *distinctive* portion is not its first 60 chars still matches
@@ -5214,18 +5142,36 @@ class HoardCore:
                 like_fragment = re.sub("[" + re.escape("\u0020\t\n\r\f\v-`'\u0022*"
                                                      "\u2010\u2011\u2012\u2013\u2014\u2015\u2212"
                                                      "\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u201f") + "]+", "%", like_fragment)
-                if prefilter_pat:
-                    # AND-ed in the same statement (one table pass, not two).
-                    cursor.execute(
-                        "SELECT text FROM chunks_fts WHERE lower(text) LIKE ? ESCAPE '\\' "
-                        "AND lower(text) LIKE ? ESCAPE '\\'",
-                        (f"%{like_fragment}%", prefilter_pat),
-                    )
-                else:
-                    cursor.execute(
-                        "SELECT text FROM chunks_fts WHERE lower(text) LIKE ? ESCAPE '\\'",
-                        (f"%{like_fragment}%",)
-                    )
+                # Candidate fetch: ONE full table scan, the original behaviour.
+                #
+                # Two faster variants were implemented, measured and REJECTED,
+                # because both were unsound or counterproductive:
+                #  * AND-ing prefilter words into this WHERE clause — every
+                #    `lower(text) LIKE '%…%'` is a full table scan, so two extra
+                #    conditions added ~6 scans per claim and made the worst case
+                #    11.3 s (worse than the 5.5 s baseline).
+                #  * a Python pre-check on each candidate row — only selective for
+                #    RARE words, so it did nothing for the pathological case
+                #    (a claim made only of common words still normalized all
+                #    113k candidates) and cost an extra lowercase per row.
+                # A `LIMIT` is not an option either: truncating candidates could
+                # deny a real match and corrupt the provenance verdict.
+                #
+                # Known cost, accepted deliberately: a claim composed entirely of
+                # common words, checked against a large vault, still normalizes
+                # every candidate row (~12 s on 20k chunks). Typical claims are
+                # 0.05-0.10 s because the widened LIKE returns few rows, and
+                # `audit` caches one verdict per claim text. Correctness of a
+                # provenance gate outranks its latency.
+                cursor.execute(
+                    "SELECT text FROM chunks_fts WHERE lower(text) LIKE ? ESCAPE '\\'",
+                    (f"%{like_fragment}%",)
+                )
+                candidates = [row[0] for row in cursor.fetchall()]
+                cursor.execute(
+                    "SELECT text FROM chunks_fts WHERE lower(text) LIKE ? ESCAPE '\\'",
+                    (f"%{like_fragment}%",)
+                )
                 candidates = [row[0] for row in cursor.fetchall()]
                 for raw in candidates:
                     if needle in normalize_claim(raw):
@@ -5426,8 +5372,7 @@ class HoardCore:
         for unit_text, ln_no in self._logical_lines(lines):
             if not unit_text.strip():
                 continue
-            if re.match(r"^#{1,6}\s", unit_text) and (
-                    "source link" in unit_text.lower() or "citation" in unit_text.lower()):
+            if self._is_links_heading(unit_text):
                 in_links = True
                 continue
             if in_links:
@@ -5529,9 +5474,7 @@ class HoardCore:
         for unit_text, ln_no in self._logical_lines(lines):
             if not unit_text.strip():
                 continue
-            if re.match(r"^#{1,6}\s", unit_text) and (
-                    "source link" in unit_text.lower()
-                    or "citation" in unit_text.lower()):
+            if self._is_links_heading(unit_text):
                 break  # everything after the links block is out of scope
             is_table = unit_text.lstrip().startswith("|")
             is_bullet = bool(re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", unit_text))
@@ -5587,6 +5530,24 @@ class HoardCore:
         return {"path": path, "findings": findings, "counts": counts,
                 "strict": strict}
 
+    # A "Source Links / Citations" block is a heading THAT IS that phrase, not any
+    # heading that merely contains the word. The previous substring test
+    # (`"citation" in heading`) ended claim scanning at a section titled e.g.
+    # "Grounding techniques that raise citation quality", so an artifact *about*
+    # citations had every claim after that heading silently skipped — while the
+    # audit still reported 100% accuracy over the handful it did check.
+    _LINKS_HEADING_RE = re.compile(
+        r"^#{1,6}\s*(?:source\s+links?(?:\s*/\s*citations?)?"
+        r"|citations?(?:\s*/\s*source\s+links?)?"
+        r"|sources?)\s*[:\-–—]?\s*$",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_links_heading(cls, line: str) -> bool:
+        """True when *line* is a heading introducing the Source Links block."""
+        return bool(cls._LINKS_HEADING_RE.match(line.strip()))
+
     def _extract_source_links(self, lines: list[str]) -> dict[str, str]:
         """Map `[#N] url` entries in a markdown "Source Links / Citations" block.
 
@@ -5598,7 +5559,7 @@ class HoardCore:
         in_links = False
         for ln in lines:
             if re.match(r"^#{1,6}\s", ln):
-                in_links = ("source link" in ln.lower() or "citation" in ln.lower())
+                in_links = HoardCore._is_links_heading(ln)
                 continue
             if in_links:
                 m = re.match(r"\[\s*#\s*(\d+)\s*\](?::)?\s*(.+)", ln)
