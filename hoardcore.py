@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from itertools import combinations
 from typing import Any
-from urllib.parse import unquote, urlencode, urlparse
+from urllib.parse import unquote, urlencode, urlparse, urlunparse
 
 # --- GUARANTEED DEPENDENCIES (Installed via Makefile) ---
 import aiohttp
@@ -130,7 +130,19 @@ cookie_string = ""
 [solver]
 enabled = false
 url = "http://localhost:8191/v1"
+urls = ""                   # OPTIONAL extra solver endpoints, comma/space
+                           # separated. Commands are tried in order, so a second
+                           # FlareSolverr container doubles throughput on a
+                           # challenge-protected bulk crawl, and a dead endpoint
+                           # degrades instead of failing every fetch. `url` above
+                           # is always tried first.
 solver_timeout = 60
+session_reuse = true        # create ONE browser session per run and reuse it for
+                           # every solve. Without this each request.get spins up a
+                           # fresh context and re-pays the Cloudflare challenge
+                           # (~50 s per URL); with it only the first solve is slow.
+                           # Set false to solve statelessly; a session rejected
+                           # mid-batch is dropped and retried statelessly once.
 
 [storage]
 root_dir = "hoardcore_data"
@@ -162,6 +174,10 @@ enable_pdf_ocr = true            # auto-OCR scanned/image-only PDF pages (needs 
 [crawler]
 respect_robots = true
 sitemap_limit = 500
+sitemap_index_depth = 3    # how deep to recurse into a <sitemapindex> (a CMS
+                           # sitemap that lists child sitemaps instead of pages).
+                           # 1 already fixes the common single-level index; 0
+                           # disables recursion (legacy, non-recursive behaviour).
 parallel_workers = 5
 
 [indexer]
@@ -190,6 +206,20 @@ mrl_dims = 0             # Matryoshka truncation: store only the first N dims of
                          # dense vectors (0 = keep the full model dim). Shrinks
                          # the vector table ~4x at 384->96; best on MRL-trained
                          # models. Existing rows rebuild via backfill.
+cache_dir = ""             # where the ONNX model is stored ON DISK. Empty =
+                          # auto `~/.cache/hoardcore/models`. fastembed's own
+                          # default is `<tempdir>/fastembed_cache`, which lives
+                          # under /tmp and is wiped on every reboot — that is why
+                          # the model used to re-download each boot. This path
+                          # persists, so the model is downloaded exactly once.
+                          # It is NOT part of the embedding fingerprint: moving
+                          # the cache never invalidates stored vectors.
+offline = false           # true = load the model from cache_dir only, never
+                          # contacting HuggingFace. Speeds startup (skips the
+                          # per-run revision check) and makes runs work with no
+                          # network. If the model was never downloaded, loading
+                          # FAILS loudly instead of silently demoting to sparse
+                          # hashing (which would quietly degrade recall quality).
 hybrid_search = true       # merge FTS + vector via RRF
 top_k = 40                 # candidate pool from vector search
 batch_size = 16            # chunks per model forward pass at ingest (bit-identical
@@ -229,6 +259,17 @@ overlap_tokens = 50                  # sliding-window overlap between chunks: N 
 strategy = "heading"                 # heading, paragraph, or plugin.<name> for a
                                      # plugin chunker (throws back to the build-in
                                      # pipeline on any plugin failure)
+
+[retrieval]
+chrome_min_urls = 3           # recall-time site-chrome demotion. A chunk whose
+                              # text is stored under >= N distinct URLs is
+                              # template boilerplate replicated by every page of
+                              # a site (nav menus, accessibility statements,
+                              # cookie banners) and is pushed to the tail of the
+                              # recalled set — never deleted, so it stays
+                              # verifiable for [V]. 0 disables the demotion.
+                              # 2 is aggressive; 3+ is safe; 5+ only catches
+                              # chrome shared across a whole site.
 
 [plugins]
 enabled = true                       # discover entry-point plugins (hoardcore.parsers,
@@ -287,16 +328,17 @@ class ConfigManager:
             "general": {"timeout_seconds": 30, "user_agent": "HoardCore/5.0"},
             "network": {"default_strategy": "aggressive", "enable_preflight": True, "ssrf_protection": True},
             "auth": {"cookie_string": ""},
-            "solver": {"enabled": False, "url": "http://localhost:8191/v1", "solver_timeout": 60},
+            "solver": {"enabled": False, "url": "http://localhost:8191/v1", "urls": "", "solver_timeout": 60, "session_reuse": True},
             "storage": {"root_dir": "hoardcore_data", "artifacts_dir": "artifacts", "artifacts_by_day": True, "grounding_subdir": "grounding", "local_dir": "local_inputs", "save_binary": True, "save_raw_html": False, "page_size": 16384},
             "parsers": {"enable_pdf": True, "enable_docx": True, "enable_epub": True, "enable_pdf_ocr": True},
-            "crawler": {"respect_robots": True, "sitemap_limit": 500, "parallel_workers": 5},
+            "crawler": {"respect_robots": True, "sitemap_limit": 500, "sitemap_index_depth": 3, "parallel_workers": 5},
             "indexer": {"enable_fts": True, "search_limit": 20, "parallel": True,
                         "near_dedup": False, "near_dedup_threshold": 3},
-            "embeddings": {"enabled": True, "mode": "dense", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 256, "mrl_dims": 0, "hybrid_search": True, "top_k": 40, "conf_mode": "relative", "conf_high_abs": 0.025, "conf_low_abs": 0.020, "quantize": "float32", "fts_fast_path": True, "recency_half_life_days": 0, "reranker_model": "", "batch_size": 16},
+            "embeddings": {"enabled": True, "mode": "dense", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 256, "mrl_dims": 0, "hybrid_search": True, "top_k": 40, "conf_mode": "relative", "conf_high_abs": 0.025, "conf_low_abs": 0.020, "quantize": "float32", "fts_fast_path": True, "recency_half_life_days": 0, "reranker_model": "", "batch_size": 16, "cache_dir": "", "offline": False},
             "research": {"answer_first": True, "filter_low": True, "max_per_source": 2},
             "discovery": {"max_results": 10, "top_rank": 6, "max_retries": 2, "backoff_seconds": 1.5},
             "chunking": {"max_tokens": 512, "overlap_tokens": 50, "strategy": "heading"},
+            "retrieval": {"chrome_min_urls": 3},
             "plugins": {"enabled": True},
             "cache": {"ttl_seconds": 86400}
         }
@@ -496,6 +538,14 @@ def _simhash_bucket_patterns(k: int) -> list[int]:
     return pats
 
 
+# Persistent on-disk home for the ONNX embedding model. fastembed's own default
+# is `<tempdir>/fastembed_cache`, which lives under /tmp and is wiped on every
+# reboot — the reason the model used to be re-downloaded each boot. HoardCore
+# therefore points fastembed at a path that survives reboots, so the model is
+# fetched exactly once (overridable via `embeddings.cache_dir`).
+_DEFAULT_MODEL_CACHE = os.path.join("~", ".cache", "hoardcore", "models")
+
+
 class EmbeddingsEngine:
     """Turns chunk text into fixed-dimension vectors for hybrid retrieval.
 
@@ -533,11 +583,28 @@ class EmbeddingsEngine:
             )
             self.quantize = 'float32'
         self._dense = None  # lazy fastembed backend (model + dim)
+        # One ONNX forward pass at a time. A single InferenceSession is already
+        # internally multi-threaded, so concurrent embed callers only oversubscribe
+        # cores. See `vectorize_batch`.
+        self._embed_lock = threading.Lock()
+        # Offline mode (`embeddings.offline`): load the model from the local
+        # cache only, never contacting HuggingFace. Under offline a load failure
+        # is surfaced instead of silently demoting to sparse hashing, which would
+        # quietly degrade recall quality while every command still "worked".
+        self.offline = bool(config.get('embeddings.offline', False))
+        self.cache_dir = self._model_cache_dir()
         if self.mode == 'dense':
             try:
                 self.dim = self._load_dense()
                 self.base_dim = self.dim
             except Exception as e:  # fastembed missing or model download failed
+                if self.offline:
+                    raise RuntimeError(
+                        f"embeddings.offline=true but the model could not be "
+                        f"loaded from {self.cache_dir}: {e}. Run one online "
+                        f"session (embeddings.offline=false) to download it, or "
+                        f"point embeddings.cache_dir at an existing copy."
+                    ) from e
                 logger.warning(
                     f"Dense mode requested but unavailable ({e}); "
                     f"falling back to sparse lexical hashing."
@@ -571,18 +638,52 @@ class EmbeddingsEngine:
                           str(self.mrl_dims), model))
         return hashlib.blake2b(parts.encode("utf-8"), digest_size=8).hexdigest()
 
+    def _model_cache_dir(self) -> str:
+        """Resolve the on-disk home for the ONNX model (`embeddings.cache_dir`).
+
+        Empty config -> `~/.cache/hoardcore/models` (XDG-style, persists across
+        reboots, shared by every HoardCore clone on the machine). An explicit
+        value is expanded (`~`) and used verbatim. The directory is created on
+        demand; if it cannot be created (read-only home, permissions) we hand
+        fastembed an empty cache_dir so it falls back to its own default rather
+        than crashing — the download still works, it just won't persist.
+        """
+        raw = str(self.config.get('embeddings.cache_dir', '') or '').strip()
+        path = os.path.expanduser(raw) if raw else os.path.expanduser(_DEFAULT_MODEL_CACHE)
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as e:
+            logger.warning(
+                f"Embedding model cache {path!r} is not creatable ({e}); "
+                "falling back to fastembed's default (temp) location."
+            )
+            return ""
+        return path
+
     def _load_dense(self) -> int:
         """Lazily import fastembed and load the ONNX-quantized model.
 
+        The model is cached in `self.cache_dir` (persistent by default), so it
+        is downloaded once and reused on every later run. Under
+        `embeddings.offline` the load is strictly local — no HuggingFace call —
+        and a missing model raises instead of triggering a download.
+
         Returns the model's embedding dimension. Raises if fastembed is not
         installed or the model cannot be loaded, so the caller can fall back
-        to sparse.
+        to sparse (or fail loudly, in offline mode).
         """
         from fastembed import TextEmbedding
 
         model_name = str(self.config.get('embeddings.dense_model',
                                          'BAAI/bge-small-en-v1.5'))
-        model = TextEmbedding(model_name)
+        # cache_dir is passed explicitly (never left to fastembed's /tmp
+        # default); local_files_only is only set under offline, so a normal run
+        # still resolves a *missing* model by downloading it once.
+        kwargs: dict[str, Any] = {"cache_dir": self.cache_dir}
+        if self.offline:
+            kwargs["local_files_only"] = True
+        model = TextEmbedding(model_name, **kwargs)
+
         # Probe a short real token to discover the embedding dimension (an empty
         # string can produce a degenerate vector on some tokenizers).
         probe = next(iter(model.embed(['probe'])), None)
@@ -591,7 +692,9 @@ class EmbeddingsEngine:
             # Fall back to the documented MiniLM dimension if probe is empty.
             dim = 384
         self._dense = (model, dim)
-        logger.info(f"Dense embeddings loaded: {model_name} (dim={dim})")
+        logger.info(f"Dense embeddings loaded: {model_name} (dim={dim}, "
+                    f"cache={self.cache_dir or 'fastembed-default'}"
+                    f"{', offline' if self.offline else ''})")
         return dim
 
     @staticmethod
@@ -643,8 +746,16 @@ class EmbeddingsEngine:
         if self.mode == 'dense' and self._dense is not None:
             model, _dim = self._dense
             vectors: list = []
+            # Serialized: one ONNX forward pass at a time. A single
+            # InferenceSession is already internally multi-threaded, so N
+            # concurrent callers (crawler.parallel_workers x the embed pipeline's
+            # WORKER_THREADS) oversubscribe every core and spin instead of
+            # progressing — observed as 427% CPU with no forward progress on a
+            # 27-URL Cloudflare batch. The lock costs nothing when callers are
+            # already serialized and prevents the pathological case. BUGFIX
             try:
-                vectors = list(model.embed(list(texts)))
+                with self._embed_lock:
+                    vectors = list(model.embed(list(texts)))
             except Exception as e:
                 logger.warning(f"Batch embed failed ({e}); per-item fallback.")
             if len(vectors) == len(texts):
@@ -718,7 +829,8 @@ class EmbeddingsEngine:
         if dense is None:
             return b""
         model, _dim = dense
-        vec = next(iter(model.embed([text])), None)
+        with self._embed_lock:
+            vec = next(iter(model.embed([text])), None)
         if vec is None:
             return b""
         return self._dense_vec_to_bytes(vec)
@@ -885,6 +997,8 @@ class VaultManager:
         # vaults otherwise).
         self._vec_mat_cache: dict[str, Any] = {"count": None}
         self.backfill_vectors()
+        # Cross-URL ledger for recall-time chrome demotion (one-off on upgrade).
+        self.backfill_chunk_urls()
 
         # Lazy-loaded cross-encoder reranker (embeddings.reranker_model).
         self._reranker = None
@@ -974,6 +1088,28 @@ class VaultManager:
                     UNIQUE(url, version)
                 )
             """)
+
+            # Cross-URL occurrence ledger for site-chrome detection at RECALL.
+            # A chunk whose text appears on N distinct URLs is boilerplate
+            # replicated by a template (nav menus, accessibility statements,
+            # cookie banners) — it is real stored evidence, but it is not
+            # page-specific, and on a large site it outranks the actual topical
+            # content in every hybrid recall. This table counts DISTINCT urls per
+            # chunk hash so recall can demote those hits WITHOUT deleting
+            # anything: the text stays in the vault and stays verifiable.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS chunk_urls (
+                    chunk_hash TEXT,
+                    url TEXT,
+                    PRIMARY KEY (chunk_hash, url)
+                )
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chunk_urls_hash ON chunk_urls(chunk_hash)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chunk_urls_url ON chunk_urls(url)"
+            )
 
             # Content-addressable chunk index for cross-document deduplication.
             # chunk_hash is the BLAKE2b-256 of the raw chunk text. The vector
@@ -1351,6 +1487,12 @@ class VaultManager:
                     ) VALUES (?, ?, ?, ?, ?, ?)
                 """, (c_hash, text, url, header, json.dumps(chunk.metadata), time.time()))
 
+                # Cross-URL occurrence ledger (chrome detection at recall).
+                cursor.execute(
+                    "INSERT OR IGNORE INTO chunk_urls (chunk_hash, url) VALUES (?, ?)",
+                    (c_hash, url),
+                )
+
                 cursor.execute("""
                     INSERT INTO chunks_fts (url, header_path, text, metadata_json)
                     VALUES (?, ?, ?, ?)
@@ -1588,6 +1730,50 @@ class VaultManager:
             logger.info(f"Backfilled {count} chunk embeddings.")
             self._vec_mat_cache.clear()
         return count
+
+    def backfill_chunk_urls(self) -> int:
+        """Populate the cross-URL occurrence ledger for vaults indexed before it
+        existed. Returns the number of (chunk_hash, url) pairs recorded.
+
+        Without this a pre-existing vault silently gets no chrome detection (the
+        table is empty, every count reads 1) and recall quality would appear to
+        regress on upgrade. Runs once: a cheap COUNT comparison short-circuits
+        every later open.
+        """
+        if not self.config.get('indexer.enable_fts', True):
+            return 0
+        with self._db() as (_conn, cursor):
+            cursor.execute("SELECT COUNT(*) FROM chunks_fts")
+            fts_count = cursor.fetchone()[0]
+            if fts_count == 0:
+                return 0
+            cursor.execute("SELECT COUNT(*) FROM chunk_urls")
+            if cursor.fetchone()[0] >= fts_count:
+                return 0  # already populated (or over-counted); nothing to do
+            logger.info(
+                "Backfilling cross-URL chunk ledger for %d chunk(s) (one-off).",
+                fts_count,
+            )
+            inserted = 0
+            cursor.execute("SELECT url, text FROM chunks_fts")
+            while True:
+                rows = cursor.fetchmany(1000)
+                if not rows:
+                    break
+                for url, text in rows:
+                    if not text:
+                        continue
+                    h = hashlib.blake2b(text.encode("utf-8"),
+                                        digest_size=32).hexdigest()
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO chunk_urls (chunk_hash, url) "
+                        "VALUES (?, ?)", (h, url),
+                    )
+                    inserted += cursor.rowcount
+                _conn.commit()
+        if inserted:
+            logger.info("Recorded %d cross-URL chunk occurrence(s).", inserted)
+        return inserted
 
     def verify_vault(self) -> bool:
         """Run a three-phase integrity check over the vault.
@@ -1934,6 +2120,10 @@ class VaultManager:
                     ) VALUES (?, ?, ?, ?, ?, ?)
                 """, (c_hash, text, url, chunk.metadata.get('header_path', 'Root'),
                       json.dumps(chunk.metadata), time.time()))
+                cursor.execute(
+                    "INSERT OR IGNORE INTO chunk_urls (chunk_hash, url) VALUES (?, ?)",
+                    (c_hash, url),
+                )
                 cursor.execute("""
                     INSERT INTO chunks_fts (url, header_path, text, metadata_json)
                     VALUES (?, ?, ?, ?)
@@ -1986,12 +2176,18 @@ class VaultManager:
             "chunks_fts": "SELECT COUNT(*) FROM chunks_fts WHERE url = ?",
             "chunk_vectors": "SELECT COUNT(*) FROM chunk_vectors WHERE url = ?",
             "chunks_simhash": "SELECT COUNT(*) FROM chunks_simhash WHERE url = ?",
+            "chunk_urls": "SELECT COUNT(*) FROM chunk_urls WHERE url = ?",
             "documents": "SELECT COUNT(*) FROM documents WHERE url = ?",
         }
         delete_sql = {
             "chunks_fts": "DELETE FROM chunks_fts WHERE url = ?",
             "chunk_vectors": "DELETE FROM chunk_vectors WHERE url = ?",
             "chunks_simhash": "DELETE FROM chunks_simhash WHERE url = ?",
+            # The cross-URL ledger must follow the chunks it describes: leaving
+            # its rows behind inflates every chrome count for the remaining
+            # pages, so content that is now unique keeps being demoted as if it
+            # were still a site-wide template.
+            "chunk_urls": "DELETE FROM chunk_urls WHERE url = ?",
             "documents": "DELETE FROM documents WHERE url = ?",
         }
         with self._db() as (conn, cursor):
@@ -2104,7 +2300,12 @@ class VaultManager:
                 meta['chunk_id'] = rowid
                 results.append(Chunk(text=text, metadata=meta))
 
-        return results
+            # Same site-chrome demotion as the hybrid path: an FTS-only query
+            # over a template-heavy site returns the nav menu verbatim, and it
+            # must not outrank the page body just because it repeats more often.
+            content, chrome = self._split_chrome(cursor, results, limit)
+
+        return (content + chrome) if content else results
 
     def _vector_scan(self, cursor: sqlite3.Cursor, qvec: bytes,
                      top_k: int, domain: str | None) -> list[tuple[float, int, str]]:
@@ -2242,7 +2443,13 @@ class VaultManager:
         try:
             if self._reranker is None:
                 from fastembed.rerank.cross_encoder import TextCrossEncoder
-                self._reranker = TextCrossEncoder(model_name)
+                # Same persistent cache as the embedding model: without an
+                # explicit cache_dir the reranker weights would also be
+                # re-downloaded from /tmp on every reboot.
+                kwargs: dict[str, Any] = {"cache_dir": self.embeddings.cache_dir}
+                if self.embeddings.offline:
+                    kwargs["local_files_only"] = True
+                self._reranker = TextCrossEncoder(model_name, **kwargs)
             docs = [c.text for c in chunks]
             ranked = list(self._reranker.rerank(query, docs))
             score_by_idx: dict[int, float] = {}
@@ -2289,6 +2496,71 @@ class VaultManager:
             per_src[src] = per_src.get(src, 0) + 1
             selected.append((rid, score))
         return selected
+
+    def _chrome_hashes(self, cursor: sqlite3.Cursor, texts: list[str]) -> dict[str, int]:
+        """Map chunk-hash -> number of DISTINCT urls carrying that exact text.
+
+        The signal is template replication: a navigation menu, accessibility
+        statement or cookie banner is byte-identical across every page of a site,
+        so its chunk hash shows up under many urls. Genuine content rarely
+        repeats verbatim *within one site* — and when it does (a syndicated
+        article), `indexer.near_dedup` remains the operator's tool for collapsing
+        it. Nothing is deleted here: chrome is demoted at RECALL only, so the
+        text stays in the vault and stays verifiable for `[V]`.
+        """
+        hashes = {hashlib.blake2b(t.encode("utf-8"), digest_size=32).hexdigest()
+                  for t in texts if t}
+        if not hashes:
+            return {}
+        out: dict[str, int] = {}
+        try:
+            for i in range(0, len(hashes), 500):
+                batch = list(hashes)[i:i + 500]
+                ph = ",".join("?" * len(batch))
+                cursor.execute(
+                    f"SELECT chunk_hash, COUNT(*) FROM chunk_urls "  # nosec B608
+                    f"WHERE chunk_hash IN ({ph}) GROUP BY chunk_hash",
+                    batch,
+                )
+                out.update(dict(cursor.fetchall()))
+        except sqlite3.OperationalError:
+            return {}
+        return out
+
+    def _split_chrome(self, cursor: sqlite3.Cursor, chunks: list[Chunk],
+                      limit: int) -> tuple[list[Chunk], list[Chunk]]:
+        """Split a recalled set into (content, chrome), preserving order.
+
+        A chunk is chrome when the same text was stored under at least
+        `retrieval.chrome_min_urls` (default 3) distinct urls — the template-
+        replication threshold. Chrome is moved to the tail rather than deleted,
+        so a query whose ONLY matches are chrome still returns something (it is
+        then topped up back into the set by the caller's limit).
+        """
+        if not chunks:
+            return chunks, []
+        min_urls = int(self.config.get('retrieval.chrome_min_urls', 3) or 0)
+        if min_urls <= 0:
+            return chunks, []
+        counts = self._chrome_hashes(cursor, [c.text for c in chunks])
+        if not counts:
+            return chunks, []
+        content: list[Chunk] = []
+        chrome: list[Chunk] = []
+        for c in chunks:
+            h = hashlib.blake2b(c.text.encode("utf-8"), digest_size=32).hexdigest()
+            n_urls = counts.get(h, 1)
+            if n_urls >= min_urls:
+                c.metadata['chrome'] = True
+                c.metadata['chrome_urls'] = n_urls
+                chrome.append(c)
+            else:
+                content.append(c)
+        # Never hand back an all-chrome set: the caller asked for `limit` chunks
+        # and chrome is still better than nothing (e.g. a one-page vault).
+        if not content:
+            return chrome, []
+        return content, chrome
 
     def _search_hybrid(self, query: str, limit: int, domain: str | None,
                        max_per_source: int = 0) -> list[Chunk]:
@@ -2378,7 +2650,10 @@ class VaultManager:
                     # confidence-band derivation below).
                     meta['confidence'] = 'medium'
                     results.append(Chunk(text=text, metadata=meta))
-                return results
+                # Template chrome outranks nothing on merit — demote it before
+                # returning (see _split_chrome).
+                content, chrome = self._split_chrome(cursor, results, limit)
+                return (content + chrome)[:max(limit, 0)] if content else results
 
             # --- OR-fallback for keyword-backed candidates (A-OR) ---
             # A long research question whose strict AND-match is empty (any one
@@ -2546,7 +2821,11 @@ class VaultManager:
             # Optional cross-encoder re-ranking of the final recalled set.
             if results and self.config.get('embeddings.reranker_model', ''):
                 results = self._rerank(query, results)
-            return results
+            # Demote template chrome to the tail (never delete it — it stays
+            # verifiable). Applied AFTER reranking so a cross-encoder cannot
+            # promote a nav menu back above the page's actual content.
+            content, chrome = self._split_chrome(cursor, results, limit)
+            return content + chrome if content else results
 
     def document_exists(self, url: str, ttl_seconds: int) -> bool:
         """Check if a document is in the vault and not expired."""
@@ -2601,6 +2880,20 @@ class NetworkFetcher:
         self._solver_enabled = config.get('solver.enabled', False)
         self._solver_url = config.get('solver.url', 'http://localhost:8191/v1')
         self._solver_timeout = config.get('solver.solver_timeout', 60)
+        # Additional solver endpoints: commands are tried in order, so a second
+        # container doubles throughput on a challenge-protected bulk crawl and a
+        # single dead endpoint degrades instead of failing the fetch. `url` is
+        # ALWAYS the first candidate — `urls` only appends to it, never
+        # replaces it, so an existing single-endpoint config keeps working.
+        extra = str(config.get('solver.urls', '') or '')
+        self._solver_urls: list[str] = [str(self._solver_url)]
+        for extra_url in re.split(r'[,\s]+', extra):
+            candidate = extra_url.strip()
+            if candidate and candidate not in self._solver_urls:
+                self._solver_urls.append(candidate)
+        # Reuse one browser session for the whole run (see _ensure_solver_session).
+        self._solver_reuse = bool(config.get('solver.session_reuse', True))
+        self._solver_session: str | None = None
         self._user_agent = config.get('general.user_agent', 'HoardCore/5.0')
         self._timeout = config.get('general.timeout_seconds', 30)
         self._enable_preflight = config.get('network.enable_preflight', True)
@@ -2817,58 +3110,142 @@ class NetworkFetcher:
             logger.debug(f"curl_cffi failed: {e}")
             return None, None, '', None
 
+    async def _solver_cmd(self, payload: dict[str, Any],
+                          timeout: ClientTimeout) -> dict[str, Any] | None:
+        """POST one command to the solver endpoint; return its JSON body or None.
+
+        Every command is retried once against the *secondary* endpoint when
+        `solver.urls` lists more than one, so a single dead container degrades
+        throughput instead of failing the fetch.
+        """
+        urls = self._solver_urls
+        for url in urls:
+            try:
+                async with aiohttp.ClientSession() as session, session.post(
+                    url, json=payload, timeout=timeout
+                ) as resp:
+                    if resp.status != 200:
+                        logger.warning(
+                            f"FlareSolverr: {url} returned HTTP {resp.status}")
+                        continue
+                    return await resp.json()
+            except Exception as e:
+                detail = str(e) or e.__class__.__name__
+                logger.warning(
+                    f"FlareSolverr: {url} failed ({e.__class__.__name__}): {detail}")
+                continue
+        return None
+
+    async def _ensure_solver_session(self) -> str | None:
+        """Create (once) the browser session reused across a batch of solves.
+
+        A FlareSolverr `request.get` without a session spins up a fresh browser
+        context, so every URL re-pays the Cloudflare challenge from scratch —
+        the ~50 s per-URL cost that made a 500-URL crawl a multi-hour job.
+        Reusing one session keeps the clearance cookie (and the TLS fingerprint
+        that earned it) alive across the batch, so only the first solve is slow.
+
+        Returns the session id, or None when reuse is disabled or unsupported
+        (the caller then solves statelessly, exactly as before).
+        """
+        if not self._solver_reuse:
+            return None
+        if self._solver_session is not None:
+            return self._solver_session or None
+        sid = f"hc{int(time.time())}"
+        timeout = ClientTimeout(total=self._solver_timeout + 10)
+        data = await self._solver_cmd(
+            {"cmd": "sessions.create", "session": sid,
+             "maxTimeout": self._solver_timeout * 1000},
+            timeout,
+        )
+        if data and data.get("status") == "ok":
+            self._solver_session = sid
+            logger.info(f"FlareSolverr: reusing browser session {sid!r} for "
+                        "this run (challenge solved once).")
+        else:
+            # Stateless fallback: every solve pays the full challenge again, but
+            # the fetch still works.
+            self._solver_session = ""
+            logger.info("FlareSolverr: session reuse unavailable; solving "
+                        "statelessly (slower on challenge-protected sites).")
+        return self._solver_session or None
+
+    async def close_solver_session(self) -> None:
+        """Destroy the reused browser session, if one was created."""
+        if not self._solver_session:
+            return
+        sid, self._solver_session = self._solver_session, None
+        try:
+            await self._solver_cmd(
+                {"cmd": "sessions.destroy", "session": sid},
+                ClientTimeout(total=15),
+            )
+        except Exception as e:  # best effort; a leaked session self-expires
+            logger.debug(f"FlareSolverr: session cleanup skipped: {e}")
+
     async def _fetch_flaresolverr(self, url: str) -> tuple[str | None, bytes | None, str, int | None]:
         if not self._solver_enabled:
             return None, None, '', None
 
-        logger.info("FlareSolverr: Solving challenge...")
+        sid = await self._ensure_solver_session()
+        logger.info(f"FlareSolverr: Solving challenge{' (session)' if sid else ''}...")
         payload = {
             "cmd": "request.get",
             "url": url,
             "maxTimeout": self._solver_timeout * 1000,
             "userAgent": self._user_agent,
         }
+        if sid:
+            payload["session"] = sid
         if self._cookie_string:
             payload["cookies"] = self._parse_cookies()
 
         try:
             timeout = ClientTimeout(total=self._solver_timeout + 10)
-            async with aiohttp.ClientSession() as session, session.post(
-                self._solver_url, json=payload, timeout=timeout
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning(
-                        f"FlareSolverr: solver endpoint returned HTTP {resp.status}"
-                    )
-                    return None, None, '', None
-                data = await resp.json()
-                if data.get("status") != "ok":
+            data = await self._solver_cmd(payload, timeout)
+            if data is None:
+                return None, None, '', None
+            if data.get("status") != "ok":
+                message = str(data.get("message") or "")
+                # A stale/expired reused session must not poison the rest of the
+                # batch: drop it and retry this URL statelessly exactly once.
+                if sid and ("session" in message.lower()
+                            or "not found" in message.lower()):
+                    logger.warning("FlareSolverr: session rejected; retrying "
+                                   "statelessly and dropping the session.")
+                    self._solver_session = None
+                    stateless = {k: v for k, v in payload.items() if k != "session"}
+                    data = await self._solver_cmd(stateless, timeout)
+                    if data is None or data.get("status") != "ok":
+                        return None, None, '', None
+                else:
                     logger.warning(
                         "FlareSolverr: solve failed — "
                         f"status={data.get('status')!r} "
                         f"message={data.get('message')!r}"
                     )
                     return None, None, '', None
-                solution = data.get("solution", {})
-                if solution.get("status") == 200:
-                    # FlareSolverr reports the post-redirect final URL; refuse
-                    # a chain that landed on an internal address (C1).
-                    final_url = str(solution.get('url') or url)
-                    if self._ssrf_protected and not self.validate_url_target(final_url):
-                        logger.warning(f"FlareSolverr: SSRF guard refused final URL {final_url}")
-                        return None, None, 'text/html', 403
-                    content_type = solution.get('headers', {}).get('Content-Type', 'text/html').split(';')[0]
-                    response = solution.get('response', '')
-                    if 'text' in content_type:
-                        return response, None, content_type, int(solution.get('status', 200))
-                    else:
-                        # FlareSolverr usually returns binary as b64, but we handle text mostly
-                        return None, response.encode('utf-8'), content_type, int(solution.get('status', 200))
-                logger.warning(
-                    f"FlareSolverr: target site returned "
-                    f"HTTP {solution.get('status')!r} after solve"
-                )
-                return None, None, '', None
+            solution = data.get("solution", {})
+            if solution.get("status") == 200:
+                # FlareSolverr reports the post-redirect final URL; refuse
+                # a chain that landed on an internal address (C1).
+                final_url = str(solution.get('url') or url)
+                if self._ssrf_protected and not self.validate_url_target(final_url):
+                    logger.warning(f"FlareSolverr: SSRF guard refused final URL {final_url}")
+                    return None, None, 'text/html', 403
+                content_type = solution.get('headers', {}).get('Content-Type', 'text/html').split(';')[0]
+                response = solution.get('response', '')
+                if 'text' in content_type:
+                    return response, None, content_type, int(solution.get('status', 200))
+                else:
+                    # FlareSolverr usually returns binary as b64, but we handle text mostly
+                    return None, response.encode('utf-8'), content_type, int(solution.get('status', 200))
+            logger.warning(
+                f"FlareSolverr: target site returned "
+                f"HTTP {solution.get('status')!r} after solve"
+            )
+            return None, None, '', None
         except Exception as e:
             # Some client exceptions stringify empty (bare timeouts); always
             # include the class name so the log is never a blank message.
@@ -3593,23 +3970,181 @@ class CrawlerPlanner:
             ]
         return locs
 
-    async def parse_sitemap(self, sitemap_url: str) -> list[str]:
-        """Parse sitemap XML and extract URLs."""
-        if not NetworkFetcher.validate_url_target(sitemap_url):
-            logger.warning(f"SSRF guard refused crawler target: {sitemap_url}")
-            return []
+    @staticmethod
+    def _is_sitemap_index(xml: str) -> bool:
+        """True when a sitemap payload is an *index* (a list of sitemaps) rather
+        than a URL set.
+
+        WordPress, Yoast and most CMS sitemap plugins emit
+        `<sitemapindex><sitemap><loc>…</loc></sitemap></sitemapindex>` once the
+        site exceeds 50k pages or 50MB — pointing at `post-sitemap.xml`,
+        `page-sitemap.xml`, etc. A non-recursive crawler treats those child
+        sitemaps as *pages*, fetches them, finds they are XML, discards them as
+        junk, and reports a successful crawl that captured nothing. Detection is
+        on the root element name, not on child extensions, so it also works for
+        indexes whose children are extensionless URLs.
+        """
         try:
-            async with aiohttp.ClientSession() as session, session.get(
-                sitemap_url, timeout=ClientTimeout(total=30),
-                headers={"User-Agent": self._user_agent},
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                xml = await resp.text()
-            return list(dict.fromkeys(self._extract_locs(xml)))[:self.sitemap_limit]
-        except Exception as e:
-            logger.warning(f"Failed to parse sitemap {sitemap_url}: {e}")
-            return []
+            import lxml.etree as _etree
+            root = _etree.fromstring(xml.encode("utf-8"))
+            return _etree.QName(root).localname.lower() == "sitemapindex"
+        except Exception:
+            return bool(re.search(r"<sitemapindex[\s>]", xml, re.IGNORECASE))
+
+    async def parse_sitemap(self, sitemap_url: str) -> list[str]:
+        """Parse sitemap XML and extract URLs, recursing into sitemap indexes.
+
+        A `<sitemapindex>` is followed depth-first (bounded by
+        `crawler.sitemap_index_depth`, default 3) and only the *leaf* URL sets
+        are returned; the child sitemap URLs themselves are never handed to the
+        fetcher as pages.
+        """
+        seen: set[str] = set()
+        pages: list[str] = []
+        frontier: list[tuple[str, int]] = [(sitemap_url, 0)]
+        max_depth = int(self.config.get('crawler.sitemap_index_depth', 3) or 0)
+
+        while frontier:
+            current, depth = frontier.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            if not NetworkFetcher.validate_url_target(current):
+                logger.warning(f"SSRF guard refused crawler target: {current}")
+                continue
+            try:
+                async with aiohttp.ClientSession() as session, session.get(
+                    current, timeout=ClientTimeout(total=30),
+                    headers={"User-Agent": self._user_agent},
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    xml = await resp.text()
+            except Exception as e:
+                logger.warning(f"Failed to parse sitemap {current}: {e}")
+                continue
+
+            if self._is_sitemap_index(xml):
+                if depth >= max_depth:
+                    logger.warning(
+                        f"Sitemap index depth limit ({max_depth}) reached at "
+                        f"{current}; its children will not be followed."
+                    )
+                    continue
+                children = list(dict.fromkeys(self._extract_locs(xml)))
+                logger.info(f"{current} is a sitemap index -> {len(children)} "
+                            f"child sitemap(s); recursing (depth {depth + 1}).")
+                frontier.extend((c, depth + 1) for c in children)
+                continue
+
+            pages.extend(self._extract_locs(xml))
+
+        # Canonicalize BEFORE dedupe, so a page listed under a malformed
+        # spelling (`/./projects/ulat/`) collapses onto its real URL
+        # (`/projects/ulat/`) instead of being fetched as a second, bogus
+        # "page" — or missed entirely when only the malformed form is listed.
+        normalized = [self._normalize_url(u) for u in pages]
+        repaired = sum(1 for a, b in zip(pages, normalized, strict=False) if a != b)
+        if repaired:
+            logger.info(
+                "Canonicalized %d malformed sitemap URL(s) (e.g. a literal "
+                "'/./' path segment) before fetching.", repaired,
+            )
+        # Drop URLs that can only ever be non-text, BEFORE they reach the
+        # fetcher. WordPress sitemaps list every attachment (images, PDFs of
+        # scans, fonts); fetching one to discover it is a JPEG wastes a full
+        # round-trip — and against a Cloudflare site that is a serialized
+        # FlareSolverr solve, i.e. ~50 s each. `binary_as_text` is still the
+        # backstop for extensionless or mislabelled binaries.
+        unique = list(dict.fromkeys(normalized))
+        candidates = [u for u in unique if not self._is_binary_url(u)]
+        if len(candidates) != len(unique):
+            logger.info(
+                "Skipped %d non-text sitemap URL(s) by extension before fetching.",
+                len(unique) - len(candidates),
+            )
+        # Cap the page budget AFTER expanding indexes: a large index can fan out
+        # to far more than sitemap_limit, and the limit is a crawl budget.
+        return candidates[:self.sitemap_limit]
+
+    # Extensions a browser fetches but a text vault can never use. Kept to types
+    # that are unambiguously binary; anything ambiguous is left to the parser
+    # and the `binary_as_text` backstop rather than guessed at here.
+    _BINARY_EXTS = frozenset({
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svgz", ".ico",
+        ".tif", ".tiff", ".heic", ".avif", ".psd", ".ai", ".eps",
+        ".mp3", ".mp4", ".avi", ".mov", ".mkv", ".wav", ".webm", ".ogg",
+        ".zip", ".tar", ".gz", ".rar", ".7z", ".dmg", ".iso",
+        ".woff", ".woff2", ".ttf", ".otf", ".eot",
+        ".exe", ".dll", ".so", ".dylib", ".bin", ".class", ".jar", ".apk",
+    })
+
+    @classmethod
+    def _is_binary_url(cls, url: str) -> bool:
+        """True when a URL's path ends in a known binary extension.
+
+        Only the path is inspected (a query string like `?bwg=1` on a .jpg must
+        not disguise it), and the extension is read case-insensitively.
+        """
+        try:
+            path = urlparse(url).path or ""
+        except ValueError:
+            return False
+        dot = path.rfind(".")
+        slash = path.rfind("/")
+        if dot <= slash:      # no extension, or the dot is part of a directory
+            return False
+        return path[dot:].lower() in cls._BINARY_EXTS
+
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        """Canonicalize a discovered URL: strip the fragment, resolve `.`/`..`
+        path segments, collapse duplicate slashes, and drop default ports.
+
+        WordPress emits malformed locs like `https://e.test/./projects/ulat/`
+        — a literal `/./` segment — for entries whose canonical form is
+        `https://e.test/projects/ulat/`. Left alone, the canonical page is never
+        discovered, so a crawl silently misses the real content while storing a
+        URL nothing links to; and the same page listed under both spellings
+        wastes a fetch (and, on a Cloudflare site, a serialized solver
+        round-trip). Normalizing BEFORE dedupe fixes both.
+
+        The query string is preserved byte-for-byte — a dot segment or a slash
+        there may be meaningful. The fragment is dropped: it never reaches the
+        server and would otherwise split one page into several.
+        """
+        if not url:
+            return url
+        url = url.strip()
+        if not url:
+            return url
+        try:
+            parts = urlparse(url)
+        except ValueError:
+            return url
+        if not parts.scheme or not parts.netloc:
+            return url            # not absolute; leave it for the caller
+        segments = [s for s in (parts.path or "").split("/") if s not in ("", ".")]
+        resolved: list[str] = []
+        for seg in segments:
+            if seg == "..":
+                if resolved:
+                    resolved.pop()
+                continue
+            resolved.append(seg)
+        trailing = (parts.path or "").endswith("/")
+        path = "/" + "/".join(resolved)
+        if trailing and resolved and not path.endswith("/"):
+            path += "/"
+        if not resolved:
+            path = "/"
+        netloc = parts.netloc
+        if (parts.scheme == "http" and netloc.endswith(":80")) or (
+                parts.scheme == "https" and netloc.endswith(":443")):
+            netloc = netloc.rsplit(":", 1)[0]
+        return urlunparse(
+            (parts.scheme, netloc, path, parts.params, parts.query, "")
+        )
 
     async def discover_urls(self, url: str) -> list[str]:
         """Discover URLs for a given domain."""
@@ -4374,6 +4909,43 @@ class HoardCore:
                 elif rel <= 0.10 and idx >= n_low:
                     conf = "low"
                 results[key].metadata['confidence'] = conf
+
+        # Site-chrome demotion, resolved per source vault: a replicated nav block
+        # must not outrank content just because the same template is present in
+        # two of the pooled vaults. The ledger lives in each vault, so the counts
+        # are fetched in ONE batched query per vault (not one query per chunk)
+        # and the two groups are re-merged by the score they already carry.
+        min_urls = int(self.config.get('retrieval.chrome_min_urls', 3) or 0)
+        if min_urls > 0 and chunks:
+            by_vault: dict[str, list[Chunk]] = {}
+            for c in chunks:
+                by_vault.setdefault(
+                    c.metadata.get('vault') or '(default)', []).append(c)
+            content: list[Chunk] = []
+            chrome: list[Chunk] = []
+            for vname, group in by_vault.items():
+                target = next(
+                    (v for v in self.vaults
+                     if (v.vault_name or '(default)') == vname), None)
+                counts: dict[str, int] = {}
+                if target is not None:
+                    try:
+                        with target._db() as (_c, cur):
+                            counts = target._chrome_hashes(
+                                cur, [c.text for c in group])
+                    except Exception as e:  # never fail recall over a hint
+                        logger.debug(f"cross-vault chrome check skipped: {e}")
+                        counts = {}
+                for c in group:
+                    h = hashlib.blake2b(c.text.encode("utf-8"),
+                                        digest_size=32).hexdigest()
+                    if counts.get(h, 1) >= min_urls:
+                        c.metadata['chrome'] = True
+                        chrome.append(c)
+                    else:
+                        content.append(c)
+            if content:
+                chunks = content + chrome
         return chunks
 
     async def research(self, question: str, out_path: str | None = None,
@@ -4532,11 +5104,83 @@ class HoardCore:
                 best = "partial"
         return best
 
+    # Characters `normalize_claim` may REWRITE (dash/quote/full-width folding),
+    # plus the ASCII forms those fold INTO. A prefilter run must break at both
+    # ends of a foldable position: the normalized claim carries `"` where the
+    # stored text may still carry `“`, and a run spanning that position can
+    # never match the raw row — a false denial.
+    _FOLDED_CHARS = frozenset(
+        "-'`\"*"
+        "\u2010\u2011\u2012\u2013\u2014\u2015\u2212"
+        "\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u201f"
+    )
+
+    @classmethod
+    def _verdict_prefilter(cls, needle: str, width: int = 28,
+                           minimum: int = 14) -> str:
+        """The longest fold-free ASCII run of *needle*, usable as a sound
+        NECESSARY condition for `needle in normalize_claim(stored_text)`.
+
+        If the claim genuinely occurs in a stored row, its characters survive
+        normalization verbatim and in order. So any contiguous run of the
+        normalized needle that contains **no foldable character** (dash, curly
+        quote, backtick, emphasis marker) must appear verbatim in the normalized
+        row — and therefore, for ASCII runs, in `lower(text)` as SQL sees it.
+        That makes the test sound: it can only discard rows that could not have
+        matched, never a real match.
+
+        Whitespace is KEPT. Both sides are whitespace-collapsed by
+        `normalize_claim`, so a single space in the run matches the stored text
+        directly; squeezing it out (as an earlier draft did) produces a string
+        that can never occur in the raw stored text and silently denies every
+        real match. Runs are cut at foldable characters for the same reason a
+        dash may be stored as a hyphen, an en-dash or a minus.
+
+        ASCII-only is a hard requirement: SQLite's `lower()` is ASCII-only, so a
+        non-ASCII run would miss a row whose stored text has a non-ASCII capital.
+        A missed row is a FALSE DENIAL — the one failure this path must never
+        produce. Non-ASCII claims get no prefilter and are confirmed in Python.
+        Returns "" when no usable run exists (e.g. a claim built entirely from
+        very short words, or a non-Latin script).
+        """
+        best = ""
+        current: list[str] = []
+        for ch in needle:
+            if not ch.isascii() or ch in cls._FOLDED_CHARS:
+                # A foldable, non-ASCII, or whitespace-adjacent fold position
+                # ends the run: the stored text may hold a different character
+                # here (hyphen vs en-dash, straight vs curly quote).
+                if len(current) > len(best):
+                    best = "".join(current)
+                current = []
+                continue
+            current.append(ch)
+            if len(current) > len(best):
+                best = "".join(current)
+        if len(current) > len(best):
+            best = "".join(current)
+        return best[:width] if len(best) >= minimum else ""
+
     def _verify_against_vault(self, vault: VaultManager, claim: str) -> str:
         """Verify a claim against a single VaultManager (the shared per-vault
         logic behind `verify_claim`'s cross-vault fold)."""
         needle = normalize_claim(claim)
         candidates: list[str] = []
+        # Cheap sound prefilter, pushed into SQL (see _verdict_prefilter): the
+        # authoritative `normalize_claim` comparison is unchanged and still
+        # decides every verdict, but rows that cannot possibly contain the claim
+        # are now rejected in C instead of being pulled into Python. Without it,
+        # a claim built from common words produced ~113k candidate rows on a
+        # 20k-chunk vault across the sliding windows, and every one paid for a
+        # whitespace squeeze — 3.6-5.5 s per claim, and `audit` runs this once per
+        # [V#N] tag. A LIMIT is NOT the fix: truncating candidates could deny a
+        # real match, i.e. corrupt the provenance verdict.
+        prefilter = self._verdict_prefilter(needle)
+        prefilter_pat = None
+        if prefilter:
+            pf = (prefilter.replace("\\", "\\\\")
+                  .replace("%", r"\%").replace("_", r"\_"))
+            prefilter_pat = f"%{pf}%"
         with vault._db() as (_conn, cursor):
             # Slide a 60-char window across the needle so a claim whose
             # *distinctive* portion is not its first 60 chars still matches
@@ -4559,11 +5203,29 @@ class HoardCore:
                 # curly quotes where the claim has straight ones, etc. The
                 # Python confirm below is authoritative, so over-widening here
                 # only costs a few extra candidate rows, never a wrong verdict.
-                like_fragment = re.sub(r"[\s\-'`\*\u2010\u2011\u2012\u2013\u2014\u2015\u2212\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u201f]+", "%", like_fragment)
-                cursor.execute(
-                    "SELECT text FROM chunks_fts WHERE lower(text) LIKE ? ESCAPE '\\'",
-                    (f"%{like_fragment}%",)
-                )
+                #
+                # The class must carry the ASCII fold TARGETS (" and '), not just
+                # the Unicode sources: `normalize_claim` has already folded the
+                # needle's curly quotes to straight ones, and this LIKE runs
+                # against the RAW stored text, which still holds the curly form.
+                # Without the ASCII members such a row was never even a
+                # candidate, so quote-folded text could only ever return PARTIAL
+                # despite `verify` being documented as typography-blind.
+                like_fragment = re.sub("[" + re.escape("\u0020\t\n\r\f\v-`'\u0022*"
+                                                     "\u2010\u2011\u2012\u2013\u2014\u2015\u2212"
+                                                     "\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u201f") + "]+", "%", like_fragment)
+                if prefilter_pat:
+                    # AND-ed in the same statement (one table pass, not two).
+                    cursor.execute(
+                        "SELECT text FROM chunks_fts WHERE lower(text) LIKE ? ESCAPE '\\' "
+                        "AND lower(text) LIKE ? ESCAPE '\\'",
+                        (f"%{like_fragment}%", prefilter_pat),
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT text FROM chunks_fts WHERE lower(text) LIKE ? ESCAPE '\\'",
+                        (f"%{like_fragment}%",)
+                    )
                 candidates = [row[0] for row in cursor.fetchall()]
                 for raw in candidates:
                     if needle in normalize_claim(raw):
@@ -5172,6 +5834,22 @@ class HoardCore:
         return chunks, parser_meta
 
     @staticmethod
+    def _binary_ratio(text: str) -> float:
+        """Fraction of *text* that is neither printable nor whitespace.
+
+        Decoded binary (a JPEG's EXIF header, a PNG chunk, a font table) decodes
+        "successfully" with errors='ignore' into a string that is mostly control
+        bytes. Every existing junk heuristic misses it because the quality ratio
+        compares garbage to garbage and lands near 1.0. Character-class
+        composition is the reliable signal: real prose — Latin or CJK — is
+        almost entirely printable, while binary is not.
+        """
+        if not text:
+            return 0.0
+        bad = sum(1 for ch in text if not (ch.isprintable() or ch.isspace()))
+        return bad / len(text)
+
+    @staticmethod
     def _detect_junk(markdown: str, raw_text: str | None, parser_meta: dict[str, Any], quality_score: float) -> str | None:
         """Return a reason string if extraction is boilerplate/empty, else None."""
         stripped = markdown.strip()
@@ -5179,6 +5857,14 @@ class HoardCore:
         # Explicit empty-marker produced by the parser pipeline.
         if not stripped or "[No extractable content found]" in stripped:
             return "empty_extraction"
+
+        # Decoded binary, not text. Checked on a bounded sample for speed, and
+        # on the whole body when it is small. A 10% control-char share is far
+        # above any real document (prose and code sit well under 1%) and far
+        # below any binary payload (typically 50%+).
+        probe = stripped[:4000]
+        if HoardCore._binary_ratio(probe) > 0.10:
+            return "binary_as_text"
 
         # Generic block/redirect/captcha/consent pages masquerade as real content.
         boilerplate = [
@@ -5259,30 +5945,68 @@ class HoardCore:
         # Use semaphore to limit parallel workers
         max_workers = max(1, self.config.get('crawler.parallel_workers', 5))
         semaphore = asyncio.Semaphore(max_workers)
+        crawl_ledger: dict[str, str] = {}
 
         async def _crawl_one(single_url: str) -> list[Chunk]:
             async with semaphore:
                 if not self.crawler.allowed(single_url):
                     logger.warning(f"crawl: robots.txt disallows {single_url}; skipping.")
+                    crawl_ledger[single_url] = "robots_disallowed"
                     return []
                 try:
                     chunks, meta = await self._process_document(single_url, strategy, force_refresh)
                     if meta.get('cached'):
                         # Cache hit: the pipeline fetched nothing, so serve the
-                        # vaulted chunks back (mirrors _scrape_single) instead
-                        # of silently reporting zero content for the URL.
+                        # vaulted chunks back to the caller instead of
+                        # silently reporting zero content for the URL.
                         cached = self.vault.get_chunks_for_url(single_url)
                         all_chunks.extend(cached)
+                        crawl_ledger[single_url] = "cached"
                         return cached
+                    if meta.get('junk'):
+                        # A URL that resolved but yielded no content. Tracked so
+                        # a crawl that "succeeded" while capturing nothing is
+                        # reported as such instead of exiting 0 (the sitemap
+                        # -index trap: child sitemaps fetched as pages, rejected
+                        # as junk, crawl reported green).
+                        crawl_ledger[single_url] = str(
+                            meta.get('junk_reason') or 'junk')
+                        return []
                     if chunks and not chunks[0].metadata.get('error'):
                         all_chunks.extend(chunks)
+                        crawl_ledger[single_url] = "ok"
+                        return chunks
+                    crawl_ledger[single_url] = "empty"
                     return chunks
                 except Exception as e:
                     logger.error(f"Failed to crawl {single_url}: {e}")
+                    crawl_ledger[single_url] = f"error:{e}"
                     return []
 
         tasks = [_crawl_one(u) for u in discovered_urls]
         await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Zero-content crawl is a FAILURE, not a quiet success. A crawl that
+        # fetched N URLs and kept none of them almost always means the URL
+        # discovery layer went wrong (sitemap index not recursed, all pages
+        # junk, robots disallowing everything) — never report that as a pass.
+        if discovered_urls and not all_chunks:
+            reasons: dict[str, int] = {}
+            for state in crawl_ledger.values():
+                reasons[state] = reasons.get(state, 0) + 1
+            logger.error(
+                "Crawl produced NO content: %d URL(s) discovered, 0 indexed. "
+                "Outcomes: %s. If every URL is a .xml or a sub-sitemap, the "
+                "site serves a sitemap INDEX — check the crawl log for "
+                "'is a sitemap index' lines.",
+                len(discovered_urls), reasons or "(none recorded)",
+            )
+        else:
+            logger.info(
+                "Crawl complete: %d/%d URL(s) contributed content.",
+                sum(1 for s in crawl_ledger.values() if s == "ok"),
+                len(discovered_urls),
+            )
 
         return all_chunks
 
@@ -5377,11 +6101,31 @@ class HoardCore:
             return [c.to_dict() for c in chunks]
 
     async def _ingest_many(self, urls: list[str], strategy: str, force_refresh: bool) -> list[dict[str, Any]]:
-        """Process an explicit list of URLs with a bounded-worker pool."""
+        """Process an explicit list of URLs with a bounded-worker pool.
+
+        Progress is streamed to stderr as each URL finishes. A Cloudflare-protected
+        batch is slow by nature (every URL costs a serialized solver round-trip),
+        so a silent run is indistinguishable from a hang — the caller must be able
+        to see it working, and the ETA lets a supervisor decide when to intervene.
+        """
         max_workers = max(1, self.config.get('crawler.parallel_workers', 5))
         semaphore = asyncio.Semaphore(max_workers)
         results: list[dict[str, Any]] = []
         ledger: dict[str, dict[str, Any]] = {}
+        total = len(urls)
+        started = time.time()
+        done = 0
+
+        def _progress(state: str, target: str, n_chunks: int | None = None) -> None:
+            nonlocal done
+            done += 1
+            elapsed = max(1e-6, time.time() - started)
+            rate = done / elapsed
+            remaining = max(0, total - done)
+            eta = int(remaining / rate) if rate > 0 else 0
+            extra = f" ({n_chunks} chunks)" if n_chunks else ""
+            print(f"[ingest {done}/{total}] {state}: {target}{extra} "
+                  f"— elapsed {int(elapsed)}s, ~{eta}s left", file=sys.stderr, flush=True)
 
         async def _ingest_one(target: str) -> None:
             async with semaphore:
@@ -5389,29 +6133,32 @@ class HoardCore:
                     chunks, meta = await self._process_document(target, strategy, force_refresh)
                     if meta.get('cached'):
                         # Cache hit: the pipeline fetched nothing, so serve the
-                        # vaulted chunks back (mirrors _scrape_single) instead
-                        # of silently reporting zero content for the URL.
+                        # vaulted chunks back to the caller instead of
+                        # silently reporting zero content for the URL.
                         ledger[target] = {"status": "cached",
                                           "chunks": len(chunks) or None}
                         results.extend(
                             c.to_dict() for c in self.vault.get_chunks_for_url(target)
                         )
+                        _progress("cached", target)
                         return
                     if meta.get('error'):
-                        ledger[target] = {
-                            "status": "failed",
-                            "reason": str(meta.get('junk_reason')
-                                          or meta.get('error') or 'fetch_error')}
+                        reason = str(meta.get('junk_reason') or meta.get('error')
+                                     or 'fetch_error')
+                        ledger[target] = {"status": "failed", "reason": reason}
                         if chunks:
                             results.append(chunks[-1].to_dict())
+                        _progress("FAILED", target)
                         return
                     if meta.get('junk'):
                         ledger[target] = {
                             "status": "skipped_junk",
                             "reason": str(meta.get('junk_reason') or 'junk')}
+                        _progress("junk", target)
                         return
                     ledger[target] = {"status": "ingested", "chunks": len(chunks)}
                     results.extend(c.to_dict() for c in chunks)
+                    _progress("ok", target, len(chunks))
                 except Exception as e:
                     logger.error(f"Failed to ingest {target}: {e}")
                     ledger[target] = {"status": "failed", "reason": str(e)}
@@ -5419,6 +6166,8 @@ class HoardCore:
                         "text": f"Error ingesting {target}: {e}",
                         "metadata": {"source": target, "error": True}
                     })
+                    _progress("FAILED", target)
+
 
         await asyncio.gather(*[_ingest_one(u) for u in urls], return_exceptions=True)
 
@@ -5740,11 +6489,26 @@ async def _main_impl(argv: list[str] | None = None) -> None:
         if not query:
             print("  ⚠️  --query required for --action research", file=sys.stderr)
             sys.exit(2)
-        written = await scraper.research(query, out_path=out_path,
-                                         discover=discover if discover is not None else 5, recall=recall,
-                                         strategy=strategy,
-                                         answer_first=not args.no_answer_first,
-                                         keep_low=args.keep_low)
+        try:
+            written = await scraper.research(query, out_path=out_path,
+                                             discover=discover if discover is not None else 5, recall=recall,
+                                             strategy=strategy,
+                                             answer_first=not args.no_answer_first,
+                                             keep_low=args.keep_low)
+        finally:
+            fetcher = getattr(scraper, "fetcher", None)
+            if fetcher is not None:
+                await fetcher.close_solver_session()
+        # A path outside the artifacts dir is honoured as asked, but say so: it
+        # is NOT day-foldered, and a later run's organize_artifacts_by_day will
+        # re-home it, silently invalidating the path the caller is holding.
+        if written and not os.path.abspath(written).startswith(
+                os.path.abspath(scraper.artifacts_dir) + os.sep):
+            print(f"  ⚠️  Artifact written OUTSIDE {scraper.artifacts_dir}/: "
+                  f"{os.path.abspath(written)}", file=sys.stderr)
+            print("     It is not day-foldered, and a later run may move it into "
+                  "a day folder. Use a path inside the artifacts dir to keep it "
+                  "stable.", file=sys.stderr)
         sys.exit(0 if written else 1)
 
     if action == "verify":
@@ -5939,12 +6703,21 @@ async def _main_impl(argv: list[str] | None = None) -> None:
         sys.exit(0)
 
     try:
-        result = await scraper.fetch(
-            url, action=action, strategy=strategy,
-            query=query, force_refresh=force_refresh,
-            urls=urls,
-            max_results=max_results, mode=mode
-        )
+        try:
+            result = await scraper.fetch(
+                url, action=action, strategy=strategy,
+                query=query, force_refresh=force_refresh,
+                urls=urls,
+                max_results=max_results, mode=mode
+            )
+        finally:
+            # Release the reused FlareSolverr browser session (see
+            # _ensure_solver_session) so a long run does not leave a browser
+            # context holding memory on the solver host. Guarded because a
+            # caller (or test double) may supply a scraper without a fetcher.
+            fetcher = getattr(scraper, "fetcher", None)
+            if fetcher is not None:
+                await fetcher.close_solver_session()
     except RuntimeError as e:
         marker = str(e)
         if marker == "SSRF_BLOCKED":
