@@ -11,7 +11,7 @@ You are an expert user of HoardCore (single-file Python module + SQLite vault + 
 
 Check these before "fixing" a surprising result:
 
-1. **`PARTIAL`/`UNVERIFIED` ≠ false** — a denial means the vault lacks that wording *verbatim*, not that the claim is untrue. Reword to the source's exact stored words and re-run; never force `[V]`, never bypass with manual SQL. Lenient (never flips): dashes, smart quotes, apostrophes, full-width, whitespace, markdown markers. Strict (denies): word identity/order/presence; `%`≠"percent".
+1. **`PARTIAL`/`UNVERIFIED` ≠ false** — a denial means the vault lacks that wording *verbatim*, not that the claim is untrue. Reword to the source's exact stored words and re-run; never force `[V]`, never bypass with manual SQL. Lenient (never flips): dashes, smart quotes, apostrophes, full-width, whitespace, markdown markers. Strict (denies): word identity/order/presence; `%`≠"percent". **Hard-wrapped sources (PDF/DOCX):** whitespace is folded, but a word a hyphenator split across a line stays split in storage (`percent-\nage` ≠ `percentage`) — so a PDF-sourced claim quoting the *unwrapped* word is denied, correctly, and you must quote the hyphenated stored form or reword around it. Do not "fix" this by editing the vault.
 2. **Currency `$`/`₱`/`PHP`/`USD`** — bash eats `$13`; escape `\$13` or use `--claim-file`. FTS tokenizes `$13` as `13`; verbatim `[V]` still confirms literal `$13`.
 3. **Confidence is set-relative** — `high/medium/low` rank within a recall set; `low` is rare at small `--recall N`. Absence of `low` is normal.
 4. **`filter_low`** keeps one `low` chunk per distinct source at EMIT (all-low → keep all). Grounding may show < `--recall N` chunks — that's the filter, not under-fill. Side effect: a thin authoritative source can band `low` and be thinned to one chunk — use `--keep-low`, larger `--recall`, or domain-pin with `search`.
@@ -82,7 +82,9 @@ Scrape (one URL: HTML/PDF/DOCX/EPUB) · Crawl (whole site via sitemap) · Search
 ## Artifacts
 - **Where:** `artifacts/` (`storage.artifacts_dir`), day-sorted `artifacts/YYYY-MM-DD/`. Research EMITs its grounding context into the day folder's `grounding/` subdir (`storage.grounding_subdir`) — a working instrument, not a deliverable.
 - **Provenance:** every quantitative claim `[V]`/`[E]`/`[H]`; never claim a number the vault can't support.
-- **Citations:** verbatim claims carry `[V#N]`; `[E]`/`[H]` claims carry none; close with a Source Links / Citations block via `hoardcore.citation_list(urls)` or by hand.
+- **Citations:** verbatim claims carry `[V#N]`; `[E]`/`[H]` claims carry none; close with a Source Links / Citations block via `hoardcore.citation_list(urls)` or by hand. Keep that block **last** and title it distinctly (see the `audit` section on the links-heading rule).
+- **Pass `--out` a path inside `artifacts/`, or omit it.** A path elsewhere is written exactly as asked but is *not* day-foldered, and a later run's `organize_artifacts_by_day` re-homes it into a day folder — silently invalidating the path you were just handed. The CLI warns when this happens; treat the warning as a path mistake. Omitting `--out` writes the grounding context to `artifacts/YYYY-MM-DD/grounding/` automatically.
+- **PDFs and DOCX work through `--action local` too** — drop them in `local_inputs/` and cite the synthetic `local://local/<relpath>` URL, not the filesystem path. Re-running skips unchanged files by content hash; `--force` re-indexes.
 - **Helpers:** `hoardcore.write_artifact(name, content)`, `hoardcore.organize_artifacts_by_day()`, `hoardcore.citation_list(urls)`.
 
 ## When to Use
@@ -110,7 +112,8 @@ Read/summarize/analyze a site, PDF, or doc · build a local knowledge base from 
 
 ### verify — programmatic audit
 - **Cross-vault fold** (`--vault a,b,c`): VERIFIED if ANY named vault holds it verbatim; PARTIAL if any vault is partial; else UNVERIFIED. `--hint` shows the nearest phrase from the best-matching vault (OR-relaxed candidate rescue since v0.16.2; opt-in `verify.hint_vector` adds semantic assist).
-- **Exact phrasing, typography-blind** — folds en/em dashes, smart quotes, NBSP, full-width; enforces token identity, word order, `%`≠"percent". `PARTIAL`/`UNVERIFIED` = reword to source words; `--hint` prints the nearest phrase.
+- **Exact phrasing, typography-blind** — folds en/em dashes, smart quotes **in both directions**, apostrophes, NBSP, full-width, markdown markers; enforces token identity, word order, `%`≠"percent". `PARTIAL`/`UNVERIFIED` = reword to source words; `--hint` prints the nearest phrase. A `PARTIAL` on a PDF/DOCX quote is often only a line-wrap or hyphenation artifact — check the stored form rather than assuming the claim is unsupported.
+- **Latency:** a claim naming something specific verifies in well under a second. A claim built *entirely* of common words ("the project research data system…") against a large vault has to normalize every matching row and can take ~10 s — expected, not a hang. No candidate narrowing is applied, deliberately: a filter fast enough to matter was measured and rejected as unsound (it denied verbatim claims in hard-wrapped text).
 - **Exit codes (CI-wireable):** `0` VERIFIED (verbatim, sliding 60-char window) · `1` PARTIAL (top all-term FTS5 hit beats the corpus-scaled coincidence floor, no verbatim) · `2` UNVERIFIED. Refuse `[V]` unless `0`. **Never pipe through `tail`/`head`.**
 - Escape `\$` in shells or use `--claim-file` for currency.
 - **Batch audit** `--claim-list FILE` (one claim/line, `#`/blank skipped): bulk-verifies and reports citation-accuracy % (VERIFIED÷total); exit = worst verdict (any UNVERIFIED → 2) — a CI citation-accuracy gate. Mutually exclusive with `--claim`/`--claim-file`.
@@ -123,6 +126,10 @@ venv/bin/python hoardcore.py _ --action verify --claim-list artifacts/2026-08-18
 
 ### audit — execution-provenance gate
 `--action audit --artifact PATH` checks every `[V#N]`: **(1) VERBATIM** — verify vs the vault (`verify` semantics; a bare `[V]` is verified but not mapping-checked); **(2) MAPPED** — `N` appears in the Source Links block as `[#N] <url>`; **(3) INGESTED** — the URL has chunks in **any** named vault (with `--vault a,b,c` a companion still passes). Strictness: only the longest inline double-quoted passage (≥24 normalized chars) passes as a claim; paraphrase is `UNVERIFIED`. Repeated same claim+source tag counts once. Exit mirrors `verify` (`0`/`1`/`2`), plus `2` on any unmapped/not-ingested link. **Never pipe through `tail`/`head`.** Failing claims print the nearest vault phrase for rewording. Authoring rules: see the Provenance Mandate tag grammar above.
+
+**Claim scanning stops at the Source Links heading**, and that heading must *be* the block — exactly `Source Links`, `Citations`, `Sources`, or the pair joined by a slash (any `#` level). A mid-document section titled e.g. "Citations and grounding" is fine and is still audited; a section titled exactly "Citations" is read as the block, so every tag after it goes unchecked **while the audit still reports its accuracy over the tags it did check**. Keep the links block last and give it a distinct title.
+
+**`[V#N]` is not a cross-reference.** Every tag is audited as a verbatim claim, wherever it appears. A summary that cites evidence as `[V#1][V#10]` rather than naming a section (`(§1)`, `see §6`) is audited as an unquoted claim and comes back `UNVERIFIED`.
 
 ### research — full loop
 `--discover 0` = recall-only (never touches the web; does NOT fall back to config). `--no-answer-first` forces fresh DISCOVER. `filter_low` (default true) drops duplicate `low` hits at EMIT but keeps one per distinct source; `--keep-low` retains all. `max_per_source` (default 2) caps chunks per source URL for source-diverse recall (0 = unlimited, single-source depth). Cross-vault recall reads *all* named vaults; DISCOVER/ingest writes only the primary. **Distinct-URL ≠ independent source:** syndicated reprints inflate source counts — check for verbatim-duplicate chunks before counting independence (a reprint still grounds `[V]`, just not twice).
