@@ -3,7 +3,23 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## HoardCore v0.16.6
+## HoardCore v0.16.7
+
+### Fixed
+- **`skill.md` no longer documents behaviour that v0.16.5/0.16.6 invalidated.**
+  The agent operating manual still told an agent to treat a `PARTIAL` on a
+  PDF-sourced quote as ordinary reword material, to expect typography folding in
+  one direction only, and to treat an all-common-words `verify` as fast. It also
+  omitted two authoring rules that silently weaken the provenance gate: claim
+  scanning stops at a heading that *is* the Source Links block (a mid-document
+  section titled exactly "Citations" ends auditing while accuracy is still
+  reported over the tags checked), and `[V#N]` is audited as a verbatim claim
+  wherever it appears, so it cannot be used as a cross-reference in a summary.
+  Adds the hard-wrap rule for extracted documents, the `--out` path caveat, and
+  PDF/DOCX support through `--action local`. Every claim added was re-verified
+  against the current build.
+
+## HoardCore v0.16.7
 
 ### Fixed
 - **`verify` denied claims that were present verbatim (regression from v0.16.5).**
