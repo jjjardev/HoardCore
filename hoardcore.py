@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.17.0"
+__version__ = "0.17.1"
 
 import argparse
 import asyncio
@@ -3239,11 +3239,19 @@ class NetworkFetcher:
         _LIVE_FETCHERS.add(self)
 
     async def aclose(self) -> None:
-        """Close the shared aiohttp session (idempotent, best-effort).
+        """Release every network resource this fetcher holds (idempotent).
 
-        The CLI calls this before exit; library users driving many fetches
-        should await it when done with the fetcher so the session never leaks
-        an 'Unclosed client session' warning at interpreter shutdown."""
+        Order matters: the reused FlareSolverr browser session is destroyed
+        FIRST — it holds a headless Chromium context on the solver host
+        (hundreds of MB of RSS) and lives SERVER-SIDE, so it outlives this
+        process indefinitely unless explicitly destroyed via
+        `sessions.destroy`. The shared aiohttp session is closed second. The
+        CLI's main() runs every live fetcher through this in a finally block,
+        so no exit path (normal, error, Ctrl-C) can leave a solver session
+        hanging and bloating the container; library callers await this when
+        done with the fetcher."""
+        with suppress(Exception):
+            await self.close_solver_session()
         session = self._aio_session
         self._aio_session = None
         self._aio_session_loop = None
@@ -7392,6 +7400,18 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+async def _close_live_fetchers() -> None:
+    """Release every live fetcher's network resources.
+
+    Runs once per CLI exit (main()'s finally): destroys any reused
+    FlareSolverr browser session (server-side headless Chromium that would
+    otherwise bloat the container after the run) and closes shared aiohttp
+    sessions. Idempotent; safe on empty registries and dead fetchers."""
+    for fetcher in list(_LIVE_FETCHERS):
+        with suppress(Exception):
+            await fetcher.aclose()
+
+
 async def main(argv: list[str] | None = None) -> None:
     """CLI entry point.
 
@@ -7413,12 +7433,10 @@ async def main(argv: list[str] | None = None) -> None:
               "hoardcore_data/*/vault.db for details)", file=sys.stderr)
         sys.exit(2)
     finally:
-        # The fetcher's shared session outlives single fetches by design;
-        # close whatever is still open so a run never ends with an
-        # "Unclosed client session" warning (SystemExit passes through).
-        for fetcher in list(_LIVE_FETCHERS):
-            with suppress(Exception):
-                await fetcher.aclose()
+        # Guaranteed release on EVERY exit path: destroy reused FlareSolverr
+        # browser sessions (server-side, they outlive this process) and close
+        # shared aiohttp sessions (SystemExit passes through).
+        await _close_live_fetchers()
 
 
 async def _main_impl(argv: list[str] | None = None) -> None:

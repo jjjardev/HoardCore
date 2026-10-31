@@ -3,6 +3,27 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.17.1
+
+### Fixed
+- **FlareSolverr browser sessions are now released on EVERY exit path — the
+  container can no longer accumulate memory after a run.** A reused solver
+  session holds a headless Chromium context on the solver host and lives
+  server-side: it outlives the CLI process indefinitely unless explicitly
+  destroyed. `NetworkFetcher.aclose()` is now the single release point — it
+  destroys the solver session FIRST (the memory hog), then closes the shared
+  aiohttp session — and the CLI's `main()` runs every live fetcher through it
+  in a `finally` block, covering normal exits, hard errors, and Ctrl-C alike
+  (the per-action cleanups remain as early-release best efforts). Library
+  callers get the same guarantee by awaiting `fetcher.aclose()`.
+
+### Added
+- `tests/test_solver_lifecycle.py` pins the release contract: destroy-on-aclose
+  (and its ordering — solver teardown happens while the HTTP session is still
+  open), idempotence, one `sessions.create` per run reused across solves with
+  the destroy only at release, the central sweep reaching every registered
+  fetcher, and sweep tolerance for dead fetchers / unreachable solvers.
+
 ## HoardCore v0.17.0
 
 ### Added
