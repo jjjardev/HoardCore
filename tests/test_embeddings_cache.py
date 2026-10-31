@@ -29,10 +29,17 @@ class _StubConfig:
 
 
 def _engine(**embeddings):
-    """Build an EmbeddingsEngine in sparse mode (no fastembed/model needed)."""
+    """Build an EmbeddingsEngine (sparse by default: no fastembed/model needed).
+
+    Dense engines load eagerly via `_ensure_dense()` so these tests can assert
+    on the load itself (kwargs, offline raise, probe dim) — production keeps
+    the lazy first-use load since v0.16.9."""
     base = {"mode": "sparse", "dim": 32}
     base.update(embeddings)
-    return hc.EmbeddingsEngine(_StubConfig(**base))
+    eng = hc.EmbeddingsEngine(_StubConfig(**base))
+    if eng.mode == "dense":
+        eng._ensure_dense()
+    return eng
 
 
 def test_cache_dir_defaults_to_persistent_user_cache(tmp_path, monkeypatch):

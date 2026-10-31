@@ -3,6 +3,115 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.16.9
+
+Second audit line, rebased: a four-auditor fix round (correctness ×2,
+performance, holistic) plus a live four-topic field test, merged onto the
+v0.16.5–v0.16.8 hardening line. Fixes that line already shipped (candidate-scan
+soundness, two-direction quote folding, solver session reuse, sitemap
+canonicalization, chrome demotion) are not repeated. Regression tests live in
+`tests/test_regression_0169.py`.
+
+### Fixed
+- **`verify` never folded NON-ASCII case: a verbatim claim containing "Red
+  Eléctrica" (or Cyrillic/Greek text) was denied.** The v0.16.7 candidate scan
+  runs SQL `lower()/LIKE`, which fold ASCII only, so a stored row differing
+  from the claim by non-ASCII case was never a candidate. Candidate selection
+  is now the widened-LIKE scan UNION an indexed FTS OR-probe — the unicode61
+  tokenizer folds case in every script, and a row containing a fragment
+  verbatim always carries its tokens, so the probe is a candidate SUPERSET:
+  no narrowing, no `LIMIT`, the v0.16.7 soundness stance intact. The Python
+  `normalize_claim` comparison remains the single authority for every verdict.
+  Proven live against Spanish grid-operator sources (4/4 VERIFIED).
+- **`verify` normalized the same candidate rows once per sliding window**;
+  each candidate is now normalized exactly once and tested against the full
+  needle (subsuming the windowing for the authoritative check), and the
+  duplicated per-fragment scan in v0.16.7 is gone.
+- **`max_per_source` was silently ignored on the default retrieval paths.**
+  The fts_fast fast path sliced `[:limit]` and the plain-FTS path never
+  applied the cap; the cap now walks every path, and plain-FTS hits tag
+  `keyword_hit`/`retrieval='fts'` (multi-vault fast-mode confidence can reach
+  `high` again).
+- **Discovery challenge escalation was dead code.** `SEARCH_BLOCKED` was
+  swallowed by the generic retry handler and re-sent against the blocked
+  provider with backoff; it escalates immediately now.
+- **FlareSolverr cookies were sent as a dict**; the API wants a list of
+  `{name, value}` objects — cookie-authenticated solves failed at the solver.
+- **fts_fast recency reordering discarded relevance** — the key was
+  `(decay, rowid)` with bm25 rank carrying zero weight; rank is the
+  tie-breaker now.
+- **OR-fallback topicality guard counted occurrences, not distinct tokens** —
+  `"zzz marketplace marketplace marketplace"` could fake a keyword-backed
+  false-high on one coincidental word.
+- **Parallel ingest bypassed the content-addressed vector cache** — duplicate
+  text was re-embedded and `chunk_vectors_ca` never populated; the threaded
+  pipeline reads and writes the cache (parity with the sequential path) and
+  emits `chunk.embedded` now.
+- **Ghost simhash rows could permanently block re-ingest** — the near-dedup
+  filter committed simhash rows in its own transaction before the writer;
+  they now persist only inside the writer's transaction.
+- **Local-ingest sandbox is symlink-tight** (`realpath`, not `abspath`), so a
+  symlink inside `local_inputs/` pointing outside it is refused instead of
+  read through.
+- **Junk detector no longer refuses short-but-real pages** on a single
+  boilerplate substring (two markers, or a <200-char shell, required).
+- **`application/xhtml+xml` routes through the HTML cleaner** instead of
+  being indexed as raw markup via `binary_as_text`.
+- **Retry sweep reports one error entry per URL** (an `error_chunk` is
+  materialized after retries settle — a twice-failing URL no longer yields
+  duplicate error chunks, and a retry that succeeds leaves no stale error).
+- **Whitespace-only documents no longer index an empty chunk.**
+- **`normalize_claim` keeps in-word markers as content** (`2*3` stays `2*3`);
+  boundary-adjacent emphasis markers still strip.
+- **`NetworkFetcher`'s literal `ssrf_protection` default matches
+  DEFAULT_CONFIG** (`true`) — a directly-constructed fetcher used to silently
+  disable the guard.
+- **Field-test finds:** every run ended with an "Unclosed client session"
+  warning (the shared aiohttp session now closes via `aclose()` plus a
+  `main()` `finally` sweep), and DuckDuckGo was searched for a query starting
+  with a literal `q=` (the provider URL double-prefixed the parameter).
+- Dead code removed (`_embed_chunk`); `_search_hybrid` parses hit metadata
+  once instead of twice; `verify_vault` streams its scan phases instead of
+  `fetchall()`.
+
+### Performance
+- **The dense ONNX model loads lazily** — the model-load tax is gone from
+  every CLI action that never embeds (`check`, `stats`, `verify`,
+  `search --mode fast`); known models get their dimension from a static table
+  so fingerprints stay stable without loading, exotic models keep the eager
+  probe, and `embeddings.offline` failure semantics are preserved (the raise
+  moves to first use). One engine is shared across companion vaults.
+  Measured: `--action check` ~5–6 s → ~1.7 s.
+- **aiohttp sessions are shared across fetches** (one per event loop,
+  keep-alive + DNS cache) instead of a new `TCPConnector(force_close=True)`
+  per URL — a 500-URL crawl no longer pays 500 TLS handshakes. robots.txt is
+  fetched once per origin (it used to be downloaded twice per crawl).
+- **`backfill_vectors` is keyset-paginated** and no longer INSERTs into
+  `chunk_vectors` while a cursor over a JOIN on it is open (undefined scan
+  behavior could skip/double rows on long model-migration rebuilds); vector
+  writes use `executemany`; the CA lookup slices to SQLite's bound-variable
+  limit instead of silently degrading on huge documents.
+- **numpy int8 quantization** on the ingest path (~100× vs the pure-Python
+  loop, bit-identical output).
+- The vector-scan matrix cache key includes `MAX(chunk_rowid)`, closing a
+  stale-matrix hole for 1:1 same-size vector replacement.
+
+### Added
+- **`--json`** for `search`/`stats`/`verify`/`audit` — machine-readable
+  output for the tool's actual audience (agents); the JSON is the only stdout
+  content, exit codes unchanged.
+- **`--action export`** — stream every chunk of the selected vault(s) as JSONL
+  (`--out PATH` or stdout) for diffable backups and portable handoffs.
+- **Structured exit codes for `scrape`/`crawl`/`ingest`/`discover`:** `0` when
+  at least one source was ingested or served from cache, `1` when everything
+  failed or nothing was retrievable (discover: no results), `2` on hard
+  errors. Documented in README under "Exit codes (CI-wireable)".
+- **`corroborated` metadata on search hits** — how many distinct source URLs
+  hold the exact same chunk text, so an agent can read corroboration before
+  citing (distinct-URL ≠ independence; syndication caveat applies).
+- Dead `tomli` dependency removed from `pyproject.toml` and the Makefile
+  (requires-python ≥ 3.11 uses stdlib `tomllib`).
+
 ## HoardCore v0.16.8
 
 ### Added

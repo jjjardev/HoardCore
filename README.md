@@ -4,7 +4,7 @@ Research toolkit for AI agents — give your agent a memory it can prove.
 
 Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
 
-![Version](https://img.shields.io/badge/version-0.16.8-blue)
+![Version](https://img.shields.io/badge/version-0.16.9-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -496,6 +496,8 @@ Any plugin that fails to load, throws, or returns bad output is skipped with a w
 
 Empty and whitespace-only queries return `[]` instead of raising. A punctuation-only query (no FTS tokens) still runs the vector scan in hybrid mode — the embedding model can match semantic content even when keywords are absent — while the FTS-only (`fast`) path returns `[]`.
 
+**Corroboration.** Every search hit carries a `corroborated` count: how many distinct source URLs in the vault hold the exact same chunk text (`1` = uncorroborated). It is the cheapest honesty signal an agent can read before citing — but distinct-URL ≠ independence (syndicated reprints inflate it), so treat it as a lead, not proof.
+
 The dense vector scan is a single numpy matrix–vector product over the whole vector table (`argpartition` for top-k, cached when the table is unchanged) instead of a per-row Python loop. Optionally, `embeddings.reranker_model` runs a cross-encoder over the final recalled set, loaded lazily and degrading to input order on any failure.
 
 Queries are sanitized: operator characters (`" ( ) * ^ : -`) are stripped and tokens quoted, so free-text input cannot alter query semantics or raise FTS syntax errors.
@@ -633,9 +635,10 @@ hoardcore [URL] [options]
 | `prune` | Detect & retro-purge transport-error ghost sources (429/timeout stubs that were indexed before the junk gate). Dry-run by default; `--apply` deletes. `--urls a,b` targets specific URLs instead of scanning. |
 | `check` | Run a three-phase vault integrity check (content hashes, counts, vector dims). |
 | `stats` | Vault summary in one command: sources, chunks, vectors, embedding dim/mode, schema version, DB size, plus a sampled confidence-band distribution (`high`/`medium`/`low`) to spot retrieval flatness. With `--vault a,b,c` prints a block per named vault. |
+| `export` | Stream every chunk of the selected vault(s) as JSONL (`{"text", "metadata"}`) to `--out PATH` or stdout — vault portability, diffable backups, and a machine-readable handoff to other tooling. |
 | `local` | Index local files from `storage.local_dir` (default `local_inputs/`, git-ignored) — no network. Supported: `.pdf .docx .epub .html .htm .txt .md`, walked recursively. `--path` scopes to a file/folder inside it, `--list` is a read-only scan. Freshness is content-based (unchanged extracted content is skipped unless `--force`). |
 
-Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `audit`, `lint`, `check`, `prune`, `stats`) does not need a URL.
+Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `audit`, `lint`, `check`, `prune`, `stats`, `export`) does not need a URL.
 
 ### Flags
 
@@ -643,6 +646,7 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 |---|---|
 | `--action ACTION` | One of `scrape`, `crawl`, `search`, `ingest`, `discover`, `research`, `verify`, `audit`, `lint`, `prune`, `check`, `stats`, `local`. |
 | `--strategy S` | `fast`, `balanced`, or `aggressive` (default from config). |
+| `--json` | Print machine-readable JSON instead of human output (supported by `search`, `stats`, `verify`, and `audit`; the JSON is the only stdout content). Exit codes are unchanged, so CI gates keep working. |
 | `--query Q` | Required for `search`, `discover`, `research`. |
 | `--limit N` | Top results to ingest for `discover` (default `discovery.top_rank`); max chunks returned for `search`. |
 | `--urls U1,U2,U3` | Explicit URL list for `scrape`/`crawl`/`ingest` (overrides the URL positional). |
@@ -650,7 +654,7 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 | `--recall N` | Chunks to retrieve in `research` (default 6). |
 | `--no-answer-first` | With `research`: always run live DISCOVER, even if the vault already has a high-confidence answer (default: `research.answer_first = true` skips it). |
 | `--keep-low` | With `research`: retain low-confidence hits in the grounding context (skip `filter_low`) — for exhaustive/deep hunts that want the full evidence tail. |
-| `--out PATH` | Output file for `research` (default: `artifacts/YYYY-MM-DD/grounding/grounding_context.md`, suffixed `_N` when today's already exists). |
+| `--out PATH` | Output file for `research` (default: `artifacts/YYYY-MM-DD/grounding/grounding_context.md`, suffixed `_N` when today's already exists); with `export`, the JSONL file to write (default stdout). |
 | `--artifact PATH` | With `audit`: path to a synthesis artifact to audit. |
 | `--strict` | With `lint`: escalate warning-severity findings to failures (exit code). |
 | `--preview-chars N` | Characters shown per chunk in the CLI preview (default 300; `0` prints full text). |
@@ -667,7 +671,16 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 | `--migrate` | With `check`: rebuild the vault at the configured `storage.page_size` (16 KB default) via `VACUUM INTO`. |
 | `--force` | Ignore the cache and re-fetch / re-index. |
 
-Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `check`, `audit`) does not need a URL.
+Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `check`, `audit`, `export`) does not need a URL.
+
+### Exit codes (CI-wireable)
+
+| Actions | Codes |
+|---|---|
+| `verify`, `audit`, `check`, `lint`, `research`, `local` | unchanged: `0` pass/verified, `1` partial/incomplete, `2` unverified/error (see their sections) |
+| `scrape`, `crawl`, `ingest`, `discover` | `0` — at least one source ingested or served from cache; `1` — every URL failed, nothing was retrievable, or (discover) no results; `2` — hard error (SSRF refusal, fetch-chain exhaustion, usage) |
+
+Search returns `0` even for an empty result set — "no match" is a legal answer, visible as `chunks: []` under `--json`. As with `verify`, never pipe these commands through `tail`/`head`: the shell reports the pipe's exit status, not the gate's.
 
 ### `verify` — the programmatic audit
 
@@ -689,7 +702,7 @@ The verbatim stage checks the full normalized claim (not just a fixed-size prefi
 
 > **A denial is not a falsification.** `PARTIAL`/`UNVERIFIED` mean "the vault does not hold this wording verbatim" — they do **not** mean the claim is false. The claim may well be true; it just isn't supported by the stored text as phrased. Treat a denial as a *rewording* instruction, not a verdict.
 
-**What `verify` is lenient about** (folded, so these never flip a verdict): typographic en/em/hyphen dashes, smart quotes **and curly vs straight apostrophes** (`’` ≡ `'`), full-width Unicode (NFKC), whitespace/newlines, and parser-emitted markdown markers (`**bold**`, `*italic*`, `` `code` ``).
+**What `verify` is lenient about** (folded, so these never flip a verdict): typographic en/em/hyphen dashes, smart quotes **and curly vs straight apostrophes** (`’` ≡ `'`), full-width Unicode (NFKC), **Unicode case for every script** (`É` ≡ `é`, `П` ≡ `п` — case never flips a verdict in any language), whitespace/newlines, and parser-emitted markdown markers (`**bold**`, `*italic*`, `` `code` ``) — while markers glued inside a token (`2*3`) are content and never stripped.
 
 **What `verify` is strict about** (these cause `PARTIAL`/`UNVERIFIED`): token identity, word **order**, and whether a word is present or absent — adding, dropping, or reordering words (e.g. a prefix the source doesn't have) fails even if the meaning is identical, and `%` never folds to "percent". To confirm a claim, quote the source's *exact stored words*; `--hint` prints the nearest vault phrase to reword toward.
 
@@ -820,6 +833,9 @@ HoardCore/
         test_audit.py          artifact [V#N] evidence-chain audit
         test_parser_robust.py  parser crash-resistance (random bytes + corrupt binaries)
         test_regressions.py    regression coverage for past bugs
+        test_regression_0169.py  v0.16.9 audit-fix regression coverage (verify case
+                               folding, recall caps on every path, lazy dense model,
+                               --json/export, structured exit codes)
     deploy/
         docker-compose.flaresolverr.yml   known-good FlareSolverr container
                                           (explicit DNS + shm; see troubleshooting)
@@ -892,7 +908,7 @@ Bug reports, feature requests, and pull requests are welcome.
 7. Push and open a pull request
 
 Areas open to contribution:
-- Structured exit codes for `scrape`/`crawl`/`search`/`ingest`/`discover` (only `verify`, `check`, `research`, `audit`, and `local` emit meaningful exit codes today)
+- Plugin-provider end-to-end coverage for discovery (live engines beyond DuckDuckGo)
 - Multi-process config reload
 - Expanded end-to-end test coverage (crawl with network, live discovery, plugin registration)
 

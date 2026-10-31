@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.16.8"
+__version__ = "0.16.9"
 
 import argparse
 import asyncio
@@ -40,6 +40,7 @@ import threading
 import time
 import tomllib
 import unicodedata
+import weakref
 import zipfile
 from array import array
 from collections.abc import Iterator
@@ -52,10 +53,32 @@ from urllib.parse import unquote, urlencode, urlparse, urlunparse
 
 # --- GUARANTEED DEPENDENCIES (Installed via Makefile) ---
 import aiohttp
-import trafilatura
 from aiohttp import ClientTimeout, TCPConnector
-from readability import Document
 from yarl import URL
+
+# trafilatura/readability are guaranteed dependencies but cost ~0.5s of import
+# time — dead weight on the vault-only actions (search/verify/stats/check/
+# export) that never touch HTML. They are imported lazily on first parse.
+_TRAFILATURA: Any = None
+_READABILITY_DOC: Any = None
+
+
+def _trafilatura_mod() -> Any:
+    """Lazily imported trafilatura module (cached after first use)."""
+    global _TRAFILATURA
+    if _TRAFILATURA is None:
+        import trafilatura
+        _TRAFILATURA = trafilatura
+    return _TRAFILATURA
+
+
+def _readability_document() -> Any:
+    """Lazily imported readability Document class (cached after first use)."""
+    global _READABILITY_DOC
+    if _READABILITY_DOC is None:
+        from readability import Document
+        _READABILITY_DOC = Document
+    return _READABILITY_DOC
 
 # Heavy binary parsers are lazy-imported so that HTML/text-only usage works
 # even without PDF/DOCX/EPUB libraries installed. Modules are fetched on first
@@ -357,6 +380,19 @@ class ConfigManager:
 # 2.5 EMBEDDING ENGINE (Vector basis for hybrid retrieval)
 # =============================================================================
 
+# Embedding dimensions of the models documented in DEFAULT_CONFIG, known
+# WITHOUT loading the model. This lets dense mode stay lazy (the ONNX model
+# only loads when a query or ingest actually embeds) while the vault still
+# knows the true vector dimension up front — the fingerprint, the vector-scan
+# expected byte length, and backfill all depend on it. A model not in this
+# table falls back to eager loading so its real dimension is probed.
+_KNOWN_DENSE_DIMS: dict[str, int] = {
+    "BAAI/bge-small-en-v1.5": 384,
+    "intfloat/multilingual-e5-small": 384,
+    "BAAI/bge-small-zh-v1.5": 512,
+}
+
+
 def _fnv1a(data: bytes) -> int:
     """FNV-1a 64-bit hash. Deterministic feature hashing for the sparse fallback."""
     h = 0xcbf29ce484222325
@@ -412,6 +448,31 @@ def is_ad_tracking_url(url: str) -> bool:
                                     "ad_url=", "ad_clickid=", "bct=ad"))
 
 
+_MARKED_RUN = re.compile(r"[\*`]+")
+_WORDISH = re.compile(r"\w")
+
+
+def _strip_markdown_markers(text: str) -> str:
+    """Remove parser-emitted markdown emphasis/code markers (**, *, `) from
+    *text*, but ONLY where at least one side is a non-word boundary (whitespace,
+    punctuation, or the string edge). A marker glued between two word
+    characters — the `*` in `2*3` — is content, not a render artifact, and must
+    survive normalization; stripping it would glue tokens together ("2*3" ->
+    "23") and open a false-verify vector. A closing marker followed by
+    punctuation ("…2025**.") still strips, so quoted sentences ending in
+    emphasis keep verifying."""
+    if not text or ("*" not in text and "`" not in text):
+        return text  # fast path: nothing to strip (the overwhelmingly common case)
+
+    def _repl(m: re.Match[str]) -> str:
+        s, e = m.span()
+        left_boundary = s == 0 or not _WORDISH.match(text[s - 1])
+        right_boundary = e >= len(text) or not _WORDISH.match(text[e])
+        return "" if (left_boundary or right_boundary) else m.group(0)
+
+    return _MARKED_RUN.sub(_repl, text)
+
+
 def normalize_claim(text: str) -> str:
     """Normalize a claim for verbatim matching: fold *typographic* noise only.
     It deliberately does NOT add/remove tokens: "400K" stays distinct from
@@ -423,8 +484,9 @@ def normalize_claim(text: str) -> str:
     # `code`) before folding: they are render artifacts, not wording, so a
     # sentence stored as "increased by **17% in 2025**" verifies against
     # "increased by 17% in 2025" (same principle as folding typographic dashes).
-    # Applied symmetrically to claim and stored text; never adds/removes tokens.
-    t = re.sub(r"[\*`]+", "", text)
+    # Applied symmetrically to claim and stored text; boundary-aware, so a
+    # marker glued inside a token (2*3) is content and survives.
+    t = _strip_markdown_markers(text)
     t = t.translate({
         0x2010: "-", 0x2011: "-", 0x2012: "-", 0x2013: "-",
         0x2014: "-", 0x2015: "-", 0x2212: "-",
@@ -457,7 +519,7 @@ def _tidy_markdown_text(text: str) -> str:
         if in_fence:
             out.append(line)          # code content left untouched
             continue
-        t = re.sub(r"[\*`]+", "", line)   # strip emphasis + inline code markers
+        t = _strip_markdown_markers(line)  # strip emphasis + inline code markers
         out.append(re.sub(r"[ \t]{2,}", " ", t))
     return "\n".join(out)
 
@@ -593,29 +655,78 @@ class EmbeddingsEngine:
         # quietly degrade recall quality while every command still "worked".
         self.offline = bool(config.get('embeddings.offline', False))
         self.cache_dir = self._model_cache_dir()
+        self._dense_attempted = False
         if self.mode == 'dense':
-            try:
-                self.dim = self._load_dense()
-                self.base_dim = self.dim
-            except Exception as e:  # fastembed missing or model download failed
-                if self.offline:
-                    raise RuntimeError(
-                        f"embeddings.offline=true but the model could not be "
-                        f"loaded from {self.cache_dir}: {e}. Run one online "
-                        f"session (embeddings.offline=false) to download it, or "
-                        f"point embeddings.cache_dir at an existing copy."
-                    ) from e
-                logger.warning(
-                    f"Dense mode requested but unavailable ({e}); "
-                    f"falling back to sparse lexical hashing."
-                )
-                self.mode = 'sparse'
+            model_name = str(config.get('embeddings.dense_model',
+                                        'BAAI/bge-small-en-v1.5'))
+            known = _KNOWN_DENSE_DIMS.get(model_name)
+            if known is not None:
+                # The model's dimension is known without loading it: stay lazy
+                # (the ONNX model only loads when something actually embeds) —
+                # this removes a ~5s model-load tax from every vault-only CLI
+                # action (check/stats/verify/search --mode fast).
+                self.dim = known
+                self.base_dim = known
+            else:
+                # Exotic model: load eagerly so the real dim is probed once.
+                self._load_dense_or_demote()
         if self.mode == 'dense' and self.mrl_dims > 0 and self.mrl_dims < self.base_dim:
             self.dim = self.mrl_dims
             logger.info(
                 f"MRL dim truncation active: storing first {self.dim} of "
                 f"{self.base_dim} embedding dims."
             )
+
+    def _load_dense_or_demote(self) -> None:
+        """Load the dense model once; demote to sparse on failure.
+
+        Under `embeddings.offline` a load failure raises instead of demoting —
+        a silently missing model would quietly degrade recall quality while
+        every command still "worked". When the dimension was assumed from
+        _KNOWN_DENSE_DIMS, the probe result is verified: a mismatch corrects
+        self.dim, and the embedding fingerprint changes with it, so cached
+        vectors built under the wrong assumption rebuild via the existing
+        backfill/fingerprint machinery instead of being served stale.
+        """
+        self._dense_attempted = True
+        try:
+            dim = self._load_dense()
+        except Exception as e:  # fastembed missing or model download failed
+            if self.offline:
+                raise RuntimeError(
+                    f"embeddings.offline=true but the model could not be "
+                    f"loaded from {self.cache_dir}: {e}. Run one online "
+                    f"session (embeddings.offline=false) to download it, or "
+                    f"point embeddings.cache_dir at an existing copy."
+                ) from e
+            logger.warning(
+                f"Dense mode requested but unavailable ({e}); "
+                f"falling back to sparse lexical hashing."
+            )
+            self.mode = 'sparse'
+            return
+        if dim != self.base_dim:
+            logger.warning(
+                f"Dense model dim {dim} != assumed {self.base_dim}; the "
+                f"embedding fingerprint changes, so stale cached vectors "
+                f"will rebuild."
+            )
+            self.base_dim = dim
+            self.dim = dim
+            if self.mrl_dims > 0 and self.mrl_dims < self.base_dim:
+                self.dim = self.mrl_dims
+
+    def _ensure_dense(self) -> bool:
+        """Load the dense model on first use; True when dense output is ready.
+
+        Vault-only actions (check/stats/verify/search --mode fast) never call
+        this, so they skip the model load entirely; the first embed or
+        vector-scan pays it once."""
+        if self.mode != 'dense':
+            return False
+        if not self._dense_attempted:
+            self._load_dense_or_demote()
+        return self._dense is not None
 
     @property
     def bytes_per_dim(self) -> int:
@@ -728,7 +839,7 @@ class EmbeddingsEngine:
         return arr.tobytes()
 
     def vectorize(self, text: str) -> bytes:
-        was_dense = (self.mode == 'dense' and self._dense is not None)
+        was_dense = self.mode == 'dense' and self._ensure_dense()
         raw = self._vectorize_dense(text) if was_dense else self._hash_vector(text)
         return self._finalize(raw, was_dense)
 
@@ -743,7 +854,7 @@ class EmbeddingsEngine:
         """
         if not texts:
             return []
-        if self.mode == 'dense' and self._dense is not None:
+        if self.mode == 'dense' and self._ensure_dense() and self._dense is not None:
             model, _dim = self._dense
             vectors: list = []
             # Serialized: one ONNX forward pass at a time. A single
@@ -814,8 +925,15 @@ class EmbeddingsEngine:
         """Convert a float32 vector to signed int8 (scale to [-127, 127]).
 
         Dequantization for cosine is just dividing back by 127, so vectors stay
-        comparable without a per-vector scale factor.
+        comparable without a per-vector scale factor. numpy is ~100x faster
+        than the per-element Python loop on the ingest path (50K chunks used to
+        pay ~10s of pure-Python quantization); `np.round` and Python `round`
+        share the same round-half-to-even rule, so output is bit-identical.
         """
+        if _np is not None:
+            a = _np.frombuffer(vec, dtype=_np.float32)
+            q = _np.clip(_np.round(a * 127.0), -127, 127).astype(_np.int8)
+            return q.tobytes()
         arr = array('f')
         arr.frombytes(vec)
         q = array('b', (max(-127, min(127, round(v * 127))) for v in arr))
@@ -964,7 +1082,8 @@ class VaultManager:
     """Handles SQLite FTS indexing and filesystem storage."""
 
     def __init__(self, config: ConfigManager, vault_name: str | None = None,
-                 event_bus: EventBus | None = None):
+                 event_bus: EventBus | None = None,
+                 embeddings: EmbeddingsEngine | None = None):
         self.config = config
         self.vault_name = vault_name
         self.bus = event_bus
@@ -985,7 +1104,11 @@ class VaultManager:
         self.artifacts_dir = config.get('storage.artifacts_dir', 'artifacts')
         os.makedirs(self.artifacts_dir, exist_ok=True)
         self.db_path = os.path.join(self.root_dir, 'vault.db')
-        self.embeddings = EmbeddingsEngine(config)
+        # One EmbeddingsEngine is shared across companion vaults (multi-vault
+        # reads previously built one engine — and, eagerly, one dense model —
+        # per vault). Callers may inject their own; None builds a fresh one,
+        # which keeps per-instance isolation for tests.
+        self.embeddings = embeddings or EmbeddingsEngine(config)
         self._vector_dim = self.embeddings.dim
         self.page_size = int(config.get('storage.page_size', 16384))
         self._pool = ConnectionPool(self.db_path, CONNECTION_POOL_SIZE, self.page_size)
@@ -1339,16 +1462,22 @@ class VaultManager:
                 out |= 1 << i
         return out
 
-    def _filter_near_dupes(self, cursor: sqlite3.Cursor, url: str,
-                           chunks: list[Chunk]) -> list[Chunk]:
+    def _drop_near_dupes(self, cursor: sqlite3.Cursor, url: str,
+                         chunks: list[Chunk]) -> list[Chunk]:
         """Drop chunks near-duplicate (simhash hamming <= threshold) to already
         stored text, optionally, when config indexer.near_dedup is true.
 
+        READ-ONLY: no simhash rows are written here. Recording the kept
+        chunks' simhashes is `_record_simhashes`, called inside the writer's
+        transaction — previously the filter INSERTed in its own committed
+        transaction, so a crash between the two left "ghost" simhash rows for
+        never-stored chunks that then filtered every future re-ingest of the
+        same content to zero, silently.
+
         Exact-duplicate handling stays in chunks_ca; this catches near-identical
-        re-crawled pages whose boilerplate differs. Kept chunks get their
-        simhash recorded (first-write wins). Off by default because collapsing
-        cross-source corroborating text would hide evidence — enable when
-        crawling large sites and duplicate growth matters.
+        re-crawled pages whose boilerplate differs. Off by default because
+        collapsing cross-source corroborating text would hide evidence — enable
+        when crawling large sites and duplicate growth matters.
         """
         if not self.config.get('indexer.near_dedup', False):
             return chunks
@@ -1365,6 +1494,25 @@ class VaultManager:
                 logger.debug(f"near-dup block (hamming<= {threshold}) for {url}")
                 continue
             local_seen.add(sh)
+            kept.append(chunk)
+        if len(kept) != len(chunks):
+            logger.info(f"near-dedup kept {len(kept)}/{len(chunks)} chunks for {url}")
+        return kept
+
+    def _record_simhashes(self, cursor: sqlite3.Cursor, url: str,
+                          chunks: list[Chunk]) -> None:
+        """Persist simhash rows for already-filtered chunks (first-write wins).
+
+        Must run inside the SAME transaction that stores the chunks, so a
+        crash can never leave a simhash row whose chunk text was never stored.
+        """
+        if not self.config.get('indexer.near_dedup', False):
+            return
+        for chunk in chunks:
+            tokens = EmbeddingsEngine._tokens(chunk.text)
+            if not tokens:
+                continue
+            sh = self._simhash(tokens)
             c_hash = hashlib.blake2b(chunk.text.encode("utf-8"),
                                      digest_size=32).hexdigest()
             cursor.execute(
@@ -1374,10 +1522,6 @@ class VaultManager:
                 (sh, c_hash, url, chunk.text, time.time(),
                  sh & _SIMHASH_BUCKET_MASK),
             )
-            kept.append(chunk)
-        if len(kept) != len(chunks):
-            logger.info(f"near-dedup kept {len(kept)}/{len(chunks)} chunks for {url}")
-        return kept
 
     def _near_duplicate_candidates(self, cursor: sqlite3.Cursor,
                                    sh: int, threshold: int) -> list[int]:
@@ -1436,8 +1580,9 @@ class VaultManager:
 
         with self._db() as (_conn, cursor):
             # Optional near-duplicate filter (indexer.near_dedup) runs inside
-            # the same transaction so skipped chunks never half-persist.
-            chunks = self._filter_near_dupes(cursor, url, chunks)
+            # the same transaction so skipped chunks never half-persist; the
+            # kept chunks' simhash rows persist in this transaction too.
+            chunks = self._drop_near_dupes(cursor, url, chunks)
             content_hash = hashlib.blake2b(
                 "\n".join(c.text for c in chunks).encode("utf-8"),
                 digest_size=32,
@@ -1508,14 +1653,18 @@ class VaultManager:
             if embed_jobs:
                 vec_by_hash = self._embed_chunk_batch(
                     cursor, [(c_hash, text) for _r, c_hash, text in embed_jobs])
-                for rowid, c_hash, _text in embed_jobs:
-                    vec = vec_by_hash.get(c_hash)
-                    if vec is not None:
-                        cursor.execute(
-                            "INSERT OR REPLACE INTO chunk_vectors (chunk_rowid, url, vector) "
-                            "VALUES (?, ?, ?)",
-                            (rowid, url, vec),
-                        )
+                vec_rows = [
+                    (rowid, url, vec_by_hash[c_hash])
+                    for rowid, c_hash, _text in embed_jobs
+                    if vec_by_hash.get(c_hash) is not None
+                ]
+                if vec_rows:
+                    cursor.executemany(
+                        "INSERT OR REPLACE INTO chunk_vectors "
+                        "(chunk_rowid, url, vector) VALUES (?, ?, ?)",
+                        vec_rows,
+                    )
+            self._record_simhashes(cursor, url, chunks)
 
         # chunk_vectors changed; drop the stale vector-scan matrix (S1).
         self._vec_mat_cache.clear()
@@ -1524,46 +1673,6 @@ class VaultManager:
             self.bus.emit("document.ingested", url=url, version=version,
                           chunks=len(chunks))
         logger.info(f"Indexed {len(chunks)} chunks for {url} (v{version})")
-
-    def _embed_chunk(self, cursor: sqlite3.Cursor, c_hash: str, text: str) -> bytes | None:
-        """Return a vector for *text*, reusing a cached one for an identical
-        chunk hash AND the current embedding fingerprint. Runs on the caller's
-        connection (no nested pool acquire). Returns None if embedding fails
-        (non-fatal)."""
-        embed_fp = self.embeddings.fingerprint()
-        try:
-            cursor.execute(
-                "SELECT vector FROM chunk_vectors_ca "
-                "WHERE chunk_hash = ? AND embed_fp = ?",
-                (c_hash, embed_fp),
-            )
-            row = cursor.fetchone()
-            if row is not None and row[0] is not None:
-                expected = self.embeddings.dim * self.embeddings.bytes_per_dim
-                if len(row[0]) == expected:
-                    return row[0]
-                # Stale format (dim/model/quantize changed since the chunk was
-                # last embedded): fall through and recompute so a cached vector
-                # can never silently mismatch the current embedding config (A9).
-        except Exception as e:
-            # Best-effort cache probe: a broken query must not stall ingest.
-            logger.debug(f"CA cache lookup failed for {c_hash[:16]}: {e}")
-        try:
-            vec = self.embeddings.vectorize(text)
-        except Exception as e:  # embedding failures must not block indexing
-            logger.warning(f"Embedding failed: {e}")
-            return None
-        if vec:
-            with suppress(Exception):
-                cursor.execute(
-                    "INSERT OR REPLACE INTO chunk_vectors_ca "
-                    "(chunk_hash, vector, embed_fp) VALUES (?, ?, ?)",
-                    (c_hash, vec, embed_fp),
-                )
-                if self.bus is not None:
-                    self.bus.emit("chunk.embedded", chunk_hash=c_hash,
-                                  vector_dim=self.embeddings.dim)
-        return vec
 
     def _embed_chunk_batch(self, cursor: sqlite3.Cursor,
                            items: list[tuple[str, str]]) -> dict[str, bytes]:
@@ -1581,22 +1690,27 @@ class VaultManager:
         expected = self.embeddings.dim * self.embeddings.bytes_per_dim
         result: dict[str, bytes] = {}
 
-        # 1. Batch content-addressed cache lookup for every hash at once.
+        # 1. Batch content-addressed cache lookup for every hash at once,
+        #    sliced to SQLite's bound-variable limit so a huge document
+        #    degrades to more lookups instead of a raised query (a silent
+        #    failure here used to look like "no cache" and re-embed all).
         cached: dict[str, bytes] = {}
         hashes = [h for h, _t in items]
         if hashes:
-            ph = ",".join("?" * len(hashes))
-            try:
-                cursor.execute(
-                    f"SELECT chunk_hash, vector FROM chunk_vectors_ca "  # nosec B608
-                    f"WHERE chunk_hash IN ({ph}) AND embed_fp = ?",
-                    (*hashes, embed_fp),
-                )
-                for ch, vec in cursor.fetchall():
-                    if vec is not None and len(vec) == expected:
-                        cached[ch] = vec
-            except Exception as e:
-                logger.debug(f"CA batch cache lookup failed: {e}")
+            for i in range(0, len(hashes), _MAX_SQL_VARIABLES):
+                slice_h = hashes[i:i + _MAX_SQL_VARIABLES]
+                ph = ",".join("?" * len(slice_h))
+                try:
+                    cursor.execute(
+                        f"SELECT chunk_hash, vector FROM chunk_vectors_ca "  # nosec B608
+                        f"WHERE chunk_hash IN ({ph}) AND embed_fp = ?",
+                        (*slice_h, embed_fp),
+                    )
+                    for ch, vec in cursor.fetchall():
+                        if vec is not None and len(vec) == expected:
+                            cached[ch] = vec
+                except Exception as e:
+                    logger.debug(f"CA batch cache lookup failed: {e}")
 
         pending: list[tuple[str, str]] = []
         for c_hash, text in items:
@@ -1678,14 +1792,18 @@ class VaultManager:
             if fts_count == vec_count:
                 return 0
 
-        # Select chunks that are missing a vector OR carry a wrong-dimension one.
-        # Streams in batches (fetchmany) instead of loading the whole table,
-        # committing per batch so a long backfill is resumable (B5) and never
-        # pins a giant write transaction.
+        # Select chunks that are missing a vector OR carry a wrong-dimension one,
+        # in keyset-paginated batches: each batch is its own committed
+        # transaction and the scan advances by rowid, so (a) a long backfill
+        # stays resumable (B5) and never pins a giant write transaction, and
+        # (b) we never INSERT into chunk_vectors while a cursor over a JOIN on
+        # chunk_vectors is open — SQLite gives undefined results for rows
+        # inserted during a scan, which could skip or double rows (B5).
         count = 0
         embed_fp = self.embeddings.fingerprint()
-        with self._db() as (_conn, cursor):
-            if stale_dim:
+        batch_sz = max(1, int(self.config.get('embeddings.batch_size', 16) or 0) or 16)
+        if stale_dim:
+            with self._db() as (_conn, cursor):
                 # Any content-addressable vector built by a different embedding
                 # setting can never be served again; drop it so the next embed
                 # recomputes fresh instead of lazily expiring one row at a time.
@@ -1698,17 +1816,26 @@ class VaultManager:
                         f"Cleared {cursor.rowcount} stale CA cache entries "
                         f"(embedding config changed)."
                     )
-            sql = f"SELECT c.rowid, c.url, c.text FROM chunks_fts c LEFT JOIN chunk_vectors v ON v.chunk_rowid = c.rowid WHERE v.chunk_rowid IS NULL OR length(v.vector) != {expected_bytes}"  # nosec B608
-            cursor.execute(sql)
-            while True:
-                rows = cursor.fetchmany(1000)
-                if not rows:
-                    break
-                # Batched embedding (wired v0.16.0): one model forward pass
-                # per slice instead of one call per row — ~batch_size-x fewer
-                # model invocations during rebuilds. Per-item fallback keeps
-                # single bad rows non-fatal.
-                batch_sz = max(1, int(self.config.get('embeddings.batch_size', 16) or 0) or 16)
+        last_rowid = 0
+        while True:
+            with self._db() as (_conn, cursor):
+                cursor.execute(
+                    "SELECT c.rowid, c.url, c.text FROM chunks_fts c "
+                    "LEFT JOIN chunk_vectors v ON v.chunk_rowid = c.rowid "
+                    "WHERE c.rowid > ? AND (v.chunk_rowid IS NULL "
+                    "OR length(v.vector) != ?) "
+                    "ORDER BY c.rowid LIMIT 1000",
+                    (last_rowid, expected_bytes),
+                )
+                rows = cursor.fetchall()
+            if not rows:
+                break
+            last_rowid = rows[-1][0]
+            # Batched embedding (wired v0.16.0): one model forward pass
+            # per slice instead of one call per row — ~batch_size-x fewer
+            # model invocations during rebuilds. Per-item fallback keeps
+            # single bad rows non-fatal.
+            with self._db() as (_conn, cursor):
                 for i in range(0, len(rows), batch_sz):
                     sl = rows[i:i + batch_sz]
                     try:
@@ -1717,15 +1844,18 @@ class VaultManager:
                         logger.warning(f"Batch backfill embedding failed ({e}); "
                                        "falling back to per-item.")
                         vecs = [None] * len(sl)
-                    for (rowid, url, _text), vec in zip(sl, vecs, strict=False):
-                        if not vec:
-                            continue
-                        cursor.execute(
-                            "INSERT OR REPLACE INTO chunk_vectors (chunk_rowid, url, vector) VALUES (?, ?, ?)",
-                            (rowid, url, vec)
+                    vec_rows = [
+                        (rowid, url, vec)
+                        for (rowid, url, _text), vec in zip(sl, vecs, strict=False)
+                        if vec
+                    ]
+                    if vec_rows:
+                        cursor.executemany(
+                            "INSERT OR REPLACE INTO chunk_vectors "
+                            "(chunk_rowid, url, vector) VALUES (?, ?, ?)",
+                            vec_rows,
                         )
-                        count += 1
-                _conn.commit()
+                        count += len(vec_rows)
         if count:
             logger.info(f"Backfilled {count} chunk embeddings.")
             self._vec_mat_cache.clear()
@@ -1811,30 +1941,38 @@ class VaultManager:
         # Phase 2: content-addressable chunks must have non-empty text.
         with self._db() as (_conn, cursor):
             cursor.execute("SELECT chunk_hash, text FROM chunks_ca")
-            for c_hash, text in cursor.fetchall():
-                checks += 1
-                recomputed = hashlib.blake2b(
-                    (text or "").encode("utf-8"), digest_size=32
-                ).hexdigest()
-                if recomputed != c_hash:
-                    logger.error(
-                        "CORRUPTION: chunk %s… text hash does not match",
-                        c_hash[:16],
-                    )
-                    errors += 1
+            while True:
+                batch = cursor.fetchmany(1000)
+                if not batch:
+                    break
+                for c_hash, text in batch:
+                    checks += 1
+                    recomputed = hashlib.blake2b(
+                        (text or "").encode("utf-8"), digest_size=32
+                    ).hexdigest()
+                    if recomputed != c_hash:
+                        logger.error(
+                            "CORRUPTION: chunk %s… text hash does not match",
+                            c_hash[:16],
+                        )
+                        errors += 1
 
         # Phase 3: every vector must match the configured dimension.
         expected_bytes = self._vector_dim * self.embeddings.bytes_per_dim
         with self._db() as (_conn, cursor):
             cursor.execute("SELECT chunk_rowid, length(vector) FROM chunk_vectors")
-            for rid, vlen in cursor.fetchall():
-                checks += 1
-                if vlen != expected_bytes:
-                    logger.error(
-                        "BAD DIM: vector for chunk %d is %d bytes (expected %d)",
-                        rid, vlen, expected_bytes,
-                    )
-                    errors += 1
+            while True:
+                batch = cursor.fetchmany(1000)
+                if not batch:
+                    break
+                for rid, vlen in batch:
+                    checks += 1
+                    if vlen != expected_bytes:
+                        logger.error(
+                            "BAD DIM: vector for chunk %d is %d bytes (expected %d)",
+                            rid, vlen, expected_bytes,
+                        )
+                        errors += 1
 
         if errors == 0:
             logger.info(f"Vault integrity PASS ({checks} checks).")
@@ -1999,34 +2137,71 @@ class VaultManager:
         research vaults the sequential path is fast enough, and this avoids
         thread overhead on small batches. When enabled, embedding work is
         spread across WORKER_THREADS threads while the DB writer stays single.
+        Output parity with `index_document` is a hard requirement: identical
+        chunks reuse content-addressed vectors, the CA cache is populated, and
+        simhash rows persist only in the writer's transaction.
         """
         if not self.config.get('indexer.enable_fts', True):
             return
         if not self.config.get('indexer.parallel', False) or len(chunks) < 8:
             return self.index_document(url, chunks, meta)
 
-        # Filter near-duplicates BEFORE the embed pipeline. Vectors are
-        # keyed by position in *this* list, so dedup must not shrink the list
-        # between embedding and writing (B1: it used to, misaligning every
-        # vector after the first dropped chunk).
+        # Near-duplicate filter BEFORE the embed pipeline. READ-ONLY: the kept
+        # chunks' simhash rows are recorded by _record_simhashes inside the
+        # writer's transaction below, so a crash mid-pipeline can never leave
+        # ghost rows that permanently filter re-ingests to zero.
         with self._db() as (_conn, cursor):
-            chunks = self._filter_near_dupes(cursor, url, chunks)
+            chunks = self._drop_near_dupes(cursor, url, chunks)
         if not chunks:
             return
 
         embed_ok = self.config.get('embeddings.enabled', True)
+        # Content-addressed cache first (parity with _embed_chunk_batch): the
+        # threaded pipeline used to re-embed every chunk and never populated
+        # chunk_vectors_ca, so duplicate text paid full model cost and the
+        # sequential path's cache stayed cold.
+        c_hashes = [
+            hashlib.blake2b(c.text.encode("utf-8"), digest_size=32).hexdigest()
+            for c in chunks
+        ]
+        embed_fp = self.embeddings.fingerprint() if embed_ok else ""
+        expected = self.embeddings.dim * self.embeddings.bytes_per_dim
+        cached: dict[str, bytes] = {}
+        if embed_ok:
+            with self._db() as (_conn, cursor):
+                for i in range(0, len(c_hashes), _MAX_SQL_VARIABLES):
+                    slice_h = c_hashes[i:i + _MAX_SQL_VARIABLES]
+                    ph = ",".join("?" * len(slice_h))
+                    try:
+                        cursor.execute(
+                            f"SELECT chunk_hash, vector FROM chunk_vectors_ca "  # nosec B608
+                            f"WHERE chunk_hash IN ({ph}) AND embed_fp = ?",
+                            (*slice_h, embed_fp),
+                        )
+                        for ch, vec in cursor.fetchall():
+                            if vec is not None and len(vec) == expected:
+                                cached[ch] = vec
+                    except Exception as e:
+                        logger.debug(f"CA batch cache lookup failed: {e}")
+        pending_idx = [i for i, h in enumerate(c_hashes) if h not in cached]
+
         batch_size = max(1, int(self.config.get('embeddings.batch_size', 16) or 0) or 16)
-        # Slice chunks into embedding mini-batches keyed by their start index in
-        # `chunks`, so the model does one forward pass over several texts per
-        # worker instead of one pass per chunk. Bit-identical output.
+        # Slice the PENDING chunks into embedding mini-batches keyed by their
+        # start index in the pending list, so the model does one forward pass
+        # over several texts per worker instead of one pass per chunk.
+        # Bit-identical output.
+        pending_texts = [chunks[i].text for i in pending_idx]
         work_batches: list[tuple[int, list[str]]] = [
-            (i, [c.text for c in chunks[i:i + batch_size]])
-            for i in range(0, len(chunks), batch_size)
+            (i, pending_texts[i:i + batch_size])
+            for i in range(0, len(pending_texts), batch_size)
         ]
         work_q: queue.Queue = queue.Queue(maxsize=PIPELINE_QUEUE_SIZE)
         result_q: queue.Queue = queue.Queue(maxsize=PIPELINE_QUEUE_SIZE)
         error_holder: list[Exception] = []
-        results: list[tuple[int, str, bytes | None]] = [None] * len(chunks)  # type: ignore[list-item]
+        # (start, vecs) results aligned to the pending list, then mapped to
+        # chunk hashes so cached and freshly embedded vectors share one lookup.
+        results: list[bytes | None] = [None] * len(pending_texts)
+        embedded: dict[str, bytes] = {}
         # A sentinel is pushed to the WORK queue (not result_q) and consumed by
         # the workers themselves, so shutdown can never race with the consumer
         # (A11). The reader then collects exactly len(work_batches) results.
@@ -2047,45 +2222,53 @@ class VaultManager:
                     work_q.task_done()
                 result_q.put((start, vecs))
 
-        # Start the workers, then feed work and sentinels.
-        threads = [threading.Thread(target=_embed_worker, daemon=True)
-                   for _ in range(WORKER_THREADS)]
-        for t in threads:
-            t.start()
+        if work_batches:
+            # Start the workers, then feed work and sentinels.
+            threads = [threading.Thread(target=_embed_worker, daemon=True)
+                       for _ in range(WORKER_THREADS)]
+            for t in threads:
+                t.start()
 
-        # Drain result_q CONCURRENTLY with feeding work_q via a reader thread
-        # started BEFORE any feeding. result_q is bounded, so it must be read
-        # while the main thread feeds work; otherwise the workers block on
-        # result_q.put() once it fills and stop consuming work_q, deadlocking
-        # the main thread's work_q.put() — a real hang for any batch larger
-        # than PIPELINE_QUEUE_SIZE once embeddings are non-trivial.
-        collected: list[tuple[int, object]] = []
+            # Drain result_q CONCURRENTLY with feeding work_q via a reader
+            # thread started BEFORE any feeding. result_q is bounded, so it
+            # must be read while the main thread feeds work; otherwise the
+            # workers block on result_q.put() once it fills and stop consuming
+            # work_q, deadlocking the main thread's work_q.put() — a real hang
+            # for any batch larger than PIPELINE_QUEUE_SIZE once embeddings
+            # are non-trivial.
+            collected: list[tuple[int, object]] = []
 
-        def _collector() -> None:
-            # Exactly len(work_batches) real results are produced (sentinels are
-            # consumed by workers and produce no result), so this cannot hang.
-            for _ in range(len(work_batches)):
-                start, vecs = result_q.get()
-                collected.append((start, vecs))
+            def _collector() -> None:
+                # Exactly len(work_batches) real results are produced
+                # (sentinels are consumed by workers and produce no result),
+                # so this cannot hang.
+                for _ in range(len(work_batches)):
+                    start, vecs = result_q.get()
+                    collected.append((start, vecs))
 
-        reader = threading.Thread(target=_collector, daemon=True)
-        reader.start()
+            reader = threading.Thread(target=_collector, daemon=True)
+            reader.start()
 
-        for start, texts in work_batches:
-            work_q.put((start, texts))
-        # Wake EXACTLY the number of workers we started so none hang waiting.
-        for _ in threads:
-            work_q.put(sentinel)
-        # reader has now collected exactly len(work_batches) results; every
-        # worker has seen its sentinel and exited, so join cannot hang.
-        reader.join()
-        for start, vecs in collected:
-            for j, vec in enumerate(vecs):  # type: ignore[arg-type]
-                results[start + j] = vec  # type: ignore[assignment]
-        for t in threads:
-            t.join()
+            for start, texts in work_batches:
+                work_q.put((start, texts))
+            # Wake EXACTLY the number of workers we started so none hang.
+            for _ in threads:
+                work_q.put(sentinel)
+            # reader has now collected exactly len(work_batches) results; every
+            # worker has seen its sentinel and exited, so join cannot hang.
+            reader.join()
+            for start, vecs in collected:
+                for j, vec in enumerate(vecs):  # type: ignore[arg-type]
+                    results[start + j] = vec  # type: ignore[assignment]
+            for t in threads:
+                t.join()
 
-        # Single writer thread commits the whole batch (dedup + vectors).
+        for pos, vec in enumerate(results):
+            if vec:
+                embedded[c_hashes[pending_idx[pos]]] = vec
+
+        # Single writer thread commits the whole batch (dedup + vectors +
+        # simhash + CA cache) in ONE transaction.
         with self._db() as (_conn, cursor):
             domain = urlparse(url).netloc
             content_hash = hashlib.blake2b(
@@ -2110,10 +2293,10 @@ class VaultManager:
                 meta.get('quality_score', 0.0), len(chunks),
                 json.dumps(meta), version, content_hash,
             ))
+            vec_rows: list[tuple[int, str, bytes]] = []
             for idx, chunk in enumerate(chunks):
                 text = chunk.text
-                c_hash = hashlib.blake2b(text.encode("utf-8"),
-                                         digest_size=32).hexdigest()
+                c_hash = c_hashes[idx]
                 cursor.execute("""
                     INSERT OR IGNORE INTO chunks_ca (
                         chunk_hash, text, url, header_path, metadata_json, first_seen
@@ -2130,15 +2313,28 @@ class VaultManager:
                 """, (url, chunk.metadata.get('header_path', 'Root'), text,
                       json.dumps(chunk.metadata)))
                 rowid = cursor.lastrowid
-                vec = results[idx]
-                if vec:
-                    cursor.execute(
-                        "INSERT OR REPLACE INTO chunk_vectors (chunk_rowid, url, vector) "
-                        "VALUES (?, ?, ?)",
-                        (rowid, url, vec),
-                    )
+                vec = cached.get(c_hash) or embedded.get(c_hash)
+                if vec and rowid is not None:
+                    vec_rows.append((rowid, url, vec))
+            if vec_rows:
+                cursor.executemany(
+                    "INSERT OR REPLACE INTO chunk_vectors "
+                    "(chunk_rowid, url, vector) VALUES (?, ?, ?)",
+                    vec_rows,
+                )
+            self._record_simhashes(cursor, url, chunks)
+            if embedded:
+                cursor.executemany(
+                    "INSERT OR REPLACE INTO chunk_vectors_ca "
+                    "(chunk_hash, vector, embed_fp) VALUES (?, ?, ?)",
+                    [(h, v, embed_fp) for h, v in embedded.items()],
+                )
         # chunk_vectors changed; drop the stale vector-scan matrix (S1).
         self._vec_mat_cache.clear()
+        if self.bus is not None:
+            for h in embedded:
+                self.bus.emit("chunk.embedded", chunk_hash=h,
+                              vector_dim=self.embeddings.dim)
         if error_holder:
             logger.warning(f"{len(error_holder)} embedding errors during parallel ingest.")
         if self.bus is not None:
@@ -2288,17 +2484,35 @@ class VaultManager:
                 where += " AND url LIKE ?"
                 params.append(f'%{domain}%')
 
-            # FTS5 query with ranking
+            # FTS5 query with ranking. When a per-source cap is active, fetch
+            # a deeper pool so the cap-walk can still fill `limit` with
+            # diverse sources instead of truncating in SQL first.
+            pool = limit * 4 if max_per_source > 0 else limit
             sql = f"SELECT url, header_path, text, metadata_json, rank, rowid FROM chunks_fts WHERE {where} ORDER BY rank LIMIT ?"  # nosec B608
-            cursor.execute(sql, (*params, limit))
+            cursor.execute(sql, (*params, pool))
 
-            for row in cursor.fetchall():
+            rows = cursor.fetchall()
+            if max_per_source > 0:
+                per_src: dict[str, int] = {}
+                capped: list[tuple[Any, ...]] = []
+                for row in rows:
+                    if len(capped) >= limit:
+                        break
+                    if per_src.get(row[0], 0) >= max_per_source:
+                        continue
+                    per_src[row[0]] = per_src.get(row[0], 0) + 1
+                    capped.append(row)
+                rows = capped
+            for row in rows:
                 url, header_path, text, meta_json, rank, rowid = row
                 meta = json.loads(meta_json)
                 meta['search_rank'] = rank
                 meta['source_url'] = url
                 meta['chunk_id'] = rowid
+                meta['keyword_hit'] = True
+                meta['retrieval'] = 'fts'
                 results.append(Chunk(text=text, metadata=meta))
+            self._stamp_corroboration(cursor, results)
 
             # Same site-chrome demotion as the hybrid path: an FTS-only query
             # over a template-heavy site returns the nav menu verbatim, and it
@@ -2306,6 +2520,35 @@ class VaultManager:
             content, chrome = self._split_chrome(cursor, results, limit)
 
         return (content + chrome) if content else results
+
+    def _stamp_corroboration(self, cursor: sqlite3.Cursor,
+                             chunks: list[Chunk]) -> None:
+        """Stamp each hit with `corroborated`: how many distinct source URLs in
+        this vault hold the exact same chunk text (1 = uncorroborated).
+
+        Distinct-URL corroboration is not independence (syndicated reprints
+        inflate it), but exact-duplicate text across sources is the cheapest
+        honesty signal an agent can read before deciding what to cite. One
+        grouped scan over the final hit set only."""
+        if not chunks:
+            return
+        texts = list({c.text for c in chunks})
+        try:
+            for i in range(0, len(texts), _MAX_SQL_VARIABLES):
+                slice_t = texts[i:i + _MAX_SQL_VARIABLES]
+                ph = ",".join("?" * len(slice_t))
+                cursor.execute(
+                    f"SELECT text, COUNT(DISTINCT url) FROM chunks_fts "  # nosec B608
+                    f"WHERE text IN ({ph}) GROUP BY text",
+                    slice_t,
+                )
+                counts = dict(cursor.fetchall())
+                for c in chunks:
+                    n = counts.get(c.text)
+                    if n:
+                        c.metadata['corroborated'] = n
+        except sqlite3.OperationalError as e:
+            logger.debug(f"corroboration probe skipped: {e}")
 
     def _vector_scan(self, cursor: sqlite3.Cursor, qvec: bytes,
                      top_k: int, domain: str | None) -> list[tuple[float, int, str]]:
@@ -2334,13 +2577,16 @@ class VaultManager:
         # The previous version loaded every BLOB on each query (~82 MB at
         # 50K vectors) only to discover the cached matrix was still valid;
         # COUNT + SUM(length()) reads metadata pages instead, cutting warm
-        # scans from ~120-230 ms to the ~13-15 ms matmul itself.
+        # scans from ~120-230 ms to the ~13-15 ms matmul itself. MAX(rowid)
+        # joins the key so a 1:1 same-size replacement (re-ingest of equal-
+        # sized vectors) cannot serve a stale matrix.
         row = cursor.execute(
-            "SELECT COUNT(*), COALESCE(SUM(length(vector)), 0) "  # nosec B608
+            "SELECT COUNT(*), COALESCE(SUM(length(vector)), 0), "  # nosec B608
+            "COALESCE(MAX(chunk_rowid), 0) "
             "FROM chunk_vectors" + vec_where,
             vec_params,
         ).fetchone()
-        cnt, total_bytes = row if row else (0, 0)
+        cnt, total_bytes, max_rid = row if row else (0, 0, 0)
         if cnt == 0:
             return []  # empty table: nothing can match, skip all further work
         cache_valid = (
@@ -2349,6 +2595,7 @@ class VaultManager:
             and bool(qvec)
             and self._vec_mat_cache.get("count") == cnt
             and self._vec_mat_cache.get("total") == total_bytes
+            and self._vec_mat_cache.get("max_rid") == max_rid
             and self._vec_mat_cache.get("expected") == expected_bytes
             and self._vec_mat_cache.get("mat") is not None
         )
@@ -2397,6 +2644,7 @@ class VaultManager:
                         self._vec_mat_cache.update(
                             count=len(rows),
                             total=sum(len(b) for b in blobs),
+                            max_rid=max(rids),
                             expected=expected_bytes,
                             mat=mat, rids=rids, urls=urls,
                         )
@@ -2575,6 +2823,8 @@ class VaultManager:
         trip for the fast path and the fused result set (B3)."""
         if not query or not query.strip():
             return []
+        if limit is None or limit <= 0:
+            return []  # a request for zero chunks is honored on every path
         k = 60  # RRF constant
         fts_pool = int(self.config.get('indexer.search_limit', 20) * 3)
         vec_pool = self.config.get('embeddings.top_k', 40)
@@ -2591,13 +2841,15 @@ class VaultManager:
             # semantic content the embedding model can match: run the vector
             # scan alone instead of returning [] (A6).
             fts_rows: list[tuple[int, str]] = []
-            row_by_id: dict[int, tuple[str, str, str, str]] = {}
+            row_by_id: dict[int, tuple[str, str, str, dict[str, Any]]] = {}
             if fts_match:
                 sql = f"SELECT rowid, url, header_path, text, metadata_json FROM chunks_fts WHERE {fts_where} ORDER BY rank LIMIT ?"  # nosec B608
                 cursor.execute(sql, (*fts_params, fts_pool))
                 full_rows = cursor.fetchall()
                 fts_rows = [(rid, url) for rid, url, _hp, _text, _mj in full_rows]
-                row_by_id = {rid: (url, hp, text, mj)
+                # Metadata is parsed ONCE here and shared by the fast path and
+                # the fused result assembly (it used to be json.loads'd twice).
+                row_by_id = {rid: (url, hp, text, json.loads(mj))
                              for rid, url, hp, text, mj in full_rows}
 
             # --- FTS5 strong-signal fast path (P1.1) ---
@@ -2610,12 +2862,13 @@ class VaultManager:
                 # Recency weighting must apply uniformly: without it, a 2-year-old
                 # keyword match would rank identically to a fresh page even when
                 # recency_half_life_days is configured (A3). We reorder the FTS
-                # candidates by recency decay before slicing to the limit.
+                # candidates by recency decay — with the bm25 rank position as
+                # the tie-breaker, so decay never discards relevance entirely.
                 half_life = float(self.config.get('embeddings.recency_half_life_days', 0) or 0)
-                selected: list[tuple[int, str]] = fts_rows[:limit]
-                if half_life > 0 and selected:
+                ordered = list(fts_rows)
+                if half_life > 0 and ordered:
                     now = time.time()
-                    urls = list({u for _rid, u in selected if u})
+                    urls = list({u for _rid, u in ordered if u})
                     fetched_by_url: dict[str, float] = {}
                     if urls:
                         placeholders = ",".join("?" * len(urls))
@@ -2626,6 +2879,8 @@ class VaultManager:
                         )
                         fetched_by_url = dict(cursor.fetchall())
 
+                    rank_by_rid = {rid: i for i, (rid, _u) in enumerate(ordered)}
+
                     def _decay(u: str) -> float:
                         fetched = fetched_by_url.get(u)
                         if not fetched:
@@ -2633,12 +2888,30 @@ class VaultManager:
                         age = max(0.0, (now - fetched) / 86400.0)
                         return 0.5 ** (age / half_life)
 
-                    selected.sort(key=lambda t: (_decay(t[1]), t[0]), reverse=True)
+                    ordered.sort(
+                        key=lambda t: (_decay(t[1]), -rank_by_rid[t[0]]),
+                        reverse=True,
+                    )
+                # max_per_source is honored on the fast path too: the default
+                # retrieval route must respect the research-recall diversity
+                # cap exactly when FTS is strongest (fts_rows carry the rank
+                # order, which is the relevance order for the cap walk).
+                if max_per_source > 0:
+                    per_src: dict[str, int] = {}
+                    selected: list[tuple[int, str]] = []
+                    for rid, u in ordered:
+                        if len(selected) >= limit:
+                            break
+                        if per_src.get(u, 0) >= max_per_source:
+                            continue
+                        per_src[u] = per_src.get(u, 0) + 1
+                        selected.append((rid, u))
+                else:
+                    selected = ordered[:limit]
                 results: list[Chunk] = []
-                for rid, url in selected:
-                    url, _hp, text, meta_json = row_by_id[rid]
-                    meta = json.loads(meta_json)
-                    meta['source_url'] = url
+                for rid, src_url in selected:
+                    _u, _hp, text, meta = row_by_id[rid]
+                    meta['source_url'] = src_url
                     meta['chunk_id'] = rid
                     meta['retrieval'] = 'fts_fast'
                     meta['keyword_hit'] = True
@@ -2653,7 +2926,9 @@ class VaultManager:
                 # Template chrome outranks nothing on merit — demote it before
                 # returning (see _split_chrome).
                 content, chrome = self._split_chrome(cursor, results, limit)
-                return (content + chrome)[:max(limit, 0)] if content else results
+                merged_hits = (content + chrome)[:max(limit, 0)] if content else results
+                self._stamp_corroboration(cursor, merged_hits)
+                return merged_hits
 
             # --- OR-fallback for keyword-backed candidates (A-OR) ---
             # A long research question whose strict AND-match is empty (any one
@@ -2666,11 +2941,15 @@ class VaultManager:
             # single coincidental token (e.g. one stray "marketplace" in an
             # otherwise off-topic query) does NOT fake a keyword-backed set.
             if not fts_rows and fts_match and ' AND ' in fts_match:
-                distinct = sum(
-                    1 for _t in re.findall(r'\S+', query)
-                    if (cand := re.sub(r'["()*^:\-]', ' ', _t).strip())
-                    and _token_matches(cursor, cand)
-                )
+                # Distinct candidate tokens only: counting raw occurrences let
+                # "zzz marketplace marketplace marketplace" pass the >=2 gate
+                # on one coincidental word and fake a keyword-backed set.
+                candidates = {
+                    cleaned for tok in re.findall(r'\S+', query)
+                    if (cleaned := re.sub(r'["()*^:\-]', ' ', tok).strip())
+                }
+                distinct = sum(1 for cand in candidates
+                               if _token_matches(cursor, cand))
                 if distinct >= 2:
                     or_match = self._fts_query(query, op="OR")
                     if or_match:
@@ -2684,7 +2963,7 @@ class VaultManager:
                         or_rows = cursor.fetchall()
                         if or_rows:
                             fts_rows = [(rid, url) for rid, url, _hp, _t, _m in or_rows]
-                            row_by_id = {rid: (url, hp, text, mj)
+                            row_by_id = {rid: (url, hp, text, json.loads(mj))
                                          for rid, url, hp, text, mj in or_rows}
 
             # --- vector candidate list (one numpy matmul over the whole table) ---
@@ -2798,19 +3077,18 @@ class VaultManager:
                 # Fetch only the rows the single FTS query did not already
                 # return (vector-only hits), then assemble in RRF order (B3).
                 missing = [rid for rid in ids if rid not in row_by_id]
-                fetched_by_id: dict[int, tuple[str, str, str, str]] = {}
+                fetched_by_id: dict[int, tuple[str, str, str, dict[str, Any]]] = {}
                 if missing:
                     placeholders = ",".join("?" * len(missing))
                     sql = f"SELECT rowid, url, header_path, text, metadata_json FROM chunks_fts WHERE rowid IN ({placeholders})"  # nosec B608
                     cursor.execute(sql, missing)
-                    fetched_by_id = {rid: (url, hp, text, mj)
+                    fetched_by_id = {rid: (url, hp, text, json.loads(mj))
                                      for rid, url, hp, text, mj in cursor.fetchall()}
                 for rid in ids:
                     row = row_by_id.get(rid) or fetched_by_id.get(rid)
                     if row is None:
                         continue
-                    url, _hp, text, meta_json = row
-                    meta = json.loads(meta_json)
+                    url, _hp, text, meta = row
                     meta['hybrid_score'] = rrf.get(rid, 0.0)
                     meta['keyword_hit'] = rid in fts_rids
                     meta['confidence'] = conf_by_rid.get(rid, "low")
@@ -2818,6 +3096,7 @@ class VaultManager:
                     meta['chunk_id'] = rid
                     meta['retrieval'] = 'hybrid'
                     results.append(Chunk(text=text, metadata=meta))
+                self._stamp_corroboration(cursor, results)
             # Optional cross-encoder re-ranking of the final recalled set.
             if results and self.config.get('embeddings.reranker_model', ''):
                 results = self._rerank(query, results)
@@ -2864,6 +3143,13 @@ class VaultManager:
 # 4. NETWORK RESILIENCE CORE
 # =============================================================================
 
+# Live NetworkFetchers (weak: an unreferenced fetcher drops out by itself).
+# The shared aiohttp session intentionally outlives a single fetch, so the
+# CLI's main() closes whatever is still open in a finally block — without
+# this, every run used to end with an "Unclosed client session" warning.
+_LIVE_FETCHERS: weakref.WeakSet[NetworkFetcher] = weakref.WeakSet()
+
+
 class NetworkFetcher:
     """Executes explicit strategy chain with pre-flight check."""
 
@@ -2899,13 +3185,34 @@ class NetworkFetcher:
         self._enable_preflight = config.get('network.enable_preflight', True)
         # SSRF protection (network.ssrf_protection): refuse non-http(s) and
         # non-public fetch targets, and re-validate every redirect hop. Default
-        # on; disable only on trusted isolated networks.
-        self._ssrf_protected = bool(config.get('network.ssrf_protection', False))
+        # on; disable only on trusted isolated networks. (The literal default
+        # here must match DEFAULT_CONFIG — a direct-constructed fetcher used to
+        # silently disable the guard that the config default enables.)
+        self._ssrf_protected = bool(config.get('network.ssrf_protection', True))
+        # Shared aiohttp session (one per running event loop): pooled keep-alive
+        # connections and the DNS cache survive across fetches instead of every
+        # URL paying its own TLS handshake (a 500-URL crawl used to open 500).
+        self._aio_session: aiohttp.ClientSession | None = None
+        self._aio_session_loop: asyncio.AbstractEventLoop | None = None
         # Plugin fetchers (hoardcore.fetchers entry points), appended to the
         # strategy fallback chain (G1). Signature: async fn(url) -> tuple or
         # None, or a plain callable returning (text|None, binary|None, ctype,
         # status).
         self.plugin_fetchers: dict[str, Any] = {}
+        _LIVE_FETCHERS.add(self)
+
+    async def aclose(self) -> None:
+        """Close the shared aiohttp session (idempotent, best-effort).
+
+        The CLI calls this before exit; library users driving many fetches
+        should await it when done with the fetcher so the session never leaks
+        an 'Unclosed client session' warning at interpreter shutdown."""
+        session = self._aio_session
+        self._aio_session = None
+        self._aio_session_loop = None
+        if session is not None and not session.closed:
+            with suppress(Exception):
+                await session.close()
 
     @staticmethod
     def _is_public_ip(ip_text: str) -> bool:
@@ -3018,6 +3325,36 @@ class NetworkFetcher:
             logger.warning(f"Preflight check failed for {url}: {e}")
             raise RuntimeError("PREFLIGHT_ERROR") from e
 
+    def _shared_session(self) -> aiohttp.ClientSession:
+        """Return the fetcher's shared ClientSession for the running loop.
+
+        Sessions are loop-bound: if the loop changed (a new asyncio.run), the
+        old session's connector is closed best-effort and a fresh one is built.
+        Tests that stub `_fetch_aiohttp` never reach this; tests that monkeypatch
+        `aiohttp.ClientSession` flow through unchanged.
+        """
+        loop = asyncio.get_running_loop()
+        if (self._aio_session is not None and not self._aio_session.closed
+                and self._aio_session_loop is loop):
+            return self._aio_session
+        if self._aio_session is not None and self._aio_session_loop is not loop:
+            # The previous loop is gone; close its connector synchronously (a
+            # connector close is sync; the session's own close() is not).
+            old_session = self._aio_session
+            old_connector = old_session.connector
+            if old_connector is not None:
+                with suppress(Exception):
+                    old_connector.close()
+            with suppress(Exception):
+                old_session.detach()
+            self._aio_session = None
+        connector = TCPConnector(limit=16, ttl_dns_cache=300,
+                                 enable_cleanup_closed=True)
+        self._aio_session = aiohttp.ClientSession(
+            connector=connector, headers={'User-Agent': self._user_agent})
+        self._aio_session_loop = loop
+        return self._aio_session
+
     async def _fetch_aiohttp(self, url: str) -> tuple[str | None, bytes | None, str, int | None]:
         """Attempt 1: Standard aiohttp. Returns (text, binary, content_type, status).
 
@@ -3027,43 +3364,41 @@ class NetworkFetcher:
         refused instead of silently followed (C1).
         """
         cookies = self._parse_cookies()
-        headers = {'User-Agent': self._user_agent}
-        connector = TCPConnector(force_close=True, enable_cleanup_closed=True, ttl_dns_cache=300)
         timeout = ClientTimeout(total=self._timeout)
 
         try:
-            async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
-                current = url
-                for _ in range(6):  # initial request + up to 5 redirect hops
-                    if self._ssrf_protected and not self.validate_url_target(current):
-                        logger.warning(f"aiohttp: SSRF guard refused target {current}")
-                        return None, None, 'text/html', 403
-                    async with session.get(
-                        current, cookies=cookies, timeout=timeout, allow_redirects=False
-                    ) as resp:
-                        if resp.status in (301, 302, 303, 307, 308):
-                            location = resp.headers.get('Location')
-                            if not location:
-                                return None, None, '', resp.status
-                            try:
-                                current = str(resp.url.join(URL(location)))
-                            except ValueError:
-                                return None, None, '', resp.status
-                            continue
-                        content_type = resp.headers.get('Content-Type', 'text/plain').split(';')[0].strip()
-                        if resp.status == 200:
-                            if 'text' in content_type:
-                                return await resp.text(), None, content_type, resp.status
-                            else:
-                                return None, await resp.read(), content_type, resp.status
-                        elif resp.status == 403:
-                            logger.warning("aiohttp: 403 Blocked.")
-                            return None, None, content_type, resp.status
+            session = self._shared_session()
+            current = url
+            for _ in range(6):  # initial request + up to 5 redirect hops
+                if self._ssrf_protected and not self.validate_url_target(current):
+                    logger.warning(f"aiohttp: SSRF guard refused target {current}")
+                    return None, None, 'text/html', 403
+                async with session.get(
+                    current, cookies=cookies, timeout=timeout, allow_redirects=False
+                ) as resp:
+                    if resp.status in (301, 302, 303, 307, 308):
+                        location = resp.headers.get('Location')
+                        if not location:
+                            return None, None, '', resp.status
+                        try:
+                            current = str(resp.url.join(URL(location)))
+                        except ValueError:
+                            return None, None, '', resp.status
+                        continue
+                    content_type = resp.headers.get('Content-Type', 'text/plain').split(';')[0].strip()
+                    if resp.status == 200:
+                        if 'text' in content_type:
+                            return await resp.text(), None, content_type, resp.status
                         else:
-                            logger.warning(f"aiohttp: Status {resp.status}")
-                            return None, None, content_type, resp.status
-                logger.warning("aiohttp: redirect limit exceeded")
-                return None, None, '', None
+                            return None, await resp.read(), content_type, resp.status
+                    elif resp.status == 403:
+                        logger.warning("aiohttp: 403 Blocked.")
+                        return None, None, content_type, resp.status
+                    else:
+                        logger.warning(f"aiohttp: Status {resp.status}")
+                        return None, None, content_type, resp.status
+            logger.warning("aiohttp: redirect limit exceeded")
+            return None, None, '', None
         except Exception as e:
             logger.debug(f"aiohttp failed: {e}")
             return None, None, '', None
@@ -3199,7 +3534,12 @@ class NetworkFetcher:
         if sid:
             payload["session"] = sid
         if self._cookie_string:
-            payload["cookies"] = self._parse_cookies()
+            # FlareSolverr's request DTO takes cookies as a LIST of
+            # {name, value} objects; sending the parsed dict shape made every
+            # cookie-authenticated solve fail at the solver.
+            payload["cookies"] = [
+                {"name": k, "value": v} for k, v in self._parse_cookies().items()
+            ]
 
         try:
             timeout = ClientTimeout(total=self._solver_timeout + 10)
@@ -3582,7 +3922,7 @@ class DocumentParser:
         too small (< 100 chars) instead of always running both in parallel.
         """
         def _extract_trafilatura():
-            return trafilatura.extract(
+            return _trafilatura_mod().extract(
                 html,
                 url=url,
                 include_comments=False,
@@ -3591,7 +3931,7 @@ class DocumentParser:
             ) or ""
 
         def _extract_readability():
-            doc = Document(html)
+            doc = _readability_document()(html)
             return doc.summary()
 
         try:
@@ -3741,7 +4081,10 @@ class SemanticChunker:
         return tail if len(tail) < len(text) else ""
 
     async def chunk(self, markdown: str, url: str, parser_meta: dict[str, Any]) -> list[Chunk]:
-        if not markdown:
+        # Whitespace-only input must take the explicit-empty path too: the
+        # final fallback appends `markdown.strip()` and used to index an
+        # empty-text chunk when only `not markdown` was guarded.
+        if not markdown or not markdown.strip():
             return [Chunk(text="[Empty content]", metadata={"source": url, "empty": True})]
 
         # Tidy parser-emitted markdown markers (**bold**, *italic*, `code`) out
@@ -3853,6 +4196,31 @@ class CrawlerPlanner:
         self._user_agent = config.get('general.user_agent', 'HoardCore/5.0')
         # Parsed robots.txt rules per netloc: list of (allow, pattern, regex).
         self._robots_rules: dict[str, list[tuple[bool, str, Any]]] = {}
+        # robots.txt body per netloc (None = unreachable/404), fetched ONCE per
+        # origin: a crawl used to download it twice — once for the sitemap
+        # scan, once for the rules parse.
+        self._robots_body: dict[str, str | None] = {}
+
+    async def _fetch_robots_body(self, robots_url: str, netloc: str) -> str | None:
+        """Fetch (and cache) the robots.txt body for one origin."""
+        if netloc in self._robots_body:
+            return self._robots_body[netloc]
+        if not NetworkFetcher.validate_url_target(robots_url):
+            logger.warning(f"SSRF guard refused crawler target: {robots_url}")
+            self._robots_body[netloc] = None
+            return None
+        body: str | None = None
+        try:
+            async with aiohttp.ClientSession() as session, session.get(
+                robots_url, timeout=ClientTimeout(total=10),
+                headers={"User-Agent": self._user_agent},
+            ) as resp:
+                body = (await resp.text()) if resp.status == 200 else None
+        except Exception as e:
+            logger.warning(f"Failed to fetch robots.txt ({robots_url}): {e}")
+            body = None
+        self._robots_body[netloc] = body
+        return body
 
     async def get_robots_urls(self, domain: str) -> list[str]:
         """Fetch robots.txt and extract sitemap URLs."""
@@ -3860,26 +4228,17 @@ class CrawlerPlanner:
             return []
 
         base_url = f"{domain}/robots.txt"
-        if not NetworkFetcher.validate_url_target(base_url):
-            logger.warning(f"SSRF guard refused crawler target: {base_url}")
-            return []
-        try:
-            async with aiohttp.ClientSession() as session, session.get(
-                base_url, timeout=ClientTimeout(total=10),
-                headers={"User-Agent": self._user_agent},
-            ) as resp:
-                if resp.status == 200:
-                    text = await resp.text()
-                    sitemap_urls = re.findall(r'^Sitemap:\s*(.+)$', text, re.MULTILINE | re.IGNORECASE)
-                    parsed = [url.strip() for url in sitemap_urls]
-                    if parsed:
-                        return parsed
-                    # robots.txt exists but declares no Sitemap directives;
-                    # probe the conventional location before giving up.
-                    logger.info(f"{base_url} had no Sitemap: directive; "
-                                "falling back to /sitemap.xml.")
-        except Exception as e:
-            logger.warning(f"Failed to fetch robots.txt: {e}")
+        netloc = urlparse(domain).netloc or domain
+        text = await self._fetch_robots_body(base_url, netloc)
+        if text:
+            sitemap_urls = re.findall(r'^Sitemap:\s*(.+)$', text, re.MULTILINE | re.IGNORECASE)
+            parsed = [url.strip() for url in sitemap_urls]
+            if parsed:
+                return parsed
+            # robots.txt exists but declares no Sitemap directives;
+            # probe the conventional location before giving up.
+            logger.info(f"{base_url} had no Sitemap: directive; "
+                        "falling back to /sitemap.xml.")
 
         # Fallback to default sitemap location
         return [f"{domain}/sitemap.xml"]
@@ -3890,24 +4249,16 @@ class CrawlerPlanner:
         Stores Disallow/Allow prefixes (all user-agent groups merged — a
         deliberately conservative reading) keyed by netloc for `allowed()`.
         A missing/unreachable robots.txt leaves no entry, which `allowed()`
-        treats as allow-all.
+        treats as allow-all. Reuses the body already fetched for the sitemap
+        scan when both run in the same crawl.
         """
         if not self.respect_robots:
             return
         parsed = urlparse(url)
         host_root = f"{parsed.scheme}://{parsed.netloc}"
         robots_url = f"{host_root}/robots.txt"
-        if not NetworkFetcher.validate_url_target(robots_url):
-            logger.warning(f"SSRF guard refused crawler target: {robots_url}")
-            return
-        try:
-            async with aiohttp.ClientSession() as session, session.get(
-                robots_url, timeout=ClientTimeout(total=10),
-                headers={"User-Agent": self._user_agent},
-            ) as resp:
-                body = await resp.text() if resp.status == 200 else ""
-        except Exception as e:
-            logger.warning(f"Failed to fetch robots.txt rules ({robots_url}): {e}")
+        body = await self._fetch_robots_body(robots_url, parsed.netloc)
+        if body is None:
             return
         rules: list[tuple[bool, str, Any]] = []
         for raw in (body or "").splitlines():
@@ -4209,7 +4560,13 @@ class WebSearchProvider:
         return 'rel="canonical" href="https://duckduckgo.com/"' in head
 
     async def _fetch_with_backoff(self, url: str, strategy: str) -> str | None:
-        """Fetch a search page, retrying transient failures with backoff."""
+        """Fetch a search page, retrying transient failures with backoff.
+
+        A detected challenge page raises SEARCH_BLOCKED, which is re-raised
+        immediately — it used to be swallowed by the generic handler and
+        retried against the same blocked provider (an IP block won't heal in
+        1.5s), leaving the documented no-retry contract unreachable.
+        """
         last_exc: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
@@ -4223,6 +4580,17 @@ class WebSearchProvider:
                         raise RuntimeError("SEARCH_BLOCKED")
                     return text
                 raise RuntimeError("empty search response")
+            except RuntimeError as e:
+                if str(e) == "SEARCH_BLOCKED":
+                    raise
+                last_exc = e
+                if attempt < self.max_retries:
+                    delay = self.backoff_base * (2 ** attempt)
+                    logger.warning(
+                        f"Discovery attempt {attempt + 1}/{self.max_retries + 1} "
+                        f"failed ({e}); retrying in {delay:.1f}s"
+                    )
+                    await asyncio.sleep(delay)
             except Exception as e:  # transient: rate-limit, 5xx, timeout
                 last_exc = e
                 if attempt < self.max_retries:
@@ -4275,11 +4643,15 @@ class WebSearchProvider:
 
     async def search(self, query: str, max_results: int = 10,
                      strategy: str = "aggressive") -> list[SearchResult]:
+        # urlencode({"q": ...}) already emits "q=..."; the old f-string added
+        # a second "?q=" prefix, so DuckDuckGo was searching for a query
+        # literally starting with "q=" — it happened to degrade gracefully,
+        # but the provider URL must be `?<encoded>`.
         q = urlencode({"q": query.strip()})
         # (label, url, parser) ordered by preference; plugin providers form
         # the fallback tail (see below).
         providers = [
-            ("duckduckgo", f"https://html.duckduckgo.com/html/?q={q}",
+            ("duckduckgo", f"https://html.duckduckgo.com/html/?{q}",
              self._parse_duckduckgo),
         ]
 
@@ -4457,9 +4829,13 @@ class HoardCore:
         else:
             names = []
         self.vault = VaultManager(self.config, names[0] if names else None,
-                                  event_bus=self.bus)
+                                  event_bus=self.bus,
+                                  embeddings=EmbeddingsEngine(self.config))
+        shared_engine = self.vault.embeddings
         self.vaults = [self.vault] + [
-            VaultManager(self.config, n, event_bus=self.bus) for n in names[1:]
+            VaultManager(self.config, n, event_bus=self.bus,
+                         embeddings=shared_engine)
+            for n in names[1:]
         ]
         self.vault_name = self.vault.vault_name
         self.fetcher = NetworkFetcher(self.config)
@@ -4519,8 +4895,8 @@ class HoardCore:
     # ingest is skipped unless --force).
 
     def _local_dir_root(self) -> str:
-        """Absolute root of the local ingestion directory."""
-        return os.path.abspath(str(self.config.get('storage.local_dir', 'local_inputs')))
+        """Absolute, symlink-resolved root of the local ingestion directory."""
+        return os.path.realpath(str(self.config.get('storage.local_dir', 'local_inputs')))
 
     def _local_url(self, relpath: str) -> str:
         """Synthetic provenance URL for a local file. The host is fixed to
@@ -4529,9 +4905,13 @@ class HoardCore:
         return f"local://local/{relpath}"
 
     def _local_guard(self, relpath: str) -> str:
-        """Resolve `relpath` inside storage.local_dir, refusing escapes."""
+        """Resolve `relpath` inside storage.local_dir, refusing escapes.
+
+        Uses realpath (not abspath) so a symlink inside local_dir pointing at
+        a file outside it — e.g. an `.txt` linking to /etc/passwd — resolves
+        to its target and is refused, instead of being read through the link."""
         root = self._local_dir_root()
-        abs_path = os.path.abspath(os.path.join(root, relpath))
+        abs_path = os.path.realpath(os.path.join(root, relpath))
         if abs_path != root and os.path.commonpath([root, abs_path]) != root:
             raise RuntimeError(
                 f"LOCAL_PATH_REFUSED: {relpath!r} escapes "
@@ -4540,7 +4920,11 @@ class HoardCore:
         return abs_path
 
     def _local_files(self, relpath: str = ".") -> list[str]:
-        """Every supported file under `relpath` of local_dir (sorted, recursive)."""
+        """Every supported file under `relpath` of local_dir (sorted, recursive).
+
+        Symlinks resolving outside the sandbox are skipped (os.walk itself does
+        not follow directory symlinks; file symlinks are filtered explicitly).
+        """
         root = self._local_dir_root()
         base = self._local_guard(relpath)
         if os.path.isfile(base):
@@ -4550,8 +4934,16 @@ class HoardCore:
         files: list[str] = []
         for dirpath, _dirnames, filenames in os.walk(base):
             for name in sorted(filenames):
-                if os.path.splitext(name)[1].lower() in _LOCAL_EXTENSIONS:
-                    files.append(os.path.relpath(os.path.join(dirpath, name), root))
+                if os.path.splitext(name)[1].lower() not in _LOCAL_EXTENSIONS:
+                    continue
+                full = os.path.join(dirpath, name)
+                if not os.path.realpath(full).startswith(root + os.sep):
+                    logger.warning(
+                        f"local: skipping {os.path.relpath(full, root)} "
+                        "(symlink escapes storage.local_dir)."
+                    )
+                    continue
+                files.append(os.path.relpath(full, root))
         return files
 
     async def _process_local(self, relpath: str, force_refresh: bool = False) -> tuple[list[Chunk], dict[str, Any]]:
@@ -4675,6 +5067,40 @@ class HoardCore:
                 "modified": st.st_mtime,
             })
         return entries
+
+    def export_vault_jsonl(self, vault: VaultManager, out_fh: Any) -> int:
+        """Stream every chunk of *vault* to *out_fh* as JSON lines.
+
+        One JSON object per chunk: {"text", "metadata"} (metadata carries
+        source_url, header_path, chunk_id and whatever the ingest stamped).
+        Bounded-memory (fetchmany batches) and vault-portable: the output is
+        diffable, backupable, and consumable by other tooling without SQLite.
+        Returns the chunk count written."""
+        count = 0
+        with vault._db() as (_conn, cursor):
+            cursor.execute(
+                "SELECT rowid, url, header_path, text, metadata_json "
+                "FROM chunks_fts ORDER BY rowid"
+            )
+            while True:
+                rows = cursor.fetchmany(500)
+                if not rows:
+                    break
+                for rid, url, header_path, text, meta_json in rows:
+                    try:
+                        meta: dict[str, Any] = json.loads(meta_json) if meta_json else {}
+                    except (TypeError, ValueError):
+                        meta = {}
+                    meta.setdefault("source_url", url)
+                    meta.setdefault("chunk_id", rid)
+                    if header_path:
+                        meta.setdefault("header_path", header_path)
+                    out_fh.write(json.dumps(
+                        {"text": text, "metadata": meta},
+                        ensure_ascii=False,
+                    ) + "\n")
+                    count += 1
+        return count
 
     @property
     def artifacts_dir(self) -> str:
@@ -5108,19 +5534,40 @@ class HoardCore:
         """Verify a claim against a single VaultManager (the shared per-vault
         logic behind `verify_claim`'s cross-vault fold)."""
         needle = normalize_claim(claim)
-        candidates: list[str] = []
         with vault._db() as (_conn, cursor):
             # Slide a 60-char window across the needle so a claim whose
             # *distinctive* portion is not its first 60 chars still matches
-            # verbatim (A1). Every windowed fragment is tested; the first hit
-            # confirms the claim. Windows OVERLAP (step = window/2) so a
-            # distinctive phrase straddling a boundary is never missed.
+            # verbatim (A1). Windows OVERLAP (step = window/2) so a distinctive
+            # phrase straddling a boundary is never missed. Fragments are used
+            # ONLY to shortlist candidates; the authoritative check below tests
+            # the full needle against every shortlisted row exactly once
+            # (normalize once per row, not once per fragment x row).
             step = 30
             window = 60
-            # A short needle is one fragment; a long one is broken into
-            # overlapping windows so a distinctive tail gets a chance.
             fragments = [needle[i:i + window]
                          for i in range(0, max(1, len(needle) - window + 1), step)]
+            # Candidate prefilter via the FTS tokenizer: unicode61 folds case
+            # for ALL of Unicode, while SQL lower()/LIKE fold ASCII only — a
+            # LIKE prefilter silently missed stored rows differing from the
+            # claim by non-ASCII case (Éxito vs éxito), false-denying honest
+            # verbatim claims. Each fragment tries an all-terms AND match
+            # first (tight) and widens to OR only when AND finds nothing.
+            seen_rids: set[int] = set()
+            candidates: list[str] = []
+
+            def _probe(match_expr: str | None) -> list[tuple[int, str]]:
+                if not match_expr:
+                    return []
+                try:
+                    cursor.execute(
+                        "SELECT rowid, text FROM chunks_fts "
+                        "WHERE chunks_fts MATCH ?",
+                        (match_expr,),
+                    )
+                    return cursor.fetchall()
+                except sqlite3.OperationalError:
+                    return []
+
             for fragment in fragments:
                 if not fragment.strip():
                     continue
@@ -5136,46 +5583,52 @@ class HoardCore:
                 # the Unicode sources: `normalize_claim` has already folded the
                 # needle's curly quotes to straight ones, and this LIKE runs
                 # against the RAW stored text, which still holds the curly form.
-                # Without the ASCII members such a row was never even a
-                # candidate, so quote-folded text could only ever return PARTIAL
-                # despite `verify` being documented as typography-blind.
                 like_fragment = re.sub("[" + re.escape("\u0020\t\n\r\f\v-`'\u0022*"
                                                      "\u2010\u2011\u2012\u2013\u2014\u2015\u2212"
                                                      "\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u201f") + "]+", "%", like_fragment)
-                # Candidate fetch: ONE full table scan, the original behaviour.
-                #
-                # Two faster variants were implemented, measured and REJECTED,
-                # because both were unsound or counterproductive:
-                #  * AND-ing prefilter words into this WHERE clause — every
-                #    `lower(text) LIKE '%…%'` is a full table scan, so two extra
-                #    conditions added ~6 scans per claim and made the worst case
-                #    11.3 s (worse than the 5.5 s baseline).
-                #  * a Python pre-check on each candidate row — only selective for
-                #    RARE words, so it did nothing for the pathological case
-                #    (a claim made only of common words still normalized all
-                #    113k candidates) and cost an extra lowercase per row.
-                # A `LIMIT` is not an option either: truncating candidates could
-                # deny a real match and corrupt the provenance verdict.
-                #
-                # Known cost, accepted deliberately: a claim composed entirely of
-                # common words, checked against a large vault, still normalizes
-                # every candidate row (~12 s on 20k chunks). Typical claims are
-                # 0.05-0.10 s because the widened LIKE returns few rows, and
-                # `audit` caches one verdict per claim text. Correctness of a
-                # provenance gate outranks its latency.
+                # Candidate fetch: the v0.16.7 widened-LIKE scan UNION an
+                # indexed FTS OR-probe. Neither source narrows the candidate
+                # set below soundness:
+                #  * the OR-probe is a candidate SUPERSET — a row containing
+                #    the fragment verbatim carries every one of the fragment's
+                #    FTS tokens, so it always matches the any-token MATCH. No
+                #    LIMIT is applied (truncating candidates could deny a real
+                #    match and corrupt the provenance verdict).
+                #  * the LIKE scan keeps v0.16.7's typical-case speed (few
+                #    widened rows for a real quote) and is the only source for
+                #    punctuation-only fragments, where FTS has no tokens.
+                # Why the OR-probe exists: SQLite's lower()/LIKE fold ASCII
+                # only, so a verbatim row whose text differs from the claim by
+                # NON-ASCII case ("Red Eléctrica" vs "red eléctrica", Cyrillic,
+                # Greek) was never a candidate and was denied — the FTS
+                # unicode61 tokenizer folds case for every script, closing
+                # that hole (proven live on Spanish grid-operator sources).
+                # The Python `normalize_claim` comparison below remains the
+                # single authority for every verdict; each candidate is
+                # normalized exactly ONCE (deduped by rowid) instead of once
+                # per window.
                 cursor.execute(
-                    "SELECT text FROM chunks_fts WHERE lower(text) LIKE ? ESCAPE '\\'",
+                    "SELECT rowid, text FROM chunks_fts "
+                    "WHERE lower(text) LIKE ? ESCAPE '\\'",
                     (f"%{like_fragment}%",)
                 )
-                candidates = [row[0] for row in cursor.fetchall()]
-                cursor.execute(
-                    "SELECT text FROM chunks_fts WHERE lower(text) LIKE ? ESCAPE '\\'",
-                    (f"%{like_fragment}%",)
-                )
-                candidates = [row[0] for row in cursor.fetchall()]
-                for raw in candidates:
-                    if needle in normalize_claim(raw):
-                        return "verified"
+                for rid, raw in cursor.fetchall():
+                    if rid not in seen_rids:
+                        seen_rids.add(rid)
+                        candidates.append(raw)
+                rows = _probe(vault._fts_query(fragment, op="OR"))
+                for rid, raw in rows:
+                    if rid not in seen_rids:
+                        seen_rids.add(rid)
+                        candidates.append(raw)
+            # 1) Verbatim: one normalization per candidate across ALL
+            #    fragments. Known cost, accepted deliberately (v0.16.7): a
+            #    claim composed entirely of common words on a large vault
+            #    still normalizes every candidate row. Correctness of a
+            #    provenance gate outranks its latency.
+            for raw in candidates:
+                if needle in normalize_claim(raw):
+                    return "verified"
 
         # 2) FTS5 keyword overlap: build a proper AND-of-phrases MATCH for the
         #    claim and measure the strength of the top hit. "Partial" is only
@@ -5744,7 +6197,11 @@ class HoardCore:
         markdown = ""
         parser_meta: dict[str, Any] = {"content_type": content_type}
 
-        if 'text/html' in content_type or 'text/plain' in content_type:
+        if ('text/html' in content_type
+                or 'application/xhtml+xml' in content_type
+                or 'text/plain' in content_type):
+            # xhtml+xml used to fall through to parse_binary -> binary_as_text,
+            # indexing raw markup; it is HTML and takes the cleaning pipeline.
             if text is None and binary:
                 text = binary.decode('utf-8', errors='ignore')
             if text:
@@ -5865,7 +6322,12 @@ class HoardCore:
         if len(stripped) < 1200 and any(mk in lower for mk in transport_markers):
             return "transport_error"
 
-        if matched and len(stripped) < 600:
+        # One substring hit on a page with room to breathe can be a legit
+        # short how-to that merely says "sign in" once; require a second
+        # marker — or a tiny shell (<200 chars), which is chrome even with
+        # a single marker — before refusing the page.
+        if matched and len(stripped) < 600 and (
+                len(matched) >= 2 or len(stripped) < 200):
             return f"boilerplate:{matched[0]}"
 
         # A low-quality flat list (e.g. a site's language-picker while logged
@@ -6030,7 +6492,7 @@ class HoardCore:
 
         elif action == "ingest":
             # Explicit URL list (comma/whitespace separated). Closes the
-            # discovery gap by letting callers feed curatined URLs directly.
+            # discovery gap by letting callers feed curated URLs directly.
             if not urls:
                 return [{
                     "text": "Error: 'urls' parameter required for action='ingest'.",
@@ -6104,11 +6566,15 @@ class HoardCore:
                         _progress("cached", target)
                         return
                     if meta.get('error'):
-                        reason = str(meta.get('junk_reason') or meta.get('error')
-                                     or 'fetch_error')
-                        ledger[target] = {"status": "failed", "reason": reason}
-                        if chunks:
-                            results.append(chunks[-1].to_dict())
+                        ledger[target] = {
+                            "status": "failed",
+                            "reason": str(meta.get('junk_reason')
+                                          or meta.get('error') or 'fetch_error'),
+                            # Materialized after the retry sweep so a retried
+                            # URL yields ONE error entry (or none, on success),
+                            # never a stale error dict beside real chunks.
+                            "error_chunk": chunks[-1].to_dict() if chunks else None,
+                        }
                         _progress("FAILED", target)
                         return
                     if meta.get('junk'):
@@ -6122,11 +6588,13 @@ class HoardCore:
                     _progress("ok", target, len(chunks))
                 except Exception as e:
                     logger.error(f"Failed to ingest {target}: {e}")
-                    ledger[target] = {"status": "failed", "reason": str(e)}
-                    results.append({
-                        "text": f"Error ingesting {target}: {e}",
-                        "metadata": {"source": target, "error": True}
-                    })
+                    ledger[target] = {
+                        "status": "failed", "reason": str(e),
+                        "error_chunk": {
+                            "text": f"Error ingesting {target}: {e}",
+                            "metadata": {"source": target, "error": True},
+                        },
+                    }
                     _progress("FAILED", target)
 
 
@@ -6145,6 +6613,11 @@ class HoardCore:
             for u in retry_targets:
                 if ledger[u].get("status") != "failed":
                     ledger[u]["retried"] = True
+
+        # Error chunks are appended once per failed URL, after retries settle.
+        for entry in ledger.values():
+            if entry.get("status") == "failed" and entry.get("error_chunk"):
+                results.append(entry["error_chunk"])
 
         # Per-URL yield ledger: surfaced by the CLI so silent skips (junk,
         # empty extraction, fetch errors) are visible instead of a lone
@@ -6257,6 +6730,8 @@ _EXAMPLES = (
     "  python hoardcore.py _ --action research --vault career,negros_ai_jobs  # cross-vault read\n"
     "  python hoardcore.py _ --action check   # verify vault integrity\n"
     "  python hoardcore.py _ --action stats   # sources/chunks/vectors summary\n"
+    "  python hoardcore.py _ --action export --out vault.jsonl  # JSONL vault dump\n"
+    "  python hoardcore.py _ --action search --json --query 'x' # machine-readable\n"
 )
 
 
@@ -6281,7 +6756,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--action", choices=["scrape", "crawl", "search", "ingest",
                              "discover", "research", "verify", "check", "stats",
                              "audit", "lint", "prune",
-                             "local"],
+                             "local", "export"],
         default="scrape", help="Action to run (default: scrape).",
     )
     parser.add_argument(
@@ -6321,7 +6796,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--recall", type=int, default=6,
                         help="Chunks to recall for research.")
     parser.add_argument("--out", default=None, dest="out_path",
-                        help="Artifact output path for research.")
+                        help="Artifact output path for research; with --action "
+                             "export, the JSONL file to write (default: stdout).")
+    parser.add_argument(
+        "--json", action="store_true",
+        help="Print machine-readable JSON instead of human output. Supported "
+             "by search (chunk list), stats, verify (verdict/tally), and audit "
+             "(full report). Exit codes are unchanged.",
+    )
     parser.add_argument("--force", action="store_true",
                         help="Bypass the cache and re-fetch.")
     parser.add_argument("--path", default=None, dest="local_path",
@@ -6334,7 +6816,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--urls", default=None,
                         help="Comma/space-separated URL list for scrape/crawl/ingest.")
     parser.add_argument("--limit", type=int, default=0,
-                        help="Top results to ingest for discover; max chunks for search.")
+                        help="Top results to ingest for discover; max chunks "
+                             "for search. 0 = use the configured default "
+                             "(NOT unlimited).")
     parser.add_argument("--vault", default=None, dest="vault_name",
                         help="Per-topic vault name.")
     parser.add_argument("--migrate", action="store_true",
@@ -6395,6 +6879,13 @@ async def main(argv: list[str] | None = None) -> None:
         print("  (run with --action check to inspect vault integrity; see "
               "hoardcore_data/*/vault.db for details)", file=sys.stderr)
         sys.exit(2)
+    finally:
+        # The fetcher's shared session outlives single fetches by design;
+        # close whatever is still open so a run never ends with an
+        # "Unclosed client session" warning (SystemExit passes through).
+        for fetcher in list(_LIVE_FETCHERS):
+            with suppress(Exception):
+                await fetcher.aclose()
 
 
 async def _main_impl(argv: list[str] | None = None) -> None:
@@ -6431,20 +6922,24 @@ async def _main_impl(argv: list[str] | None = None) -> None:
     # per-run override is authoritative.
     if args.parallel is not None:
         scraper.config._config.setdefault("indexer", {})["parallel"] = args.parallel
-    print(f"\n🚀 HoardCore v{__version__}: Action={action}, URL={url}, Strategy={strategy or 'default'}")
+    # Machine-readable contract: with --json (or an export streamed to stdout)
+    # the JSON is the ONLY stdout content — no banner, no vault preamble.
+    quiet = bool(getattr(args, "json", False)) or (action == "export" and not out_path)
     organized = scraper.organize_artifacts_by_day()
-    if organized:
-        print(f"   📂 Organized {len(organized)} artifact(s) into day folders")
-    vaults = getattr(scraper, 'vaults', None) or [scraper.vault]
-    vault_label = ", ".join(getattr(v, 'vault_name', None) or '(default)' for v in vaults)
-    print(f"   📁 Vault: {scraper.vault.root_dir}/vault.db"
-          + (f" + {len(vaults) - 1} read-only companion(s) [{vault_label}]"
-             if len(vaults) > 1 else "")
-          + f" | 🏛 Artifacts: {scraper.artifacts_dir}/")
-    if len(vaults) > 1:
-        print(f"   ⚠️  Cross-vault recall pools {len(vaults)} vault(s) [{vault_label}] — "
-              "only combine one coherent context; drop off-topic hits at recall "
-              "(each chunk is tagged | vault <name>).")
+    if not quiet:
+        print(f"\n🚀 HoardCore v{__version__}: Action={action}, URL={url}, Strategy={strategy or 'default'}")
+        if organized:
+            print(f"   📂 Organized {len(organized)} artifact(s) into day folders")
+        vaults = getattr(scraper, 'vaults', None) or [scraper.vault]
+        vault_label = ", ".join(getattr(v, 'vault_name', None) or '(default)' for v in vaults)
+        print(f"   📁 Vault: {scraper.vault.root_dir}/vault.db"
+              + (f" + {len(vaults) - 1} read-only companion(s) [{vault_label}]"
+                 if len(vaults) > 1 else "")
+              + f" | 🏛 Artifacts: {scraper.artifacts_dir}/")
+        if len(vaults) > 1:
+            print(f"   ⚠️  Cross-vault recall pools {len(vaults)} vault(s) [{vault_label}] — "
+                  "only combine one coherent context; drop off-topic hits at recall "
+                  "(each chunk is tagged | vault <name>).")
 
     if action == "research":
         if not query:
@@ -6490,6 +6985,21 @@ async def _main_impl(argv: list[str] | None = None) -> None:
                 print("  ⚠️  --claim-list contains no claims", file=sys.stderr)
                 sys.exit(2)
             tally: dict[str, int] = {"verified": 0, "partial": 0, "unverified": 0}
+            if args.json:
+                claims_out = []
+                for c in claims:
+                    verdict = scraper.verify_claim(c)
+                    tally[verdict] = tally.get(verdict, 0) + 1
+                    claims_out.append({"claim": c, "verdict": verdict})
+                total = len(claims)
+                print(json.dumps({
+                    "mode": "claim_list",
+                    "total": total,
+                    "accuracy": tally["verified"] / total if total else 0.0,
+                    "tally": tally,
+                    "claims": claims_out,
+                }, ensure_ascii=False))
+                sys.exit(2 if tally["unverified"] else (1 if tally["partial"] else 0))
             print(f"=== Batch verify: {len(claims)} claim(s) ===")
             for i, c in enumerate(claims, 1):
                 result = scraper.verify_claim(c)
@@ -6512,6 +7022,16 @@ async def _main_impl(argv: list[str] | None = None) -> None:
             print("  ⚠️  --claim (or --claim-file) required for --action verify", file=sys.stderr)
             sys.exit(2)
         result = scraper.verify_claim(claim)
+        if args.json:
+            hint = (scraper.verify_hint(claim, recall=args.recall or 5)
+                    if args.hint and result != "verified" else None)
+            print(json.dumps({
+                "mode": "claim",
+                "claim": claim,
+                "verdict": result,
+                "hint": hint,
+            }, ensure_ascii=False))
+            sys.exit(0 if result == "verified" else (1 if result == "partial" else 2))
         print(f"VERIFY: {result.upper()}")
         print(f"claim: {claim}")
         # On denial, coach (--hint): show the nearest vault phrase so the agent
@@ -6575,6 +7095,11 @@ async def _main_impl(argv: list[str] | None = None) -> None:
             print(f"  ⚠️  artifact not found: {args.artifact}", file=sys.stderr)
             sys.exit(2)
         audit = scraper.audit_artifact(args.artifact)
+        if args.json:
+            print(json.dumps(audit, ensure_ascii=False))
+            bad_map = bool(audit["unmapped"] or audit["not_ingested"])
+            c = audit["counts"]
+            sys.exit(2 if (c["unverified"] or bad_map) else (1 if c["partial"] else 0))
         print(f"=== Audit: {audit['path']} ===")
         print(f"Claim chain: {audit['total']} [V] tag(s) analyzed")
         for i, c in enumerate(audit["claims"], 1):
@@ -6640,6 +7165,18 @@ async def _main_impl(argv: list[str] | None = None) -> None:
         sys.exit(0 if ok else 1)
 
     if action == "stats":
+        if args.json:
+            out_stats: list[dict[str, Any]] = []
+            for vault in scraper.vaults:
+                st = vault.stats()
+                try:
+                    st["confidence_probe"] = vault.confidence_distribution()
+                except Exception as e:
+                    logger.debug(f"confidence probe skipped: {e}")
+                    st["confidence_probe"] = None
+                out_stats.append(st)
+            print(json.dumps(out_stats, ensure_ascii=False))
+            sys.exit(0)
         for vault in scraper.vaults:
             if len(scraper.vaults) > 1:
                 print(f"\n  === {vault.vault_name or '(default)'} ===")
@@ -6661,6 +7198,21 @@ async def _main_impl(argv: list[str] | None = None) -> None:
                           "(sampled, set-relative)")
             except Exception as e:
                 logger.debug(f"confidence probe skipped: {e}")
+        sys.exit(0)
+
+    if action == "export":
+        # Vault portability: stream every chunk of each selected vault as
+        # JSONL ({"text", "metadata"}). --out writes a file; otherwise the
+        # JSONL goes to stdout (multiple vaults are concatenated in order).
+        if out_path:
+            total = 0
+            with open(out_path, "w", encoding="utf-8") as fh:
+                for vault in scraper.vaults:
+                    total += scraper.export_vault_jsonl(vault, fh)
+            print(f"✅ Exported {total} chunk(s) -> {os.path.abspath(out_path)}")
+        else:
+            for vault in scraper.vaults:
+                scraper.export_vault_jsonl(vault, sys.stdout)
         sys.exit(0)
 
     try:
@@ -6686,60 +7238,89 @@ async def _main_impl(argv: list[str] | None = None) -> None:
                   "non-http URL).", file=sys.stderr)
             print("  Set network.ssrf_protection=false only for trusted internal "
                   "targets.", file=sys.stderr)
+            sys.exit(2)
         elif marker == "CF_COOKIE_EXPIRED":
             print("  ☁️  Cloudflare challenge not cleared by the current cookie "
                   "string.", file=sys.stderr)
             print("  Update auth.cookie_string in hoardcore.toml (or raise "
                   "network.timeout_seconds) and retry.", file=sys.stderr)
+            sys.exit(2)
         elif marker == "PREFLIGHT_ERROR":
             print("  ⚠️  Pre-flight probe failed (DNS / TLS / timeout) — fetch "
                   "aborted before the chain ran.", file=sys.stderr)
             print("  This is a network fault, NOT an expired cookie. Check "
                   "connectivity or raise network.timeout_seconds.", file=sys.stderr)
+            sys.exit(2)
         elif marker == "FETCH_FAILED":
             print("  ⚠️  Fetch chain exhausted (aiohttp →" +
                   (" curl_cffi →" if CURL_AVAILABLE else "") +
                   " FlareSolverr).", file=sys.stderr)
+            sys.exit(2)
         else:
             print(f"  ⚠️  {e}", file=sys.stderr)
-        sys.exit(2)
+            sys.exit(2)
 
-    print("\n" + "=" * 80)
-    print(f"✅ Done. Returned {len(result)} chunks.")
+    if args.json:
+        # Machine-readable contract for agents: one JSON document, nothing else
+        # on stdout. Ingest/discover runs include the per-URL ledger.
+        payload: dict[str, Any] = {"action": action, "chunks": result}
+        report = getattr(scraper, "last_ingest_report", None)
+        if report:
+            payload["ledger"] = report
+        print(json.dumps(payload, ensure_ascii=False))
+    else:
+        print("\n" + "=" * 80)
+        print(f"✅ Done. Returned {len(result)} chunks.")
 
-    # Preview
-    preview_chars = max(0, int(getattr(args, "preview_chars", 300) or 0))
-    for i, chunk in enumerate(result[:3]):
-        print(f"\n--- CHUNK {i+1} ---")
-        print(f"Metadata: {chunk['metadata']}")
-        if preview_chars == 0:
-            print(f"Preview: {chunk['text']}")
-        else:
-            preview = (chunk['text'][:preview_chars] + "..."
-                       if len(chunk['text']) > preview_chars else chunk['text'])
-            print(f"Preview: {preview}")
+        # Preview
+        preview_chars = max(0, int(getattr(args, "preview_chars", 300) or 0))
+        for i, chunk in enumerate(result[:3]):
+            print(f"\n--- CHUNK {i+1} ---")
+            print(f"Metadata: {chunk['metadata']}")
+            if preview_chars == 0:
+                print(f"Preview: {chunk['text']}")
+            else:
+                preview = (chunk['text'][:preview_chars] + "..."
+                           if len(chunk['text']) > preview_chars else chunk['text'])
+                print(f"Preview: {preview}")
 
-    if len(result) > 3:
-        print(f"\n... and {len(result) - 3} more chunks.")
+        if len(result) > 3:
+            print(f"\n... and {len(result) - 3} more chunks.")
 
-    # Ingest yield ledger: make skips/failures impossible to miss.
-    report = getattr(scraper, "last_ingest_report", None)
-    if report:
-        summ = report.get("summary", {})
-        ledger_urls = report.get("urls", {})
-        print("\n--- INGEST LEDGER ---")
-        print(f"  ingested {summ.get('ingested', 0)} · cached {summ.get('cached', 0)} · "
-              f"skipped_junk {summ.get('skipped_junk', 0)} · failed {summ.get('failed', 0)}")
-        for u, entry in ledger_urls.items():
-            st = entry.get("status")
-            if st == "ingested":
-                continue
-            if st == "cached":
-                # Cache hits are healthy behavior, not warnings.
-                print(f"  · cached: {u}")
-                continue
-            reason = entry.get("reason", "")
-            print(f"  ⚠ {st}: {u}" + (f" ({reason})" if reason else ""))
+        # Ingest yield ledger: make skips/failures impossible to miss.
+        report = getattr(scraper, "last_ingest_report", None)
+        if report:
+            summ = report.get("summary", {})
+            ledger_urls = report.get("urls", {})
+            print("\n--- INGEST LEDGER ---")
+            print(f"  ingested {summ.get('ingested', 0)} · cached {summ.get('cached', 0)} · "
+                  f"skipped_junk {summ.get('skipped_junk', 0)} · failed {summ.get('failed', 0)}")
+            for u, entry in ledger_urls.items():
+                st = entry.get("status")
+                if st == "ingested":
+                    continue
+                if st == "cached":
+                    # Cache hits are healthy behavior, not warnings.
+                    print(f"  · cached: {u}")
+                    continue
+                reason = entry.get("reason", "")
+                print(f"  ⚠ {st}: {u}" + (f" ({reason})" if reason else ""))
+
+    # Structured exit codes for the batch/network actions (0 = at least one
+    # source ingested or served from cache; 1 = every URL failed or nothing
+    # was retrievable; 2 = hard error, handled above). Search returns 0 even
+    # for an empty result set — "no match" is a legal answer, visible in JSON.
+    if action == "discover" and result and all(
+            c.get("metadata", {}).get("error") for c in result):
+        sys.exit(1)
+    ingest_report = getattr(scraper, "last_ingest_report", None)
+    if ingest_report and action in ("ingest", "discover", "scrape", "crawl"):
+        summ = ingest_report.get("summary", {})
+        if summ.get("failed", 0):
+            sys.exit(1)
+        if not summ.get("ingested", 0) and not summ.get("cached", 0):
+            sys.exit(1)
+    sys.exit(0)
 
 if __name__ == "__main__":
     asyncio.run(main())

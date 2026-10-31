@@ -11,7 +11,7 @@ You are an expert user of HoardCore (single-file Python module + SQLite vault + 
 
 Check these before "fixing" a surprising result:
 
-1. **`PARTIAL`/`UNVERIFIED` ≠ false** — a denial means the vault lacks that wording *verbatim*, not that the claim is untrue. Reword to the source's exact stored words and re-run; never force `[V]`, never bypass with manual SQL. Lenient (never flips): dashes, smart quotes, apostrophes, full-width, whitespace, markdown markers. Strict (denies): word identity/order/presence; `%`≠"percent". **Hard-wrapped sources (PDF/DOCX):** whitespace is folded, but a word a hyphenator split across a line stays split in storage (`percent-\nage` ≠ `percentage`) — so a PDF-sourced claim quoting the *unwrapped* word is denied, correctly, and you must quote the hyphenated stored form or reword around it. Do not "fix" this by editing the vault.
+1. **`PARTIAL`/`UNVERIFIED` ≠ false** — a denial means the vault lacks that wording *verbatim*, not that the claim is untrue. Reword to the source's exact stored words and re-run; never force `[V]`, never bypass with manual SQL. Lenient (never flips): dashes, smart quotes, apostrophes, full-width, Unicode case in any script (`É`≡`é`), whitespace, markdown markers. Strict (denies): word identity/order/presence; `%`≠"percent". **Hard-wrapped sources (PDF/DOCX):** whitespace is folded, but a word a hyphenator split across a line stays split in storage (`percent-\nage` ≠ `percentage`) — so a PDF-sourced claim quoting the *unwrapped* word is denied, correctly, and you must quote the hyphenated stored form or reword around it. Do not "fix" this by editing the vault.
 2. **Currency `$`/`₱`/`PHP`/`USD`** — bash eats `$13`; escape `\$13` or use `--claim-file`. FTS tokenizes `$13` as `13`; verbatim `[V]` still confirms literal `$13`.
 3. **Confidence is set-relative** — `high/medium/low` rank within a recall set; `low` is rare at small `--recall N`. Absence of `low` is normal.
 4. **`filter_low`** keeps one `low` chunk per distinct source at EMIT (all-low → keep all). Grounding may show < `--recall N` chunks — that's the filter, not under-fill. Side effect: a thin authoritative source can band `low` and be thinned to one chunk — use `--keep-low`, larger `--recall`, or domain-pin with `search`.
@@ -69,7 +69,7 @@ Answer saturation (2 re-queries, no new `[V]`) · distinct-source quota (≥5/8/
 `scrape`/`search`/`ingest` directly (no loop) for "scrape this site", "search the vault", "summarize this PDF". Still prefer DeepResearch for deep, open-ended questions.
 
 ## Capabilities
-Scrape (one URL: HTML/PDF/DOCX/EPUB) · Crawl (whole site via sitemap) · Search (local vault) · Discover (live DuckDuckGo + ingest top results) · Local (ingest `storage.local_dir`, no network) · Emit (`artifacts/`).
+Scrape (one URL: HTML/PDF/DOCX/EPUB) · Crawl (whole site via sitemap) · Search (local vault) · Discover (live DuckDuckGo + ingest top results) · Local (ingest `storage.local_dir`, no network) · Export (JSONL vault dump) · Emit (`artifacts/`).
 
 ## Hybrid Discovery — HoardCore + your harness's web tools
 - **Prime the hunt:** if you already hold the URLs, skip discovery and `ingest --urls "u1,u2"` (or `scrape`/`crawl` with `--urls`) — discovery is for *unknown* sources, not re-finding known ones.
@@ -92,23 +92,26 @@ Read/summarize/analyze a site, PDF, or doc · build a local knowledge base from 
 
 ## Available Actions
 
-**Common:** positional `_` for vault-only actions; `--vault NAME` scopes to `hoardcore_data/NAME/` (always a dedicated vault per topic). **Quiet the noise:** add `--log-level error|warning` to commands whose output you read — never pipe `verify`/`audit`/`check` through `tail`/`head` (the shell reports the pipe's exit and masks the gate's; read `$?` or the returncode instead). **Cross-vault read** `--vault a,b,c`: `a` is write-primary; `b,c` are read-only companions — search/verify/audit/hint/hybrid-recall fuse across all; new ingest/discover only touches `a`; a single name or none behaves exactly as before. **Pollution guard:** cross-vault pools every vault you name — only combine one coherent topic; every recalled chunk is stamped `| vault <name>`; drop off-topic hits at RECALL. `--strategy fast|balanced|aggressive` (default aggressive). CLI: `venv/bin/python hoardcore.py _ --action <action> ...`
+**Common:** positional `_` for vault-only actions; `--vault NAME` scopes to `hoardcore_data/NAME/` (always a dedicated vault per topic). **Quiet the noise:** add `--log-level error|warning` to commands whose output you read — never pipe `verify`/`audit`/`check` through `tail`/`head` (the shell reports the pipe's exit and masks the gate's; read `$?` or the returncode instead). **Machine-readable output:** add `--json` to `search`/`stats`/`verify`/`audit` when you (the agent) will parse the result — the JSON is the only stdout content, exit codes unchanged. **Cross-vault read** `--vault a,b,c`: `a` is write-primary; `b,c` are read-only companions — search/verify/audit/hint/hybrid-recall fuse across all; new ingest/discover only touches `a`; a single name or none behaves exactly as before. **Pollution guard:** cross-vault pools every vault you name — only combine one coherent topic; every recalled chunk is stamped `| vault <name>`; drop off-topic hits at RECALL. `--strategy fast|balanced|aggressive` (default aggressive). CLI: `venv/bin/python hoardcore.py _ --action <action> ...`
 
 | Action | Purpose | Key flags |
 |---|---|---|
 | `scrape` | fetch+index one URL (or `--urls` batch) | `--urls`, `--strategy`, `--force` |
 | `crawl` | ingest whole site (or `--urls` batch) | `--urls`, `--strategy`, `--force` |
-| `search` | query vault (all named vaults) | `--query`, `--mode fast\|hybrid`, `--limit`, `--vault` |
-| `verify` | machine-check a claim / claim list | `--claim`/`--claim-file`/`--claim-list`, `--hint`, `--recall` |
+| `search` | query vault (all named vaults) | `--query`, `--mode fast\|hybrid`, `--limit`, `--vault`, `--json` |
+| `verify` | machine-check a claim / claim list | `--claim`/`--claim-file`/`--claim-list`, `--hint`, `--recall`, `--json` |
 | `ingest` | index explicit URLs (primary vault only) | `--urls` |
 | `discover` | web-search + ingest (primary vault only) | `--query`, `--limit` |
 | `research` | full loop in one command | `--query`, `--discover`, `--recall`, `--out`, `--vault`, `--no-answer-first`, `--keep-low` |
 | `check` | 3-phase vault integrity | `--migrate` (rebuild at 16 KB pages) |
-| `stats` | vault summary + confidence probe | `--vault` |
-| `audit` | audit an artifact's `[V#N]` chain | `--artifact PATH` |
+| `stats` | vault summary + confidence probe | `--vault`, `--json` |
+| `audit` | audit an artifact's `[V#N]` chain | `--artifact PATH`, `--json` |
 | `lint` | static pre-audit authoring checks (no vault/network): table-cell tags, `[V]` on analysis lines, short quotes, unmapped refs, unclosed quotes | `--artifact PATH`, `--strict` |
 | `prune` | detect & retro-purge transport-error ghost sources (429/timeout stubs indexed pre-v0.16.2); dry-run default | `--apply`, `--urls a,b` (explicit targets) |
 | `local` | index local files from `storage.local_dir` | `--path`, `--list`, `--force` |
+| `export` | stream every chunk of the vault(s) as JSONL — portability/backup | `--out PATH` (default stdout), `--vault` |
+
+**Exit codes (CI-wireable):** `verify`/`audit`/`check`/`lint`/`research`/`local` keep their documented codes (0/1/2 per section). `scrape`/`crawl`/`ingest`/`discover` also gate now: exit `0` when at least one source was ingested or served from cache, `1` when every URL failed or nothing was retrievable (discover with zero results), `2` on hard errors (SSRF refusal, fetch-chain exhaustion). `search` exits `0` even on an empty result — read `chunks` from `--json` for content. Same rule as verify: never pipe through `tail`/`head`.
 
 ### verify — programmatic audit
 - **Cross-vault fold** (`--vault a,b,c`): VERIFIED if ANY named vault holds it verbatim; PARTIAL if any vault is partial; else UNVERIFIED. `--hint` shows the nearest phrase from the best-matching vault (OR-relaxed candidate rescue since v0.16.2; opt-in `verify.hint_vector` adds semantic assist).
