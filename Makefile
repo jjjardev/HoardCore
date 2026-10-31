@@ -16,7 +16,7 @@ install:
 	@echo "🔧 Installing HoardCore into a virtualenv..."
 	@test -d venv || $(PYTHON) -m venv venv
 	venv/bin/python -m pip install --upgrade pip
-	venv/bin/python -m pip install aiohttp curl_cffi trafilatura readability-lxml tomli PyMuPDF python-docx ebooklib lxml fastembed
+	venv/bin/python -m pip install aiohttp curl_cffi trafilatura readability-lxml PyMuPDF python-docx ebooklib lxml fastembed
 	@echo "🧰 Installing the test/lint toolchain (make test/lint/audit/typecheck)..."
 	venv/bin/python -m pip install pytest pytest-cov ruff bandit pyright
 	@echo "For OCR of scanned PDFs, install the optional fallback next:"
