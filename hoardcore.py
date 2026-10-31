@@ -19,7 +19,7 @@ Usage:
 """
 from __future__ import annotations
 
-__version__ = "0.16.9"
+__version__ = "0.17.0"
 
 import argparse
 import asyncio
@@ -268,6 +268,24 @@ filter_low = true        # at EMIT, drop duplicate confidence='low' chunks but
 max_per_source = 2       # cap recall chunks per source URL so one rich page
                          # can't crowd out every other source (0 = unlimited)
 
+[solve]
+passes = 2                # siege passes: each pass re-hunts only the fronts that
+                         # are still unsaturated (0/None = front hunt runs once)
+sources_per_front = 4     # DISCOVER budget per front per pass
+facets = "mechanisms and underlying science,state of the art 2026,known barriers and impossibility results,benchmarks and evaluation methods,leading critiques and failure modes"
+                         # default attack fronts when --fronts is not given:
+                         # "<task> — <facet>" becomes one front query each
+refinements = "review,critique,limitations,benchmark,replication,2026"
+                         # terms cycled into re-hunt queries for unsaturated fronts
+barrier_patterns = "no known,open problem,remains unsolved,unproven,lower bound,np-hard,impossible,has not been demonstrated,fundamental limit,major unsolved,yet to be demonstrated,no evidence that"
+                         # phrases that mark a *claimed* barrier in recalled text
+bridge_threshold = 0.55   # cosine to a front centroid for a chunk to count as
+                         # "near" that front (bridge evidence: near >= 2 fronts)
+bridge_top_k = 8          # max bridge candidates surfaced in the dossier
+saturation_min_sources = 3  # a front with fewer distinct sources is unsaturated
+answer_first = true       # skip the hunt for a front the task vault already
+                         # answers with a high-confidence hit
+
 [discovery]
 max_results = 10
 top_rank = 6                   # ingest only the top-N ranked results
@@ -359,6 +377,12 @@ class ConfigManager:
                         "near_dedup": False, "near_dedup_threshold": 3},
             "embeddings": {"enabled": True, "mode": "dense", "dense_model": "BAAI/bge-small-en-v1.5", "dim": 256, "mrl_dims": 0, "hybrid_search": True, "top_k": 40, "conf_mode": "relative", "conf_high_abs": 0.025, "conf_low_abs": 0.020, "quantize": "float32", "fts_fast_path": True, "recency_half_life_days": 0, "reranker_model": "", "batch_size": 16, "cache_dir": "", "offline": False},
             "research": {"answer_first": True, "filter_low": True, "max_per_source": 2},
+            "solve": {"passes": 2, "sources_per_front": 4,
+                      "facets": DEFAULT_SOLVE_FACETS,
+                      "refinements": DEFAULT_SOLVE_REFINEMENTS,
+                      "barrier_patterns": DEFAULT_SOLVE_BARRIERS,
+                      "bridge_threshold": 0.55, "bridge_top_k": 8,
+                      "saturation_min_sources": 3, "answer_first": True},
             "discovery": {"max_results": 10, "top_rank": 6, "max_retries": 2, "backoff_seconds": 1.5},
             "chunking": {"max_tokens": 512, "overlap_tokens": 50, "strategy": "heading"},
             "retrieval": {"chrome_min_urls": 3},
@@ -405,6 +429,19 @@ def hamming64(a: int, b: int) -> int:
     """Popcount of the XOR of two 64-bit hashes (simhash near-dup distance)."""
     return bin(a ^ b).count("1")
 
+
+# SIEGE defaults ([solve]): shared by ConfigManager._defaults and the engine's
+# fallbacks, so a config stub that omits [solve] (tests, minimal TOML) still
+# gets the full protocol instead of silently disabling it.
+DEFAULT_SOLVE_FACETS = ("mechanisms and underlying science,state of the art 2026,"
+                        "known barriers and impossibility results,"
+                        "benchmarks and evaluation methods,"
+                        "leading critiques and failure modes")
+DEFAULT_SOLVE_REFINEMENTS = "review,critique,limitations,benchmark,replication,2026"
+DEFAULT_SOLVE_BARRIERS = ("no known,open problem,remains unsolved,unproven,"
+                          "lower bound,np-hard,impossible,"
+                          "has not been demonstrated,fundamental limit,"
+                          "major unsolved,yet to be demonstrated,no evidence that")
 
 # Near-duplicate index bucketing. To avoid loading the whole chunks_simhash
 # table for every ingest (O(N) memory + candidates), each stored simhash also
@@ -5495,6 +5532,478 @@ class HoardCore:
         print(f"\n=== DONE. {len(chunks)} chunks, {len(seen)} sources -> {abs_path}")
         return abs_path
 
+    # ------------------------------------------------------------------
+    # The SIEGE Protocol (--action solve): open-ended / grand-challenge
+    # tasks. The task is decomposed into independent attack fronts, every
+    # front is hunted across siege passes, and the engine surfaces the three
+    # things a solver actually needs: cross-front TENSIONS (sources that
+    # disagree), CLAIMED BARRIERS (impossibility statements in the
+    # literature), and BRIDGE EVIDENCE (chunks whose embedding sits near two
+    # fronts at once — where cross-domain synthesis lives). Everything is
+    # emitted into an audit-clean Attack Dossier; the reasoning itself stays
+    # the calling agent's job (HoardCore is not an LLM host).
+    # ------------------------------------------------------------------
+
+    _TENSION_NUM_RE = re.compile(
+        r"(\d[\d.,]*)\s*(%|wh/kg|wh|kwh|mw|gw|tw|nm|mm|cm|km|kg|mg|ms|minutes|hours|days|years|"
+        r"usd|dollars|billion|million|trillion|°c|°f|k\b)",
+        re.IGNORECASE,
+    )
+    _TENSION_STOP = frozenset(
+        ["the", "and", "for", "that", "with", "this", "from", "are", "was", "were", "have", "has", "had", "not", "but", "all", "between", "across", "about", "into", "over", "under", "their", "there", "these", "those", "been", "being", "which", "where", "while", "than", "then", "when", "more", "most", "less", "least", "only", "same", "other", "such", "also", "very", "much", "many", "some", "each", "every", "both", "several", "using", "used", "uses", "based", "given", "shows", "show", "shown", "reported", "report", "according", "results", "result", "study", "studies", "paper", "papers", "source", "sources", "data", "value", "values", "level", "levels", "rate", "rates", "cost", "costs", "year", "years", "time", "times", "high", "low", "new", "old", "first", "second", "third", "however", "therefore", "thus", "hence", "since", "despite", "although", "though", "because", "within", "without", "during", "after", "before", "against", "among", "across"]
+    )
+
+    @staticmethod
+    def _distinctive_tokens(text: str, limit: int = 40) -> frozenset[str]:
+        """Content tokens (len>3, minus stopwords) for tension comparison."""
+        toks = [t for t in re.findall(r"[a-z][a-z0-9-]{3,}", text.lower())
+                if t not in HoardCore._TENSION_STOP]
+        return frozenset(list(dict.fromkeys(toks))[:limit])
+
+    @staticmethod
+    def _dossier_snippet(text: str, start: int = 0, width: int = 240) -> str:
+        """A verbatim, quote-safe excerpt of stored text for the dossier.
+
+        Must remain a substring of the stored chunk (verify/audit check it
+        verbatim), so only trailing-whitespace trimming and nested-quote
+        replacement are applied — an inner double quote would break the
+        audit's quote attribution."""
+        snippet = " ".join(text[start:start + width].split())
+        cut = snippet.rfind(". ")
+        if cut > 60:
+            snippet = snippet[:cut + 1]
+        return snippet.replace('"', "'").replace("\u201c", "'").replace("\u201d", "'").strip()
+
+    def _expand_fronts(self, question: str, fronts_arg: str | None) -> list[str]:
+        """Explicit `--fronts "a; b; c"` queries, or the configured facets
+        applied to the task ("<task> — <facet>") when the agent leaves the
+        decomposition to the engine."""
+        if fronts_arg:
+            fronts = [f.strip() for f in fronts_arg.split(";") if f.strip()]
+            if fronts:
+                return fronts
+        facets = [f.strip() for f in str(
+            self.config.get('solve.facets', '')
+            or DEFAULT_SOLVE_FACETS).split(',') if f.strip()]
+        return [f"{question} — {facet}" for facet in facets] or [question]
+
+    def _front_source_count(self, label: str) -> int:
+        """Distinct sources already front-stamped `label` in the primary
+        vault (the siege stock that survives across runs)."""
+        urls: set[str] = set()
+        with self.vault._db() as (_conn, cursor):
+            rows = cursor.execute(
+                "SELECT DISTINCT url, metadata_json FROM documents").fetchall()
+        for url, mj in rows:
+            try:
+                meta = json.loads(mj) if mj else {}
+            except (TypeError, ValueError):
+                continue
+            if meta.get("front") == label:
+                urls.add(url)
+        return len(urls)
+
+    def _front_satisfied(self, front_query: str) -> bool:
+        """True when recall already returns a usable hit for this front
+        (SIEGE answer-first: a stocked front is not re-hunted)."""
+        hits = self._search_across_vaults(front_query, limit=3, hybrid=True)
+        return any(c.metadata.get('confidence') in ('high', 'medium')
+                   for c in hits)
+
+    def _detect_barriers(self, chunks: list[Chunk],
+                         limit: int = 10) -> list[dict[str, Any]]:
+        """Recalled chunks containing a *claimed* barrier phrase, with the
+        surrounding context. Claims, not verdicts — the dossier quotes them
+        verbatim so the solver can weigh the authority behind each."""
+        pats = [p.strip().lower() for p in str(
+            self.config.get('solve.barrier_patterns', '')
+            or DEFAULT_SOLVE_BARRIERS).split(',') if p.strip()]
+        out: list[dict[str, Any]] = []
+        for c in chunks:
+            collapsed = " ".join(c.text.split())
+            low = collapsed.lower()
+            for p in pats:
+                idx = low.find(p)
+                if idx < 0:
+                    continue
+                out.append({
+                    "pattern": p,
+                    "snippet": self._dossier_snippet(
+                        collapsed, max(0, idx - 60), 220),
+                    "chunk": c,
+                })
+                break
+            if len(out) >= limit:
+                break
+        return out
+
+    def _detect_tensions(self, by_front: dict[str, list[Chunk]],
+                         limit: int = 12) -> list[dict[str, Any]]:
+        """Cross-front numeric tensions: chunks from different fronts that
+        share enough distinctive vocabulary AND disagree on a same-unit
+        measurement. A deterministic heuristic — the dossier labels every
+        tension 'verify before asserting', because shared tokens are not
+        proof the two numbers describe the same quantity."""
+        entries = [(f, c) for f, cs in by_front.items() for c in cs]
+        out: list[dict[str, Any]] = []
+        for i in range(len(entries)):
+            for j in range(i + 1, len(entries)):
+                (fa, ca), (fb, cb) = entries[i], entries[j]
+                if fa == fb:
+                    continue
+                shared = (self._distinctive_tokens(ca.text)
+                          & self._distinctive_tokens(cb.text))
+                if len(shared) < 3:
+                    continue
+                va = {m.group(2).lower(): m.group(1)
+                      for m in self._TENSION_NUM_RE.finditer(ca.text)}
+                vb = {m.group(2).lower(): m.group(1)
+                      for m in self._TENSION_NUM_RE.finditer(cb.text)}
+                conflicts = [(u, va[u], vb[u])
+                             for u in sorted(set(va) & set(vb)) if va[u] != vb[u]]
+                if not conflicts:
+                    continue
+                out.append({"fronts": (fa, fb),
+                            "shared": sorted(shared)[:5],
+                            "conflicts": conflicts[:3],
+                            "chunk_a": ca, "chunk_b": cb})
+                if len(out) >= limit:
+                    return out
+        return out
+
+    def _bridge_candidates(self, front_labels: list[str],
+                           threshold: float, top_k: int) -> list[dict[str, Any]]:
+        """Chunks whose embedding sits near >= 2 front centroids.
+
+        This is the computational form of cross-domain synthesis: a chunk
+        that is simultaneously close to two attack fronts carries the
+        vocabulary/structure of both, which is exactly where a non-obvious
+        bridge between literatures is most likely to hide (the peel_anchor
+        stress test found its protocol this way — by juxtaposition, not by
+        any single source stating it)."""
+        if _np is None or not self.vault.embeddings.enabled:
+            return []
+        expected = self.vault._vector_dim * self.vault.embeddings.bytes_per_dim
+        fidx = {name: i for i, name in enumerate(front_labels)}
+        with self.vault._db() as (_conn, cursor):
+            cursor.execute(
+                "SELECT v.vector, c.metadata_json, c.url, c.rowid, c.text "
+                "FROM chunk_vectors v JOIN chunks_fts c ON c.rowid = v.chunk_rowid"
+            )
+            rows = cursor.fetchall()
+        blobs: list[bytes] = []
+        labels: list[int] = []
+        meta: list[tuple[str, int, str]] = []
+        for blob, mj, url, rid, text in rows:
+            if not blob or len(blob) != expected:
+                continue
+            try:
+                f = (json.loads(mj) or {}).get("front") if mj else None
+            except (TypeError, ValueError):
+                f = None
+            if f not in fidx:
+                continue
+            blobs.append(blob)
+            labels.append(fidx[f])
+            meta.append((url, rid, text))
+        if len(set(labels)) < 2:
+            return []
+        if self.vault.embeddings.bytes_per_dim == 1:
+            arr = _np.frombuffer(b"".join(blobs), dtype=_np.int8).astype(_np.float32) / 127.0
+        else:
+            arr = _np.frombuffer(b"".join(blobs), dtype=_np.float32)
+        try:
+            mat = arr.reshape(-1, self.vault._vector_dim)
+        except ValueError:
+            return []
+        norms = _np.linalg.norm(mat, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        mat = mat / norms
+        cent = _np.zeros((len(front_labels), mat.shape[1]), dtype=_np.float32)
+        for i, lab in enumerate(labels):
+            cent[lab] += mat[i]
+        cn = _np.linalg.norm(cent, axis=1, keepdims=True)
+        cn[cn == 0] = 1.0
+        cent = cent / cn
+        sims = mat @ cent.T  # (N, fronts)
+        near_counts = (sims >= threshold).sum(axis=1)
+        out: list[dict[str, Any]] = []
+        for i in _np.argsort(-near_counts):
+            if near_counts[i] < 2 or len(out) >= top_k:
+                break
+            top2 = _np.argsort(-sims[i])[:2]
+            out.append({
+                "url": meta[i][0], "rowid": meta[i][1], "text": meta[i][2],
+                "fronts": [front_labels[j] for j in top2],
+                "sims": [round(float(sims[i][j]), 2) for j in top2],
+            })
+        return out
+
+    def _write_dossier(self, question: str, fronts: list[tuple[str, str]],
+                       by_front: dict[str, list[Chunk]],
+                       barriers: list[dict[str, Any]],
+                       tensions: list[dict[str, Any]],
+                       bridges: list[dict[str, Any]],
+                       report: dict[str, Any], out_path: str | None) -> tuple[str, dict[str, str]]:
+        """Emit the Attack Dossier (audit-clean by construction) and the
+        citation map used to number its [V#N] tags. Returns (path, sources)."""
+        if out_path:
+            # A bare filename defaults into today's day folder; a path under
+            # artifacts/ is day-foldered by resolve_artifact_out; anything
+            # else (e.g. /tmp/x.md) is honored as asked.
+            target = self.resolve_artifact_out(out_path)
+            if (os.path.basename(target) == target
+                    and not os.path.isabs(out_path)):
+                target = os.path.join(self._artifact_day_subdir(), target)
+        else:
+            day = self._artifact_day_subdir()
+            target = os.path.join(day, "attack_dossier.md")
+            i = 2
+            while os.path.exists(target):
+                target = os.path.join(day, f"attack_dossier_{i}.md")
+                i += 1
+        out_path = target
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+
+        lines: list[str] = []
+        cite: dict[str, str] = {}
+
+        def cite_of(chunk: Chunk) -> str:
+            url = chunk.metadata.get('source_url') or '?'
+            if url not in cite:
+                cite[url] = str(len(cite) + 1)
+            return f"[V#{cite[url]}]"
+
+        lines.append(f"# Attack Dossier — {question}")
+        lines.append("")
+        lines.append("> Generated by the SIEGE Protocol (`--action solve`). "
+                     "This dossier is grounding, not an answer: every quote "
+                     "below is verbatim vault text with a machine-checkable "
+                     "[V#N] chain; the solution is the solver's to write, "
+                     "under the same provenance mandate.")
+        lines.append("")
+
+        lines.append("## The task")
+        lines.append("")
+        lines.append(question)
+        lines.append("")
+
+        lines.append("## Siege budget")
+        lines.append("")
+        lines.append(f"- Passes run: {report['passes_run']} (budget {report['passes_budget']})")
+        lines.append(f"- Fronts: {len(fronts)}; sources per front per pass: "
+                     f"{report['sources_per_front']}")
+        for label, _fq in fronts:
+            st = report["fronts"][label]
+            lines.append(f"- {label} hunted on pass(es) "
+                         f"{','.join(str(p) for p in st['hunted']) or '(answer-first: skipped)'} "
+                         f"— distinct sources: {st['sources']}")
+        lines.append("")
+
+        lines.append("## Front evidence")
+        lines.append("")
+        for label, fq in fronts:
+            lines.append(f"### {label} — {fq}")
+            lines.append("")
+            chunks = by_front.get(label) or []
+            if not chunks:
+                lines.append("No evidence recalled for this front. It is an "
+                             "OPEN FRONT: the hunt found nothing the vault can "
+                             "support, so any claim here is [H] by construction.")
+                lines.append("")
+                continue
+            for c in chunks:
+                snippet = self._dossier_snippet(c.text)
+                if len(snippet) < 24:
+                    continue
+                conf = c.metadata.get('confidence', 'n/a')
+                lines.append(f'"{snippet}" {cite_of(c)} (confidence: {conf})')
+            lines.append("")
+
+        lines.append("## Claimed barriers")
+        lines.append("")
+        if barriers:
+            lines.append("Barrier statements found verbatim in the literature. "
+                         "Quote them exactly when weighing an approach; a "
+                         "barrier claim is only as strong as its source and "
+                         "its date.")
+            lines.append("")
+            for b in barriers:
+                lines.append(f'"{b["snippet"]}" {cite_of(b["chunk"])} '
+                             f'(matched barrier phrase: "{b["pattern"]}")')
+            lines.append("")
+        else:
+            lines.append("No barrier phrases surfaced in the recalled set — "
+                         "not evidence of solvability, only that this hunt "
+                         "did not surface any impossibility statement.")
+            lines.append("")
+
+        lines.append("## Cross-front tensions")
+        lines.append("")
+        if tensions:
+            lines.append("Deterministic heuristic: chunks from different "
+                         "fronts sharing distinctive vocabulary but disagreeing "
+                         "on a same-unit measurement. VERIFY before asserting "
+                         "— shared tokens do not prove the numbers describe "
+                         "the same quantity.")
+            lines.append("")
+            for t in tensions:
+                sa = self._dossier_snippet(t["chunk_a"].text, width=180)
+                sb = self._dossier_snippet(t["chunk_b"].text, width=180)
+                vals = ", ".join(f"{u}: {na} vs {nb}"
+                                 for u, na, nb in t["conflicts"])
+                lines.append(f'"{sa}" {cite_of(t["chunk_a"])} versus "{sb}" '
+                             f'{cite_of(t["chunk_b"])} — units in tension: {vals}.')
+            lines.append("")
+        else:
+            lines.append("No cross-front numeric tensions detected in the "
+                         "recalled set.")
+            lines.append("")
+
+        lines.append("## Bridge candidates")
+        lines.append("")
+        if bridges:
+            lines.append("Chunks whose embedding sits near two attack fronts "
+                         "at once — the likeliest raw material for a "
+                         "cross-domain bridge no single source states.")
+            lines.append("")
+            for b in bridges:
+                snippet = self._dossier_snippet(b["text"])
+                if len(snippet) < 24:
+                    continue
+                fs = " and ".join(b["fronts"])
+                sims = " / ".join(str(s) for s in b["sims"])
+                lines.append(f'"{snippet}" {cite_of(Chunk(text=b["text"], metadata={"source_url": b["url"]}))} '
+                             f'(near fronts {fs}, cosine {sims})')
+            lines.append("")
+        else:
+            lines.append("No bridge candidates crossed the centroid "
+                         "threshold — widen fronts or hunt more before "
+                         "concluding no bridge exists ([H], not evidence).")
+            lines.append("")
+
+        lines.append("## Solver brief")
+        lines.append("")
+        lines.append("1. Weigh the barrier claims first: an approach that "
+                     "collides with a sourced barrier must argue around the "
+                     "barrier or fail honestly.")
+        lines.append("2. Resolve every cross-front tension before using "
+                     "either number; cite the survivor verbatim.")
+        lines.append("3. Bridge candidates are leads, not results — the "
+                     "non-obvious synthesis step is yours, and it is [H] "
+                     "until it has a falsification experiment.")
+        lines.append("4. Write the attack plan into artifacts/ under the "
+                     "provenance mandate, then `verify --claim-list`, "
+                     "`lint --strict`, and `audit` it before presenting.")
+        lines.append("")
+
+        lines.append(self.citation_list(sorted(cite, key=lambda u: cite[u])))
+
+        content = "\n".join(lines) + "\n"
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return os.path.abspath(out_path), cite
+
+    async def solve_task(self, question: str, fronts_arg: str | None = None,
+                         passes: int | None = None, discover: int | None = None,
+                         recall: int | None = None, strategy: str | None = None,
+                         out_path: str | None = None, keep_low: bool = False,
+                         answer_first: bool | None = None) -> dict[str, Any]:
+        """The SIEGE Protocol: decompose, hunt every front, surface tensions /
+        barriers / bridges, emit an Attack Dossier.
+
+        Returns a report dict: {question, fronts, passes_run, passes_budget,
+        sources_per_front, dossier_path, exit (0 saturated / 1 open fronts)}.
+        """
+        if strategy is None:
+            strategy = str(self.config.get("network.default_strategy", "aggressive"))
+        if answer_first is None:
+            answer_first = bool(self.config.get('solve.answer_first', True))
+        passes_budget = int(passes if passes is not None
+                            else self.config.get('solve.passes', 2) or 1)
+        sources_per_front = int(discover if discover and discover > 0
+                                else self.config.get('solve.sources_per_front', 4) or 4)
+        recall_n = int(recall if recall and recall > 0 else 6)
+        max_per_source = int(self.config.get('research.max_per_source', 2) or 0)
+        apply_filter_low = bool(self.config.get('research.filter_low', True))
+        saturation = int(self.config.get('solve.saturation_min_sources', 3) or 3)
+
+        front_defs = [(f"F{i}", fq)
+                      for i, fq in enumerate(self._expand_fronts(question, fronts_arg), 1)]
+        labels = [label for label, _fq in front_defs]
+        report: dict[str, Any] = {
+            "question": question, "fronts": {}, "passes_run": 0,
+            "passes_budget": passes_budget,
+            "sources_per_front": sources_per_front,
+        }
+        for label, fq in front_defs:
+            report["fronts"][label] = {"query": fq, "sources": 0, "hunted": []}
+
+        refinements = [r.strip() for r in str(
+            self.config.get('solve.refinements', '')
+            or DEFAULT_SOLVE_REFINEMENTS).split(',') if r.strip()]
+
+        print(f"\n⚔️  SIEGE: {len(front_defs)} fronts x {passes_budget} pass(es) "
+              f"x {sources_per_front} sources/front", flush=True)
+        for pass_no in range(1, max(1, passes_budget) + 1):
+            report["passes_run"] = pass_no
+            for label, fq in front_defs:
+                st = report["fronts"][label]
+                st["sources"] = self._front_source_count(label)
+                if (answer_first and st["sources"] >= saturation
+                        and self._front_satisfied(fq)):
+                    print(f"  [{label}] answer-first: vault already satisfies "
+                          "this front; skipping hunt", flush=True)
+                    continue
+                hunt_q = fq
+                if pass_no > 1 and refinements:
+                    hunt_q = f"{fq} {refinements[(pass_no - 2) % len(refinements)]}"
+                print(f"  [{label}] hunting: {hunt_q!r}", flush=True)
+                await self._discover_and_ingest(
+                    hunt_q, sources_per_front, strategy, force_refresh=False,
+                    extra_meta={"front": label, "front_query": fq})
+                st["sources"] = self._front_source_count(label)
+                st["hunted"].append(pass_no)
+            unsaturated = [label for label in labels
+                           if report["fronts"][label]["sources"] < saturation]
+            if not unsaturated:
+                print("  every front is saturated; siege holds", flush=True)
+                break
+            print(f"  unsaturated fronts after pass {pass_no}: "
+                  f"{', '.join(unsaturated)}", flush=True)
+
+        # RECALL per front over every selected vault.
+        by_front: dict[str, list[Chunk]] = {}
+        for label, fq in front_defs:
+            raw = self._search_across_vaults(fq, limit=recall_n, hybrid=True,
+                                             max_per_source=max_per_source)
+            by_front[label] = (raw if (keep_low or not apply_filter_low)
+                               else self._drop_low_confidence(raw))
+
+        all_chunks = [c for cs in by_front.values() for c in cs]
+        barriers = self._detect_barriers(all_chunks)
+        tensions = self._detect_tensions(by_front)
+        bridge_k = int(self.config.get('solve.bridge_top_k', 8) or 8)
+        bridge_t = float(self.config.get('solve.bridge_threshold', 0.55) or 0.55)
+        bridges = self._bridge_candidates(labels, bridge_t, bridge_k)
+
+        print(f"\n[3/EMIT] Attack Dossier: {len(barriers)} barrier claim(s), "
+              f"{len(tensions)} tension(s), {len(bridges)} bridge candidate(s)",
+              flush=True)
+        dossier_path, _cite = self._write_dossier(
+            question, front_defs, by_front, barriers, tensions, bridges,
+            report, out_path)
+
+        report["dossier_path"] = dossier_path
+        report["barriers"] = len(barriers)
+        report["tensions"] = len(tensions)
+        report["bridges"] = len(bridges)
+        report["exit"] = 0 if all(
+            report["fronts"][label]["sources"] >= saturation for label in labels) else 1
+        print(f"\n=== SIEGE DONE. {len(front_defs)} fronts, {report['passes_run']} "
+              f"pass(es) -> {dossier_path}", flush=True)
+        return report
+
     def verify_claim(self, claim: str) -> str:
         """Programmatic adversarial-audit: confirm a claim against the vault(s).
 
@@ -6129,10 +6638,13 @@ class HoardCore:
         docx/epub can refuse heavy formats even when their libraries exist."""
         return bool(self.config.get(f'parsers.enable_{kind}', True))
 
-    async def _process_document(self, url: str, strategy: str, force_refresh: bool) -> tuple[list[Chunk], dict[str, Any]]:
+    async def _process_document(self, url: str, strategy: str, force_refresh: bool,
+                                extra_meta: dict[str, Any] | None = None) -> tuple[list[Chunk], dict[str, Any]]:
         """
         Core processing pipeline for a single URL.
-        Returns (chunks, meta_overrides).
+        Returns (chunks, meta_overrides). `extra_meta` (e.g. the SIEGE front
+        label) is merged into the document metadata so every stored chunk
+        carries it and recall can group by front.
         """
         # Ad-redirect / tracking beacons are never content; don't fetch them.
         if is_ad_tracking_url(url):
@@ -6196,6 +6708,8 @@ class HoardCore:
         # Parse document
         markdown = ""
         parser_meta: dict[str, Any] = {"content_type": content_type}
+        if extra_meta:
+            parser_meta.update(extra_meta)
 
         if ('text/html' in content_type
                 or 'application/xhtml+xml' in content_type
@@ -6242,6 +6756,11 @@ class HoardCore:
 
         # Chunk
         chunks = await self.chunker.chunk(markdown, url, parser_meta)
+        if extra_meta:
+            # Front stamps (SIEGE) ride on EVERY stored chunk, so recall and
+            # the bridge scan can group evidence by front.
+            for c in chunks:
+                c.metadata.update(extra_meta)
 
         # Save extracted text to disk
         self.vault.save_extracted_text(url, markdown, chunks, parser_meta)
@@ -6523,7 +7042,8 @@ class HoardCore:
             chunks = await self._scrape_single(url, strategy, force_refresh)
             return [c.to_dict() for c in chunks]
 
-    async def _ingest_many(self, urls: list[str], strategy: str, force_refresh: bool) -> list[dict[str, Any]]:
+    async def _ingest_many(self, urls: list[str], strategy: str, force_refresh: bool,
+                           extra_meta: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Process an explicit list of URLs with a bounded-worker pool.
 
         Progress is streamed to stderr as each URL finishes. A Cloudflare-protected
@@ -6553,7 +7073,8 @@ class HoardCore:
         async def _ingest_one(target: str) -> None:
             async with semaphore:
                 try:
-                    chunks, meta = await self._process_document(target, strategy, force_refresh)
+                    chunks, meta = await self._process_document(
+                        target, strategy, force_refresh, extra_meta=extra_meta)
                     if meta.get('cached'):
                         # Cache hit: the pipeline fetched nothing, so serve the
                         # vaulted chunks back to the caller instead of
@@ -6629,7 +7150,8 @@ class HoardCore:
         return results
 
     async def _discover_and_ingest(self, query: str, max_results: int,
-                                   strategy: str, force_refresh: bool) -> list[dict[str, Any]]:
+                                   strategy: str, force_refresh: bool,
+                                   extra_meta: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Run a live web search, then ingest the top-ranked URLs.
 
         Uses the free DuckDuckGo HTML provider through the existing
@@ -6666,7 +7188,8 @@ class HoardCore:
             }
         }]
 
-        ingested = await self._ingest_many(targets, strategy, force_refresh)
+        ingested = await self._ingest_many(targets, strategy, force_refresh,
+                                           extra_meta=extra_meta)
         return summary + ingested
 
 # =============================================================================
@@ -6754,8 +7277,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action", choices=["scrape", "crawl", "search", "ingest",
-                             "discover", "research", "verify", "check", "stats",
-                             "audit", "lint", "prune",
+                             "discover", "research", "solve", "verify", "check",
+                             "stats", "audit", "lint", "prune",
                              "local", "export"],
         default="scrape", help="Action to run (default: scrape).",
     )
@@ -6832,8 +7355,18 @@ def _build_parser() -> argparse.ArgumentParser:
              "Defaults to config indexer.parallel (true).",
     )
     parser.add_argument("--no-answer-first", action="store_true",
-                        help="With --action research: always run live DISCOVER, "
-                             "even if the existing vault has a high-confidence answer.")
+                        help="With --action research/solve: always run live "
+                             "DISCOVER, even if the existing vault already has "
+                             "a high-confidence answer.")
+    parser.add_argument("--fronts", default=None,
+                        help="With --action solve: semicolon-separated attack "
+                             "fronts (sub-questions), e.g. \"mechanisms of X; "
+                             "known barriers to X; benchmarks for X\". Omit to "
+                             "use the configured [solve] facets.")
+    parser.add_argument("--passes", type=int, default=None,
+                        help="With --action solve: siege passes (each pass "
+                             "re-hunts only unsaturated fronts). Default: "
+                             "solve.passes (2).")
     parser.add_argument("--log-level", choices=["debug", "info", "warning",
                                                 "error"], default=None,
                         help="Override the log verbosity for this run "
@@ -6966,6 +7499,26 @@ async def _main_impl(argv: list[str] | None = None) -> None:
                   "a day folder. Use a path inside the artifacts dir to keep it "
                   "stable.", file=sys.stderr)
         sys.exit(0 if written else 1)
+
+    if action == "solve":
+        if not query:
+            print("  ⚠️  --query required for --action solve", file=sys.stderr)
+            sys.exit(2)
+        try:
+            report = await scraper.solve_task(
+                query, fronts_arg=args.fronts, passes=args.passes,
+                discover=discover, recall=recall, strategy=strategy,
+                out_path=out_path, keep_low=args.keep_low,
+                answer_first=not args.no_answer_first)
+        finally:
+            fetcher = getattr(scraper, "fetcher", None)
+            if fetcher is not None:
+                await fetcher.close_solver_session()
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False))
+        # Exit: 0 every front saturated; 1 dossier written but open fronts
+        # remain (honest partial success); 2 = hard errors handled above.
+        sys.exit(report["exit"])
 
     if action == "verify":
         claim = args.claim

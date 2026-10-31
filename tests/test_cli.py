@@ -406,7 +406,7 @@ def test_ingest_ledger_reports_skips(tmp_path, capsys, monkeypatch):
     hc_inst.vault = hc.VaultManager(cfg, None, event_bus=hc_inst.bus)
     hc_inst.vaults = [hc_inst.vault]
 
-    async def fake_process(url, strategy, force_refresh):
+    async def fake_process(url, strategy, force_refresh, extra_meta=None):
         if "junk" in url:
             return ([], {"junk": True, "junk_reason": "transport_error"})
         return ([hc.Chunk(text="real content here", metadata={
@@ -439,7 +439,7 @@ def test_ingest_retry_sweep_recovers_transient_failures(tmp_path, monkeypatch):
 
     attempts: dict[str, int] = {"flaky": 0}
 
-    async def fake_process(url, strategy, force_refresh):
+    async def fake_process(url, strategy, force_refresh, extra_meta=None):
         if "flaky" in url:
             attempts["flaky"] += 1
             if attempts["flaky"] == 1:

@@ -98,7 +98,7 @@ def test_fetch_scrape_honors_urls_list(tmp_path, monkeypatch):
     scraper = hc.HoardCore()
     ingested, single_scraped = [], []
 
-    async def fake_ingest_many(urls, strategy, force_refresh):
+    async def fake_ingest_many(urls, strategy, force_refresh, extra_meta=None):
         ingested.extend(urls)
         return [{"text": "ok", "metadata": {"source": u}} for u in urls]
 
@@ -125,7 +125,7 @@ def test_fetch_crawl_honors_urls_list(tmp_path, monkeypatch):
     scraper = hc.HoardCore()
     ingested, crawled = [], []
 
-    async def fake_ingest_many(urls, strategy, force_refresh):
+    async def fake_ingest_many(urls, strategy, force_refresh, extra_meta=None):
         ingested.extend(urls)
         return [{"text": "ok", "metadata": {"source": u}} for u in urls]
 
@@ -243,7 +243,7 @@ def test_discover_and_ingest_honors_limit(tmp_path, monkeypatch):
         captured["pool"] = max_results
         return results
 
-    async def fake_ingest_many(urls, strategy, force_refresh):
+    async def fake_ingest_many(urls, strategy, force_refresh, extra_meta=None):
         captured["targets"] = urls
         return []
 
@@ -270,7 +270,7 @@ def test_crawl_serves_vaulted_chunks_on_cache_hit(tmp_path, monkeypatch):
 
     scraper.crawler.discover_urls = fake_discover
 
-    async def fake_process(url, strategy, force_refresh):
+    async def fake_process(url, strategy, force_refresh, extra_meta=None):
         return [], {"cached": True, "url": url}
 
     def fake_get_chunks(url):

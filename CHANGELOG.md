@@ -3,6 +3,38 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## HoardCore v0.17.0
+
+### Added
+- **`--action solve` — the SIEGE Protocol for open-ended / grand-challenge
+  tasks.** A plain research pass retrieves; a siege decomposes, hunts on
+  every front, and maps the battlefield:
+  - **Decompose** the task into attack fronts — explicit via
+    `--fronts "f1; f2; f3"` or generated from `solve.facets` (mechanisms,
+    state of the art, known barriers, benchmarks, critiques).
+  - **Hunt per pass** (`solve.passes`, `solve.sources_per_front`): every
+    front is discovered+ingested front-stamped; unsaturated fronts re-hunt
+    with `solve.refinements` terms; fronts the task vault already answers
+    are skipped answer-first (`solve.answer_first`).
+  - **Map the battlefield**, deterministically: **claimed barriers**
+    (`solve.barrier_patterns` — impossibility statements quoted verbatim
+    from the literature), **cross-front tensions** (chunks from different
+    fronts sharing distinctive vocabulary while disagreeing on a same-unit
+    measurement — a labeled heuristic), and **bridge candidates** (chunks
+    whose embedding sits near two front centroids at once — the
+    computational form of cross-domain synthesis).
+  - **Emit an Attack Dossier** into `artifacts/`: verbatim front evidence
+    with `[V#N]` tags, barriers, tensions, bridges, the honest siege budget,
+    and a solver brief. The dossier's evidence chain passes `lint`/`audit`
+    by construction; the solution itself stays the calling agent's job.
+- **`--fronts` / `--passes` flags**, the `[solve]` config section, `--json`
+  siege reports, and exit codes (`0` all fronts saturated, `1` open fronts
+  remain, `2` hard error). Documented in README and skill.md (the SIEGE
+  Protocol section), enforced by the skill-contract suite.
+- **`extra_meta` threading** through `_discover_and_ingest` → `_ingest_many`
+  → `_process_document`, so front labels ride on every stored chunk and
+  recall can group by front.
+
 ## HoardCore v0.16.9
 
 Second audit line, rebased: a four-auditor fix round (correctness ×2,

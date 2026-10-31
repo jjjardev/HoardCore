@@ -114,7 +114,7 @@ def test_ingest_many_serves_cached_chunks(tmp_path, monkeypatch):
         [hc.Chunk(text="vaulted content", metadata={"source": "https://c.test/1"})],
         {})
 
-    async def fake_process(url, strategy, force_refresh):
+    async def fake_process(url, strategy, force_refresh, extra_meta=None):
         return [], {"cached": True}
 
     scraper._process_document = fake_process

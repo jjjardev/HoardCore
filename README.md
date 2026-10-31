@@ -4,7 +4,7 @@ Research toolkit for AI agents — give your agent a memory it can prove.
 
 Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
 
-![Version](https://img.shields.io/badge/version-0.16.9-blue)
+![Version](https://img.shields.io/badge/version-0.17.0-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -525,6 +525,25 @@ source URL, hybrid score, and confidence band, plus a distinct-sources summary
 and a **Source Links / Citations** block — ready to be injected verbatim as
 grounding context for an LLM.
 
+### The SIEGE Protocol (grand-challenge tasks)
+
+`solve` is HoardCore's answer to open-ended tasks — "Humanity's Last Exam"-type questions, "how would you attack <disease>", "design a system that <ambitious thing>". A plain research pass retrieves; a siege **decomposes, hunts on every front, and maps the battlefield**:
+
+1. **Decompose.** The task becomes 3–6 independent attack fronts — your own (`--fronts "mechanisms of X; known barriers to X; benchmarks for X"`) or generated from `solve.facets` (mechanisms, state of the art, barriers, benchmarks, critiques).
+2. **Lay siege.** Each pass hunts every front (`sources_per_front` each; unsaturated fronts re-hunt with `solve.refinements` terms) into the task vault, front-stamped.
+3. **Map the battlefield.** The engine then surfaces, deterministically: **claimed barriers** (impossibility statements in the literature, quoted verbatim), **cross-front tensions** (sources from different fronts that share distinctive vocabulary but disagree on a same-unit measurement — a heuristic, labeled as one), and **bridge candidates** (chunks whose embedding sits near two front centroids at once — the computational form of the cross-domain synthesis the peel_anchor stress test demonstrated).
+4. **Emit the Attack Dossier.** An audit-clean markdown dossier in `artifacts/`: verbatim front evidence with `[V#N]` tags, barriers, tensions, bridges, the honest siege budget (which fronts saturated, which ran answer-first), and a solver brief. The dossier's own evidence chain passes `audit` by construction.
+5. **The agent assaults.** The dossier is grounding, not an answer: the calling agent reasons over it, writes the attack plan under the provenance mandate, and gates it with `verify --claim-list` → `lint --strict` → `audit`.
+
+```bash
+python hoardcore.py _ --action solve \
+  --query "How would you actually build a cure for pancreatic cancer by 2035?" \
+  --fronts "oncology mechanisms; current standard of care and outcomes; known barriers and failure modes; emerging trials and benchmarks; delivery and manufacturing constraints" \
+  --passes 3 --vault cancer2035 --recall 8
+```
+
+`--json` prints the machine-readable siege report (fronts, saturation, counts, dossier path). Exit codes: `0` every front saturated · `1` dossier written but open fronts remain · `2` hard error. HoardCore still hosts no LLM — the SIEGE Protocol manufactures the evidence battlefield; the breakthrough is your agent's to earn.
+
 ### Provenance Discipline & Epistemic Hygiene
 
 Every claim in a research artifact is tagged by the agent:
@@ -629,6 +648,7 @@ hoardcore [URL] [options]
 | `ingest` | Index an explicit URL list given as a comma/space separated `--urls` string. |
 | `discover` | Web-search `--query`, ingest the top `--limit` results (default `discovery.top_rank`). |
 | `research` | Run `discover -> ingest -> recall -> emit` (memory-first: live DISCOVER is skipped when the vault already has a high-confidence answer, unless `--no-answer-first`); writes to `--out` or a day-sorted `artifacts/YYYY-MM-DD/grounding/grounding_context.md` (the grounding subdir is configurable via `storage.grounding_subdir`). |
+| `solve` | The SIEGE Protocol for open-ended/grand-challenge tasks: decompose into fronts (`--fronts` or `solve.facets`), hunt every front per pass, detect claimed barriers / cross-front tensions / bridge candidates, and emit an audit-clean Attack Dossier. |
 | `verify` | Programmatic provenance audit: confirm `--claim` against vault text (exact phrasing, typography-blind; `--hint` prints the nearest stored phrase to reword toward (OR-relaxed candidate rescue; opt-in `verify.hint_vector` semantic assist). |
 | `audit` | Audit an artifact's `[V#N]` evidence chain (verbatim + source-link mapping + ingested). |
 | `lint` | Static pre-audit authoring checks on an artifact (no vault/network): `[V#N]` inside table rows, tags sharing a line with earlier `[E]`/`[H]`, sub-24-char attributed quotes, unmapped `[#N]` refs, unclosed quotes. `--strict` escalates warnings to failures. |
@@ -652,6 +672,8 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 | `--urls U1,U2,U3` | Explicit URL list for `scrape`/`crawl`/`ingest` (overrides the URL positional). |
 | `--discover N` | Sources to discover first in `research` (default 5; `0` = recall-only, no web). |
 | `--recall N` | Chunks to retrieve in `research` (default 6). |
+| `--fronts F1; F2; ...` | With `solve`: semicolon-separated attack fronts (sub-questions). Omit to use `solve.facets`. |
+| `--passes N` | With `solve`: siege passes (each re-hunts only unsaturated fronts). Default `solve.passes` (2). |
 | `--no-answer-first` | With `research`: always run live DISCOVER, even if the vault already has a high-confidence answer (default: `research.answer_first = true` skips it). |
 | `--keep-low` | With `research`: retain low-confidence hits in the grounding context (skip `filter_low`) — for exhaustive/deep hunts that want the full evidence tail. |
 | `--out PATH` | Output file for `research` (default: `artifacts/YYYY-MM-DD/grounding/grounding_context.md`, suffixed `_N` when today's already exists); with `export`, the JSONL file to write (default stdout). |
@@ -678,6 +700,7 @@ Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `
 | Actions | Codes |
 |---|---|
 | `verify`, `audit`, `check`, `lint`, `research`, `local` | unchanged: `0` pass/verified, `1` partial/incomplete, `2` unverified/error (see their sections) |
+| `solve` | `0` every front saturated · `1` dossier written but open fronts remain · `2` hard error |
 | `scrape`, `crawl`, `ingest`, `discover` | `0` — at least one source ingested or served from cache; `1` — every URL failed, nothing was retrievable, or (discover) no results; `2` — hard error (SSRF refusal, fetch-chain exhaustion, usage) |
 
 Search returns `0` even for an empty result set — "no match" is a legal answer, visible as `chunks: []` under `--json`. As with `verify`, never pipe these commands through `tail`/`head`: the shell reports the pipe's exit status, not the gate's.
@@ -738,6 +761,7 @@ Created automatically on first run. Key sections:
 | `[indexer]` | `enable_fts`, `search_limit`, `parallel` (threaded ingest, default on for batches of 8+ chunks), `near_dedup` (simhash dup filter, default off), `near_dedup_threshold` |
 | `[embeddings]` | `enabled`, `mode` (`sparse`/`dense`), `dense_model`, `dim`, `mrl_dims` (Matryoshka truncation, 0 = full), `cache_dir` (ONNX model on disk; empty = `~/.cache/hoardcore/models`, must be persistent), `offline` (`true` = load from cache only, never hit HuggingFace), `hybrid_search`, `top_k`, `quantize`, `fts_fast_path`, `recency_half_life_days`, `conf_mode` (`relative` default / `absolute` legacy), `conf_high_abs`, `conf_low_abs`, `reranker_model` (optional cross-encoder re-ranker) |
 | `[discovery]` | `max_results`, `top_rank`, `max_retries`, `backoff_seconds` |
+| `[solve]` | `passes`, `sources_per_front`, `facets` (default fronts), `refinements` (re-hunt terms), `barrier_patterns`, `bridge_threshold`, `bridge_top_k`, `saturation_min_sources`, `answer_first` |
 | `[research]` | `answer_first` (memory-first routing, default true), `filter_low` (at EMIT drops duplicate `low` hits but keeps one `low` chunk per distinct source; set `false` to retain all low hits — honored since v0.15.1), `max_per_source` (cap recall chunks per source URL so one rich page can't crowd out others; 0 = unlimited, default 2) |
 | `[chunking]` | `max_tokens`, `overlap_tokens` (sliding window, CJK-aware), `strategy` (`heading` / `paragraph` / `plugin.<name>`) |
 | `[retrieval]` | `chrome_min_urls` (recall-time demotion of site chrome replicated across ≥ N distinct URLs; 0 = off) |

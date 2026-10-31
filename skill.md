@@ -68,6 +68,48 @@ Answer saturation (2 re-queries, no new `[V]`) · distinct-source quota (≥5/8/
 ### Standard Mode (mechanical ops)
 `scrape`/`search`/`ingest` directly (no loop) for "scrape this site", "search the vault", "summarize this PDF". Still prefer DeepResearch for deep, open-ended questions.
 
+## The SIEGE Protocol (open-ended / grand-challenge tasks)
+
+When the user poses an open-ended question or grand-challenge task — a
+"Humanity's Last Exam"-type question, "how would you attack <disease>",
+"design a system that <ambitious thing>" — do NOT answer from memory and do
+NOT run a plain research pass. Open the SIEGE Protocol (`--action solve`):
+
+1. **DECOMPOSE** the task into 3–6 independent attack fronts whose answers
+   compose: mechanisms and underlying science, state of the art, known
+   barriers/impossibility results, benchmarks, leading critiques. Pass your
+   own with `--fronts "f1; f2; f3"` or let `solve.facets` generate them.
+2. **LAY SIEGE**:
+   `venv/bin/python hoardcore.py _ --action solve --query "<task>" --vault <task-vault> --passes 2`
+   Every front is hunted per pass (unsaturated fronts re-hunt with
+   `solve.refinements` terms); then the engine emits an **Attack Dossier**:
+   verbatim front evidence `[V#N]`, **claimed barriers** (impossibility
+   statements, quoted verbatim), **cross-front tensions** (sources
+   disagreeing on a same-unit number — a deterministic heuristic, verify
+   before asserting), and **bridge candidates** (chunks whose embedding sits
+   near two fronts at once — where cross-domain synthesis lives). `--json`
+   prints the machine-readable siege report.
+3. **REASON from the dossier.** It is grounding, not an answer: a barrier
+   claim is only as strong as its source and date; resolve tensions before
+   using either number; bridge candidates are leads, not results.
+4. **ASSAULT**: write the attack plan/solution into `artifacts/` under the
+   provenance mandate — factual claims `[V#N]` to dossier sources, novel
+   steps `[H]` each with a falsification experiment.
+5. **AUDIT**: `verify --claim-list` every verbatim quote, then `lint
+   --strict`, then `audit` the artifact before presenting. A grand-challenge
+   answer with an unverified evidence chain is worthless.
+
+Depth presets: `solve` = 2 passes × 4 sources/front · `solve deep` = 3 × 6 ·
+`solve exhaustive` = 5 × 10 (pass `--passes N --discover N` explicitly).
+"go deeper" → another solve pass at a higher budget; "enough" → finalize.
+
+Config (`[solve]`): `passes`, `sources_per_front`, `facets`, `refinements`,
+`barrier_patterns`, `bridge_threshold`, `bridge_top_k`,
+`saturation_min_sources`, `answer_first`.
+
+Exit codes: `0` every front saturated · `1` dossier written but open fronts
+remain (label them in the synthesis) · `2` hard error.
+
 ## Capabilities
 Scrape (one URL: HTML/PDF/DOCX/EPUB) · Crawl (whole site via sitemap) · Search (local vault) · Discover (live DuckDuckGo + ingest top results) · Local (ingest `storage.local_dir`, no network) · Export (JSONL vault dump) · Emit (`artifacts/`).
 
@@ -103,6 +145,7 @@ Read/summarize/analyze a site, PDF, or doc · build a local knowledge base from 
 | `ingest` | index explicit URLs (primary vault only) | `--urls` |
 | `discover` | web-search + ingest (primary vault only) | `--query`, `--limit` |
 | `research` | full loop in one command | `--query`, `--discover`, `--recall`, `--out`, `--vault`, `--no-answer-first`, `--keep-low` |
+| `solve` | SIEGE Protocol: open-ended/grand-challenge task → decomposed fronts hunted per pass; emits an Attack Dossier with verbatim front evidence, claimed barriers, cross-front tensions, and bridge candidates | `--query`, `--fronts`, `--passes`, `--discover` (sources/front), `--recall`, `--vault`, `--out`, `--keep-low`, `--no-answer-first`, `--json` |
 | `check` | 3-phase vault integrity | `--migrate` (rebuild at 16 KB pages) |
 | `stats` | vault summary + confidence probe | `--vault`, `--json` |
 | `audit` | audit an artifact's `[V#N]` chain | `--artifact PATH`, `--json` |
