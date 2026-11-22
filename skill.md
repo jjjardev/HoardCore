@@ -106,7 +106,8 @@ Depth presets: `solve` = 2 passes × 4 sources/front · `solve deep` = 3 × 6 ·
 Config (`[solve]`): `passes`, `sources_per_front`, `facets`, `refinements`,
 `barrier_patterns`, `bridge_threshold`, `bridge_top_k`,
 `tension_min_shared`, `topic_anchor_min`, `front_overlap_min`,
-`relevance_fallback`, `topic_anchors`, `saturation_min_sources`, `answer_first`.
+`entity_anchor_min`, `required_anchors`, `relevance_fallback`, `topic_anchors`,
+`saturation_min_sources`, `answer_first`.
 
 Exit codes: `0` every front saturated · `1` dossier written but open fronts
 remain (label them in the synthesis) · `2` hard error.

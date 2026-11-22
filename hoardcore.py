@@ -20,7 +20,7 @@ Usage (short form; legacy `URL --action ...` and `_ --action ...` still work):
 """
 from __future__ import annotations
 
-__version__ = "0.17.6"
+__version__ = "0.17.7"
 
 import argparse
 import asyncio
@@ -286,6 +286,8 @@ bridge_threshold = 0.55   # cosine to a front centroid for a chunk to count as
 bridge_top_k = 8          # max bridge candidates surfaced in the dossier
 saturation_min_sources = 3  # a front with fewer distinct sources is unsaturated
 topic_anchor_min = 1      # recalled chunks must mention >= N main-question anchors
+entity_anchor_min = 1     # ... and >= N place/entity anchors (auto-extracted from capitals)
+required_anchors = ""     # optional comma list: "bacolod,deped" overrides entity extraction
 front_overlap_min = 1     # ... and share >= N distinctive front-query tokens
 relevance_fallback = true # keep the single best chunk when a front would go empty
 topic_anchors = ""        # optional comma list: "dengue,bacolod,aedes" overrides extraction
@@ -390,6 +392,7 @@ class ConfigManager:
                       "bridge_threshold": 0.55, "bridge_top_k": 8,
                       "tension_min_shared": 5,
                       "topic_anchor_min": 1, "front_overlap_min": 1,
+                      "entity_anchor_min": 1, "required_anchors": "",
                       "relevance_fallback": True, "topic_anchors": "",
                       "saturation_min_sources": 3, "answer_first": True},
             "discovery": {"max_results": 10, "top_rank": 6, "max_retries": 2, "backoff_seconds": 1.5},
@@ -5604,6 +5607,28 @@ class HoardCore:
         toks = re.findall(r"[a-z][a-z0-9]{3,}", question.lower().replace("-", " "))
         return {t for t in toks if t not in self._TOPIC_STOP}
 
+    _ENTITY_STOP = frozenset(
+        ["how", "what", "why", "when", "where", "who", "which", "can",
+         "could", "would", "should", "will", "the", "city", "grade", "school",
+         "public", "elementary", "first", "best", "most", "new", "every",
+         "there", "this", "that", "into", "from", "with", "about"]
+    )
+
+    def _entity_anchors(self, question: str) -> set[str]:
+        """Place/entity words that must be present, not just topic words.
+
+        A generic literacy paper can match `reading`, `school` and `grade`
+        while having nothing to do with Bacolod. Capitalized words in the
+        question are the cheapest reliable entity signal; `solve.required_anchors`
+        overrides it when the agent knows additional local terms (e.g. DepEd).
+        """
+        configured = str(self.config.get('solve.required_anchors', '') or '').strip()
+        if configured:
+            toks = re.findall(r"[A-Za-z][A-Za-z0-9'-]{2,}", configured)
+            return {t.lower() for t in toks if t.lower() not in self._ENTITY_STOP}
+        found = re.findall(r"\b([A-Z][a-z][A-Za-z'-]{1,})\b", question)
+        return {t.lower() for t in found if t.lower() not in self._ENTITY_STOP}
+
     @staticmethod
     def _has_anchor(text: str, anchors: set[str]) -> bool:
         low = " ".join(text.lower().split())
@@ -5618,7 +5643,9 @@ class HoardCore:
         return anchor_hits * 3 + overlap
 
     def _filter_front_relevant(self, chunks: list[Chunk], front_query: str,
-                               anchors: set[str]) -> tuple[list[Chunk], dict[str, Any]]:
+                               anchors: set[str],
+                               entity_anchors: set[str] | None = None
+                               ) -> tuple[list[Chunk], dict[str, Any]]:
         """Drop recalled chunks that match front vocabulary but not the topic.
 
         Returns (kept, stats). Chunks stay in the vault; only the dossier is
@@ -5628,31 +5655,38 @@ class HoardCore:
         """
         stats: dict[str, Any] = {
             "raw": len(chunks), "kept": 0, "dropped": 0, "fallback": False,
-            "open": False,
+            "open": False, "entities_required": bool(entity_anchors),
         }
         if not anchors or not chunks:
             stats["kept"] = len(chunks)
             return list(chunks), stats
         min_anchors = max(1, int(self.config.get('solve.topic_anchor_min', 1) or 1))
+        min_entities = max(0, int(self.config.get('solve.entity_anchor_min', 1) or 1))
         min_overlap = max(0, int(self.config.get('solve.front_overlap_min', 1) or 1))
+        entities = entity_anchors or set()
         front_tokens = (self._distinctive_tokens(front_query)
-                        | frozenset(anchors))
+                        | frozenset(anchors) | frozenset(entities))
         kept: list[Chunk] = []
         for c in chunks:
             text = " ".join(c.text.lower().split())
             anchor_hits = sum(1 for a in anchors
                               if re.search(r"\b" + re.escape(a) + r"\b", text))
+            entity_hits = sum(1 for e in entities
+                              if re.search(r"\b" + re.escape(e) + r"\b", text))
             overlap = len(front_tokens & self._distinctive_tokens(c.text))
-            if anchor_hits >= min_anchors and overlap >= min_overlap:
+            if (anchor_hits >= min_anchors and overlap >= min_overlap
+                    and (not entities or entity_hits >= min_entities)):
                 kept.append(c)
         if not kept and bool(self.config.get('solve.relevance_fallback', True)):
             # A weak match must still touch the topic. Never resurrect a
             # high-overlap chunk from another disease just because it shares
             # generic words like "vaccine" or "clinical trial".
             anchored = [c for c in chunks if self._has_anchor(c.text, anchors)]
+            if entities:
+                anchored = [c for c in anchored if self._has_anchor(c.text, entities)]
             if anchored:
                 best = max(anchored, key=lambda c: self._relevance_score(
-                    c, anchors, front_tokens))
+                    c, anchors | entities, front_tokens))
                 kept = [best]
                 stats["fallback"] = True
         if not kept:
@@ -5996,6 +6030,7 @@ class HoardCore:
             lines.append("## Relevance gate")
             lines.append("")
             lines.append(f"Topic anchors: {', '.join(report.get('topic_anchors') or []) or '(none)'}. "
+                         f"Required entity anchors: {', '.join(report.get('entity_anchors') or []) or '(none)'}. "
                          "Recall is filtered before evidence is quoted; dropped chunks stay in the vault.")
             lines.append("")
             for label, _fq in fronts:
@@ -6144,11 +6179,13 @@ class HoardCore:
                       for i, fq in enumerate(self._expand_fronts(question, fronts_arg), 1)]
         labels = [label for label, _fq in front_defs]
         anchors = self._topic_anchors(question)
+        entities = self._entity_anchors(question)
         report: dict[str, Any] = {
             "question": question, "fronts": {}, "passes_run": 0,
             "passes_budget": passes_budget,
             "sources_per_front": sources_per_front,
             "relevance": {}, "topic_anchors": sorted(anchors),
+            "entity_anchors": sorted(entities),
         }
         for label, fq in front_defs:
             report["fronts"][label] = {"query": fq, "sources": 0, "hunted": []}
@@ -6193,7 +6230,8 @@ class HoardCore:
                                              max_per_source=max_per_source)
             raw = (raw if (keep_low or not apply_filter_low)
                    else self._drop_low_confidence(raw))
-            kept, rel_stats = self._filter_front_relevant(raw, fq, anchors)
+            kept, rel_stats = self._filter_front_relevant(raw, fq, anchors,
+                                                           entities)
             by_front[label] = kept
             report["relevance"][label] = rel_stats
 
@@ -6203,7 +6241,8 @@ class HoardCore:
         bridge_k = int(self.config.get('solve.bridge_top_k', 8) or 8)
         bridge_t = float(self.config.get('solve.bridge_threshold', 0.55) or 0.55)
         bridges = [b for b in self._bridge_candidates(labels, bridge_t, bridge_k)
-                   if self._has_anchor(b["text"], anchors)]
+                   if self._has_anchor(b["text"], anchors)
+                   and (not entities or self._has_anchor(b["text"], entities))]
 
         print(f"\n[3/EMIT] Attack Dossier: {len(barriers)} barrier claim(s), "
               f"{len(tensions)} tension(s), {len(bridges)} bridge candidate(s)",

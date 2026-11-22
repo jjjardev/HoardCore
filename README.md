@@ -2,7 +2,7 @@
 
 Adaptive research engine for AI agents - a memory it can prove, tools you can swap, and a loop that adapts.
 
-![Version](https://img.shields.io/badge/version-0.17.6-blue)
+![Version](https://img.shields.io/badge/version-0.17.7-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -160,7 +160,7 @@ Empty queries return `[]`; punctuation-only queries still run the vector leg in 
 
 `research` runs the full loop in one command: optional answer-first vault recall, DISCOVER, INGEST, RECALL, EMIT. It writes a grounding-context file (source URLs, scores, confidence bands, distinct-source summary, Source Links block) into `artifacts/YYYY-MM-DD/grounding/`. `--no-answer-first` forces a live hunt; `--discover 0` makes it recall-only.
 
-`solve` runs the SIEGE Protocol for grand-challenge questions: decompose into fronts, hunt each front per pass (skipping satisfied fronts, refining unsaturated ones), then emit an Attack Dossier with up to three deduplicated complete-sentence quotes per chunk, claimed barriers, cross-front tensions, bridge candidates, and an honest siege budget. A topic-relevance gate filters recall before quoting: a chunk must contain a main-question anchor and share front vocabulary; off-topic chunks stay in the vault but are dropped from the dossier, and a front with no on-topic evidence is marked OPEN. The dossier passes `audit` by construction. It is grounding, not an answer; the agent writes the final argument.
+`solve` runs the SIEGE Protocol for grand-challenge questions: decompose into fronts, hunt each front per pass (skipping satisfied fronts, refining unsaturated ones), then emit an Attack Dossier with up to three deduplicated complete-sentence quotes per chunk, claimed barriers, cross-front tensions, bridge candidates, and an honest siege budget. A topic-and-entity gate filters recall before quoting: a chunk must contain a main-question anchor, a place/entity anchor, and front vocabulary; off-topic chunks stay in the vault but are dropped from the dossier, and a front with no on-topic evidence is marked OPEN. The dossier passes `audit` by construction. It is grounding, not an answer; the agent writes the final argument.
 
 ### Provenance and artifacts
 
@@ -289,7 +289,7 @@ Generated on first run. Key sections:
 | `[indexer]` | `enable_fts`, `search_limit`, `parallel`, `near_dedup`, `near_dedup_threshold` |
 | `[embeddings]` | `enabled`, `mode`, `dense_model`, `dim`, `cache_dir`, `offline`, `hybrid_search`, `top_k`, `quantize`, `fts_fast_path`, `conf_mode`, `conf_high_abs`, `conf_low_abs`, `reranker_model` |
 | `[discovery]` | `max_results`, `top_rank`, `max_retries`, `backoff_seconds` |
-| `[solve]` | `passes`, `sources_per_front`, `facets`, `refinements`, `barrier_patterns`, `bridge_threshold`, `bridge_top_k`, `tension_min_shared`, `topic_anchor_min`, `front_overlap_min`, `relevance_fallback`, `topic_anchors`, `saturation_min_sources`, `answer_first` |
+| `[solve]` | `passes`, `sources_per_front`, `facets`, `refinements`, `barrier_patterns`, `bridge_threshold`, `bridge_top_k`, `tension_min_shared`, `topic_anchor_min`, `front_overlap_min`, `entity_anchor_min`, `required_anchors`, `relevance_fallback`, `topic_anchors`, `saturation_min_sources`, `answer_first` |
 | `[research]` | `answer_first`, `filter_low`, `max_per_source` |
 | `[chunking]` | `max_tokens`, `overlap_tokens`, `strategy` |
 | `[retrieval]` | `chrome_min_urls` |

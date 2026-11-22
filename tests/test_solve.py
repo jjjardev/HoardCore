@@ -342,7 +342,8 @@ def test_relevance_filter_drops_offtopic_front_vocabulary(tmp_path, monkeypatch)
     assert on in kept
     assert off not in kept
     assert stats == {"raw": 2, "kept": 1, "dropped": 1,
-                     "fallback": False, "open": False}
+                     "fallback": False, "open": False,
+                     "entities_required": False}
 
 
 def test_relevance_fallback_keeps_best_weak_match(tmp_path, monkeypatch):
@@ -363,3 +364,33 @@ def test_relevance_never_resurrects_offtopic_chunk(tmp_path, monkeypatch):
     assert kept == []
     assert stats["open"] is True
     assert stats["fallback"] is False
+
+
+# --- Entity-specific relevance ----------------------------------------------
+
+def test_entity_anchors_extract_place_not_generic_words(tmp_path, monkeypatch):
+    s = _scraper(tmp_path, monkeypatch)
+    ents = s._entity_anchors("How could Bacolod City eliminate Grade 3 failure in the Philippines?")
+    assert {"bacolod", "philippines"} <= ents
+    assert "city" not in ents and "grade" not in ents and "how" not in ents
+
+
+def test_entity_gate_drops_generic_topic_only_evidence(tmp_path, monkeypatch):
+    s = _scraper(tmp_path, monkeypatch)
+    local = hc.Chunk(text="Bacolod reading intervention improved Grade 3 fluency.",
+                     metadata={})
+    generic = hc.Chunk(text="Reading instruction in Grade 3 schools improves fluency.",
+                       metadata={})
+    kept, stats = s._filter_front_relevant(
+        [local, generic], "early literacy reading fluency",
+        {"reading", "fluency"}, {"bacolod"})
+    assert local in kept
+    assert generic not in kept
+    assert stats["entities_required"] is True
+    assert stats["kept"] == 1 and stats["dropped"] == 1
+
+
+def test_entity_gate_override_from_config(tmp_path, monkeypatch):
+    s = _scraper(tmp_path, monkeypatch, {"solve.required_anchors": "DepEd,Philippines"})
+    ents = s._entity_anchors("Any question at all")
+    assert ents == {"deped", "philippines"}
