@@ -20,7 +20,7 @@ Usage (short form; legacy `URL --action ...` and `_ --action ...` still work):
 """
 from __future__ import annotations
 
-__version__ = "0.17.5"
+__version__ = "0.17.6"
 
 import argparse
 import asyncio
@@ -285,6 +285,10 @@ bridge_threshold = 0.55   # cosine to a front centroid for a chunk to count as
                          # "near" that front (bridge evidence: near >= 2 fronts)
 bridge_top_k = 8          # max bridge candidates surfaced in the dossier
 saturation_min_sources = 3  # a front with fewer distinct sources is unsaturated
+topic_anchor_min = 1      # recalled chunks must mention >= N main-question anchors
+front_overlap_min = 1     # ... and share >= N distinctive front-query tokens
+relevance_fallback = true # keep the single best chunk when a front would go empty
+topic_anchors = ""        # optional comma list: "dengue,bacolod,aedes" overrides extraction
 answer_first = true       # skip the hunt for a front the task vault already
                          # answers with a high-confidence hit
 
@@ -385,6 +389,8 @@ class ConfigManager:
                       "barrier_patterns": DEFAULT_SOLVE_BARRIERS,
                       "bridge_threshold": 0.55, "bridge_top_k": 8,
                       "tension_min_shared": 5,
+                      "topic_anchor_min": 1, "front_overlap_min": 1,
+                      "relevance_fallback": True, "topic_anchors": "",
                       "saturation_min_sources": 3, "answer_first": True},
             "discovery": {"max_results": 10, "top_rank": 6, "max_retries": 2, "backoff_seconds": 1.5},
             "chunking": {"max_tokens": 512, "overlap_tokens": 50, "strategy": "heading"},
@@ -5571,6 +5577,90 @@ class HoardCore:
                 if t not in HoardCore._TENSION_STOP]
         return frozenset(list(dict.fromkeys(toks))[:limit])
 
+    _TOPIC_STOP = frozenset(
+        ["the", "and", "for", "that", "with", "this", "from", "are", "was",
+         "were", "have", "has", "had", "not", "but", "all", "any", "can",
+         "could", "how", "what", "why", "would", "should", "will", "into",
+         "about", "over", "under", "their", "there", "these", "those", "been",
+         "being", "which", "where", "while", "than", "then", "when", "more",
+         "most", "less", "least", "only", "same", "other", "such", "also",
+         "very", "much", "many", "some", "each", "every", "both", "several",
+         "using", "used", "uses", "based", "given", "shows", "show", "shown",
+         "city", "first", "make", "most", "way", "ways", "possible", "real",
+         "become", "free", "across", "toward", "within", "without", "every"]
+    )
+
+    def _topic_anchors(self, question: str) -> set[str]:
+        """Topic words that every recalled chunk must touch.
+
+        Explicit --fronts can be generic ("vaccines, trials"), so the main
+        question is the only reliable topic contract. `solve.topic_anchors`
+        overrides extraction when the agent knows synonyms the text lacks.
+        """
+        configured = str(self.config.get('solve.topic_anchors', '') or '').strip()
+        if configured:
+            toks = re.findall(r"[a-z][a-z0-9]{2,}", configured.lower())
+            return {t for t in toks if t not in self._TOPIC_STOP}
+        toks = re.findall(r"[a-z][a-z0-9]{3,}", question.lower().replace("-", " "))
+        return {t for t in toks if t not in self._TOPIC_STOP}
+
+    @staticmethod
+    def _has_anchor(text: str, anchors: set[str]) -> bool:
+        low = " ".join(text.lower().split())
+        return any(re.search(r"\b" + re.escape(a) + r"\b", low) for a in anchors)
+
+    def _relevance_score(self, chunk: Chunk, anchors: set[str],
+                         front_tokens: frozenset[str]) -> int:
+        text = " ".join(chunk.text.lower().split())
+        anchor_hits = sum(1 for a in anchors
+                          if re.search(r"\b" + re.escape(a) + r"\b", text))
+        overlap = len(front_tokens & self._distinctive_tokens(chunk.text))
+        return anchor_hits * 3 + overlap
+
+    def _filter_front_relevant(self, chunks: list[Chunk], front_query: str,
+                               anchors: set[str]) -> tuple[list[Chunk], dict[str, Any]]:
+        """Drop recalled chunks that match front vocabulary but not the topic.
+
+        Returns (kept, stats). Chunks stay in the vault; only the dossier is
+        filtered. If a front would go empty, the single best-scoring chunk is
+        kept with `fallback=True` so the front stays honestly OPEN rather than
+        silently disappearing.
+        """
+        stats: dict[str, Any] = {
+            "raw": len(chunks), "kept": 0, "dropped": 0, "fallback": False,
+            "open": False,
+        }
+        if not anchors or not chunks:
+            stats["kept"] = len(chunks)
+            return list(chunks), stats
+        min_anchors = max(1, int(self.config.get('solve.topic_anchor_min', 1) or 1))
+        min_overlap = max(0, int(self.config.get('solve.front_overlap_min', 1) or 1))
+        front_tokens = (self._distinctive_tokens(front_query)
+                        | frozenset(anchors))
+        kept: list[Chunk] = []
+        for c in chunks:
+            text = " ".join(c.text.lower().split())
+            anchor_hits = sum(1 for a in anchors
+                              if re.search(r"\b" + re.escape(a) + r"\b", text))
+            overlap = len(front_tokens & self._distinctive_tokens(c.text))
+            if anchor_hits >= min_anchors and overlap >= min_overlap:
+                kept.append(c)
+        if not kept and bool(self.config.get('solve.relevance_fallback', True)):
+            # A weak match must still touch the topic. Never resurrect a
+            # high-overlap chunk from another disease just because it shares
+            # generic words like "vaccine" or "clinical trial".
+            anchored = [c for c in chunks if self._has_anchor(c.text, anchors)]
+            if anchored:
+                best = max(anchored, key=lambda c: self._relevance_score(
+                    c, anchors, front_tokens))
+                kept = [best]
+                stats["fallback"] = True
+        if not kept:
+            stats["open"] = True
+        stats["kept"] = len(kept)
+        stats["dropped"] = len(chunks) - len(kept)
+        return kept, stats
+
     @staticmethod
     def _dossier_snippet(text: str, start: int = 0, width: int = 240) -> str:
         """A verbatim, quote-safe excerpt of stored text for the dossier.
@@ -5901,6 +5991,20 @@ class HoardCore:
                          f"— distinct sources: {st['sources']}")
         lines.append("")
 
+        rel = report.get("relevance") or {}
+        if rel:
+            lines.append("## Relevance gate")
+            lines.append("")
+            lines.append(f"Topic anchors: {', '.join(report.get('topic_anchors') or []) or '(none)'}. "
+                         "Recall is filtered before evidence is quoted; dropped chunks stay in the vault.")
+            lines.append("")
+            for label, _fq in fronts:
+                st = rel.get(label) or {}
+                lines.append(f"- {label}: {st.get('raw', 0)} recalled / "
+                             f"{st.get('kept', 0)} kept / {st.get('dropped', 0)} dropped"
+                             + (" (FALLBACK: kept best weak match)" if st.get('fallback') else ""))
+            lines.append("")
+
         lines.append("## Front evidence")
         lines.append("")
         for label, fq in fronts:
@@ -6039,10 +6143,12 @@ class HoardCore:
         front_defs = [(f"F{i}", fq)
                       for i, fq in enumerate(self._expand_fronts(question, fronts_arg), 1)]
         labels = [label for label, _fq in front_defs]
+        anchors = self._topic_anchors(question)
         report: dict[str, Any] = {
             "question": question, "fronts": {}, "passes_run": 0,
             "passes_budget": passes_budget,
             "sources_per_front": sources_per_front,
+            "relevance": {}, "topic_anchors": sorted(anchors),
         }
         for label, fq in front_defs:
             report["fronts"][label] = {"query": fq, "sources": 0, "hunted": []}
@@ -6085,15 +6191,19 @@ class HoardCore:
         for label, fq in front_defs:
             raw = self._search_across_vaults(fq, limit=recall_n, hybrid=True,
                                              max_per_source=max_per_source)
-            by_front[label] = (raw if (keep_low or not apply_filter_low)
-                               else self._drop_low_confidence(raw))
+            raw = (raw if (keep_low or not apply_filter_low)
+                   else self._drop_low_confidence(raw))
+            kept, rel_stats = self._filter_front_relevant(raw, fq, anchors)
+            by_front[label] = kept
+            report["relevance"][label] = rel_stats
 
         all_chunks = [c for cs in by_front.values() for c in cs]
         barriers = self._detect_barriers(all_chunks)
         tensions = self._detect_tensions(by_front)
         bridge_k = int(self.config.get('solve.bridge_top_k', 8) or 8)
         bridge_t = float(self.config.get('solve.bridge_threshold', 0.55) or 0.55)
-        bridges = self._bridge_candidates(labels, bridge_t, bridge_k)
+        bridges = [b for b in self._bridge_candidates(labels, bridge_t, bridge_k)
+                   if self._has_anchor(b["text"], anchors)]
 
         print(f"\n[3/EMIT] Attack Dossier: {len(barriers)} barrier claim(s), "
               f"{len(tensions)} tension(s), {len(bridges)} bridge candidate(s)",

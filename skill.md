@@ -105,7 +105,8 @@ Depth presets: `solve` = 2 passes × 4 sources/front · `solve deep` = 3 × 6 ·
 
 Config (`[solve]`): `passes`, `sources_per_front`, `facets`, `refinements`,
 `barrier_patterns`, `bridge_threshold`, `bridge_top_k`,
-`saturation_min_sources`, `answer_first`.
+`tension_min_shared`, `topic_anchor_min`, `front_overlap_min`,
+`relevance_fallback`, `topic_anchors`, `saturation_min_sources`, `answer_first`.
 
 Exit codes: `0` every front saturated · `1` dossier written but open fronts
 remain (label them in the synthesis) · `2` hard error.
@@ -145,7 +146,10 @@ Read/summarize/analyze a site, PDF, or doc · build a local knowledge base from 
 | `ingest` | index explicit URLs (primary vault only) | `--urls` |
 | `discover` | web-search + ingest (primary vault only) | `--query`, `--limit` |
 | `research` | full loop in one command | `--query`, `--discover`, `--recall`, `--out`, `--vault`, `--no-answer-first`, `--keep-low` |
-| `solve` | SIEGE Protocol: open-ended/grand-challenge task → decomposed fronts hunted per pass; emits an Attack Dossier with up to three deduplicated, complete-sentence verbatim quotes per chunk, claimed barriers (`solve.barrier_patterns` is tunable), cross-front tensions (`solve.tension_min_shared`, default 5), and bridge candidates | `--query`, `--fronts`, `--passes`, `--discover` (sources/front), `--recall`, `--vault`, `--out`, `--keep-low`, `--no-answer-first`, `--json` |
+| `solve` | SIEGE Protocol: open-ended/grand-challenge task → decomposed fronts hunted per pass; emits an Attack Dossier with up to three deduplicated, complete-sentence verbatim quotes per chunk, claimed barriers (`solve.barrier_patterns` is tunable), cross-front tensions (`solve.tension_min_shared`, default 5), and bridge candidates.
+Recall is filtered by a topic-relevance gate (`solve.topic_anchor_min`, `solve.front_overlap_min`,
+`solve.topic_anchors`); off-topic chunks stay in the vault but are not quoted, and a front
+with no on-topic evidence is reported as OPEN. | `--query`, `--fronts`, `--passes`, `--discover` (sources/front), `--recall`, `--vault`, `--out`, `--keep-low`, `--no-answer-first`, `--json` |
 | `check` | 3-phase vault integrity | `--migrate` (rebuild at 16 KB pages) |
 | `stats` | vault summary + confidence probe | `--vault`, `--json` |
 | `audit` | audit an artifact's `[V#N]` chain: verbatim, mapped, ingested, and in the cited source | `--artifact PATH`, `--json` |

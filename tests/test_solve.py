@@ -319,3 +319,47 @@ def test_dossier_keeps_multiple_quotes_from_one_informative_chunk(tmp_path, monk
                    if line.startswith('"') and "[V#" in line]
     assert len(quote_lines) >= 3
     assert cite == {"https://energy.test/case": 1}
+
+
+# --- Topical relevance gate --------------------------------------------------
+
+def test_topic_anchors_ignore_generic_question_words(tmp_path, monkeypatch):
+    s = _scraper(tmp_path, monkeypatch)
+    anchors = s._topic_anchors("How could Bacolod become dengue-free by 2035?")
+    assert {"bacolod", "dengue"} <= anchors
+    assert "how" not in anchors and "could" not in anchors
+
+
+def test_relevance_filter_drops_offtopic_front_vocabulary(tmp_path, monkeypatch):
+    s = _scraper(tmp_path, monkeypatch)
+    anchors = {"dengue", "bacolod"}
+    on = hc.Chunk(text=("Dengue cases in Bacolod require clinical triage and "
+                        "case management during the outbreak."), metadata={})
+    off = hc.Chunk(text=("CCHF is endemic in Africa; a clinical trial of ribavirin "
+                         "evaluates vaccine and case fatality outcomes."), metadata={})
+    kept, stats = s._filter_front_relevant(
+        [on, off], "clinical management vaccines case fatality", anchors)
+    assert on in kept
+    assert off not in kept
+    assert stats == {"raw": 2, "kept": 1, "dropped": 1,
+                     "fallback": False, "open": False}
+
+
+def test_relevance_fallback_keeps_best_weak_match(tmp_path, monkeypatch):
+    s = _scraper(tmp_path, monkeypatch, {"solve.front_overlap_min": 3})
+    weak = hc.Chunk(text="A dengue report was published.", metadata={})
+    kept, stats = s._filter_front_relevant(
+        [weak], "clinical vaccines case fatality", {"dengue"})
+    assert kept == [weak]
+    assert stats["fallback"] is True
+    assert stats["kept"] == 1
+
+
+def test_relevance_never_resurrects_offtopic_chunk(tmp_path, monkeypatch):
+    s = _scraper(tmp_path, monkeypatch)
+    off = hc.Chunk(text="CCHF vaccine trial case fatality outcomes.", metadata={})
+    kept, stats = s._filter_front_relevant(
+        [off], "clinical vaccines case fatality", {"dengue"})
+    assert kept == []
+    assert stats["open"] is True
+    assert stats["fallback"] is False
