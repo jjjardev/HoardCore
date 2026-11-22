@@ -193,50 +193,56 @@ Then either drive the raw CLI yourself (see [Quick Start (raw CLI)](#quick-start
 
 ```bash
 # Scrape a single URL and index it
-python hoardcore.py https://en.wikipedia.org/wiki/Solar_power --action scrape
+python hoardcore.py scrape https://en.wikipedia.org/wiki/Solar_power
 
 # Search the vault (full-text or hybrid) for previously ingested content
-python hoardcore.py _ --action search --query "renewable energy negros"
+python hoardcore.py search "renewable energy negros"
 
 # Ingest an explicit list of URLs
-python hoardcore.py _ --action ingest --urls "u1,https://a.test/1,https://b.test/2"
+python hoardcore.py ingest "https://a.test/1,https://b.test/2"
 
 # Discover the web for a topic and ingest the top results
-python hoardcore.py _ --action discover --query "negros renewable energy" --limit 5
+python hoardcore.py discover "negros renewable energy" --limit 5
 
-# Run the full agentic research workflow -> appends grounding context to artifacts/
-python hoardcore.py _ --action research --query "how does bokashi compost" --discover 5 --recall 6
+# Run the full agentic research workflow -> artifact under artifacts/
+python hoardcore.py research "how does bokashi compost" --discover 5 --recall 6
 
 # Programmatically verify a claim against the vault (0=verified, 1=partial, 2=unverified)
-python hoardcore.py _ --action verify --claim "the Epoch doubling time is 6 months" --recall 5
+python hoardcore.py verify "the Epoch doubling time is 6 months" --recall 5
 
 # Audit an artifact's [V#N] evidence chain (verbatim verify + source-link mapping + ingested)
-python hoardcore.py _ --action audit --artifact artifacts/2026-08-18/synthesis_x.md
+python hoardcore.py audit artifacts/2026-08-18/synthesis_x.md
 
 # Pre-audit authoring lint (no vault/network; --strict escalates warnings)
-python hoardcore.py _ --action lint --artifact artifacts/2026-08-18/synthesis_x.md
+python hoardcore.py lint artifacts/2026-08-18/synthesis_x.md --strict
 
 # Detect & purge transport-error ghost sources (dry-run by default)
-python hoardcore.py _ --action prune            # scan all vaults in scope
-python hoardcore.py _ --action prune --apply    # actually delete rows
+python hoardcore.py prune                 # scan all vaults in scope
+python hoardcore.py prune --apply         # actually delete rows
 
 # Run a three-phase vault integrity check (0=pass, 1=fail)
-python hoardcore.py _ --action check
+python hoardcore.py check
 echo "exit code: $?"
 
 # Rebuild an existing vault at the new 16 KB page size (legacy 4 KB vaults keep their old size otherwise)
-python hoardcore.py _ --action check --migrate
+python hoardcore.py check --migrate
 
 # Search ergonomics: force FTS-only (fast) or force hybrid vector+RRF (hybrid)
-python hoardcore.py _ --action search --query "solar farm" --mode fast
-python hoardcore.py _ --action search --query "solar farm" --mode hybrid
+python hoardcore.py search "solar farm" --mode fast
+python hoardcore.py search "solar farm" --mode hybrid
 
 # Same, but write the grounding context to a specific file
-python hoardcore.py _ --action research --query "negros economy" --out artifacts/report.md
+python hoardcore.py research "negros economy" --out artifacts/report.md
 
 # Crawl an entire site via its sitemap
-python hoardcore.py https://docs.python.org --action crawl --strategy aggressive
+python hoardcore.py crawl https://docs.python.org --strategy aggressive
+
+# Machine-readable output for scripts
+python hoardcore.py stats --json
+python hoardcore.py search "solar farm" --json
 ```
+
+Every command above also works in the legacy form (`python hoardcore.py _ --action search --query ...`), which agents and older scripts use. `python hoardcore.py` with no arguments prints a short quick start instead of trying to scrape a placeholder.
 
 The vault persists between runs. Later searches are instant and require no network.
 

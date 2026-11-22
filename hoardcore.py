@@ -7,15 +7,16 @@ web-discovery action feeds the crawler from a live search query, and an
 entry-point plugin system lets third-party parsers/fetchers/providers/chunkers
 drop in without editing the module.
 
-Usage:
-    python hoardcore.py <URL> --action scrape|crawl|search --query "text"
-    python hoardcore.py _ --action ingest --urls "u1,u2,u3"
-    python hoardcore.py _ --action discover --query "negros occidental renewable energy" --limit 5
-    python hoardcore.py _ --action search --query "solar" --mode fast   # FTS-only
-    python hoardcore.py _ --action search --query "solar" --mode hybrid # force vector+RRF
-    python hoardcore.py _ --action verify --claim "..." --hint          # nearest-vault coaching
-    python hoardcore.py _ --action check --migrate  # rebuild vault at 16 KB pages
-    python hoardcore.py _ --action stats            # vault summary
+Usage (short form; legacy `URL --action ...` and `_ --action ...` still work):
+    python hoardcore.py                                  # quick start
+    python hoardcore.py scrape <URL>                     # fetch one page
+    python hoardcore.py ingest "u1,u2,u3"                # explicit URL list
+    python hoardcore.py discover "negros renewable energy" --limit 5
+    python hoardcore.py search "solar" --mode fast       # FTS-only
+    python hoardcore.py search "solar" --mode hybrid     # force vector+RRF
+    python hoardcore.py verify "..." --hint              # nearest-vault coaching
+    python hoardcore.py check --migrate                  # rebuild at 16 KB pages
+    python hoardcore.py stats                            # vault summary
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ __version__ = "0.17.1"
 
 import argparse
 import asyncio
+import difflib
 import hashlib
 import importlib.metadata
 import inspect
@@ -7243,7 +7245,14 @@ def organize_artifacts_by_day() -> list[str]:
     return HoardCore().organize_artifacts_by_day()
 
 _EXAMPLES = (
-    "\nExamples:\n"
+    "\nCommon commands (new short form; the legacy form below still works):\n"
+    "  hoardcore stats                      # vault summary\n"
+    "  hoardcore search 'NLP datasets'      # search the vault\n"
+    "  hoardcore research 'how does X work' # deep-research loop\n"
+    "  hoardcore verify 'a verbatim claim'  # fact-check against the vault\n"
+    "  hoardcore check                      # vault integrity\n"
+    "  hoardcore scrape https://example.com # fetch one page\n"
+    "\nExamples (legacy form, still fully supported):\n"
     "  python hoardcore.py https://example.com --action scrape\n"
     "  python hoardcore.py https://docs.python.org --action crawl --strategy aggressive\n"
     "  python hoardcore.py https://arxiv.org/abs/2110.12345.pdf --action scrape\n"
@@ -7264,6 +7273,92 @@ _EXAMPLES = (
     "  python hoardcore.py _ --action export --out vault.jsonl  # JSONL vault dump\n"
     "  python hoardcore.py _ --action search --json --query 'x' # machine-readable\n"
 )
+
+
+_QUICKSTART = (
+    "HoardCore - a local research vault for AI agents.\n"
+    "\n"
+    "Start here:\n"
+    "  hoardcore stats                      # is the vault alive?\n"
+    "  hoardcore scrape https://example.com # fetch one page into the vault\n"
+    "  hoardcore search 'your query'        # find what you stored\n"
+    "  hoardcore research 'your question'   # full discover -> ingest -> verify loop\n"
+    "  hoardcore verify 'a claim'           # fact-check a sentence against the vault\n"
+    "\n"
+    "Run 'hoardcore --help' for all actions and flags.\n"
+)
+
+_ACTIONS = ("scrape", "crawl", "ingest", "search", "discover", "research",
+            "solve", "verify", "check", "stats", "audit", "lint", "prune",
+            "local", "export")
+
+# First positional token of each action in the short form maps to the legacy
+# flag that carries its value. Actions with no value need no mapping.
+_ACTION_VALUE_FLAG = {
+    "ingest": "--urls", "search": "--query", "discover": "--query",
+    "research": "--query", "solve": "--query", "verify": "--claim",
+    "audit": "--artifact", "lint": "--artifact", "local": "--path",
+    "export": "--out",
+}
+_ACTION_NO_VALUE = {"check", "stats", "prune"}
+
+_ACTION_EXAMPLE = {
+    "scrape": "hoardcore scrape https://example.com",
+    "crawl": "hoardcore crawl https://example.com",
+    "ingest": "hoardcore ingest 'https://a.com,https://b.com'",
+    "search": "hoardcore search 'your query'",
+    "discover": "hoardcore discover 'your query'",
+    "research": "hoardcore research 'your question'",
+    "solve": "hoardcore solve 'your hard question'",
+    "verify": "hoardcore verify 'a verbatim claim'",
+    "audit": "hoardcore audit artifacts/report.md",
+    "lint": "hoardcore lint artifacts/report.md",
+    "local": "hoardcore local",
+    "export": "hoardcore export backup.jsonl",
+}
+
+
+def _usage_error(message: str, example: str) -> None:
+    """One consistent, actionable usage error (exit 2, no traceback)."""
+    print(f"  ⚠️  {message}", file=sys.stderr)
+    print(f"  Try: {example}", file=sys.stderr)
+    sys.exit(2)
+
+
+def _normalize_argv(argv: list[str]) -> list[str]:
+    """Translate friendly action-first commands into the legacy parser shape.
+
+    `hoardcore stats` -> `hoardcore _ --action stats`; `hoardcore search q`
+    -> `hoardcore _ --action search --query q`. Legacy invocations (URL first,
+    `_` placeholder, or `--action` anywhere) pass through untouched, so every
+    existing script and the agent contract in skill.md keep working.
+    """
+    if not argv:
+        return []
+    first = argv[0]
+    # URLs, domains, the '_' placeholder and flags are all legacy forms.
+    if first == "_" or first.startswith("-") or "/" in first or "." in first:
+        return list(argv)
+    action = first.lower()
+    if action not in _ACTIONS:
+        guess = difflib.get_close_matches(action, _ACTIONS, n=1, cutoff=0.6)
+        hint = f" (did you mean '{guess[0]}'?)" if guess else ""
+        _usage_error(f"unknown command {first!r}{hint}", "hoardcore --help")
+    rest = list(argv[1:])
+    if action in ("scrape", "crawl"):
+        # An optional URL may follow the command; flags may come first.
+        if rest and not rest[0].startswith("-"):
+            return [rest.pop(0), "--action", action, *rest]
+        return ["_", "--action", action, *rest]
+    if action in _ACTION_NO_VALUE:
+        return ["_", "--action", action, *rest]
+    value: list[str] = []
+    while rest and not rest[0].startswith("-"):
+        value.append(rest.pop(0))
+    out = ["_", "--action", action]
+    if value:
+        out += [_ACTION_VALUE_FLAG[action], " ".join(value)]
+    return out + rest
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -7440,7 +7535,31 @@ async def main(argv: list[str] | None = None) -> None:
 
 
 async def _main_impl(argv: list[str] | None = None) -> None:
+    argv = _normalize_argv(list(argv) if argv is not None else list(sys.argv[1:]))
+    if not argv:
+        print(_QUICKSTART)
+        sys.exit(0)
     args = _build_parser().parse_args(argv)
+    # Required inputs are checked at the CLI boundary: the engine's own
+    # error chunks are meant for library callers, not for humans at a shell.
+    if args.action in ("search", "discover", "research", "solve") and not args.query:
+        _usage_error(f"--query required for --action {args.action}",
+                     _ACTION_EXAMPLE[args.action])
+    if args.action in ("scrape", "crawl") and args.url == "_" and not args.urls:
+        _usage_error(f"a URL or --urls required for --action {args.action}",
+                     _ACTION_EXAMPLE[args.action])
+    if args.action == "ingest":
+        if not args.urls and args.url != "_":
+            args.urls = args.url  # `hoardcore ingest URL` in legacy form
+        if not args.urls:
+            _usage_error("--urls (or a URL) required for --action ingest",
+                         _ACTION_EXAMPLE["ingest"])
+    if args.action in ("verify", "lint", "audit") and not (
+            getattr(args, "claim", None) or getattr(args, "claim_file", None)
+            or getattr(args, "claim_list", None) or getattr(args, "artifact", None)):
+        need = "artifact" if args.action in ("lint", "audit") else "claim"
+        _usage_error(f"--{need} required for --action {args.action}",
+                     _ACTION_EXAMPLE[args.action])
     if args.log_level:
         level = getattr(logging, args.log_level.upper(), logging.INFO)
         logging.getLogger().setLevel(level)
@@ -7688,7 +7807,8 @@ async def _main_impl(argv: list[str] | None = None) -> None:
               f"(verified {c['verified']}, partial {c['partial']}, "
               f"unverified {c['unverified']}) ===")
         if audit["unmapped"]:
-            print(f"  ✗ Source-link mapping MISSING for [V#{'],[V#'.join(audit['unmapped'])}]")
+            tags = ", ".join(f"[V#{n}]" for n in audit["unmapped"])
+            print(f"  ✗ Source-link mapping MISSING for {tags}")
         else:
             print("  ✓ every [V#N] maps to a Source Link")
         if audit["not_ingested"]:

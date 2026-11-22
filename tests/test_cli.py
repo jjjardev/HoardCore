@@ -2,6 +2,7 @@
 assert parsing + exit-code behavior, catching flag-typo regressions like the
 old silent `--recal` ignore (D3)."""
 
+import json
 import os
 import subprocess
 import sys
@@ -325,6 +326,8 @@ def test_cli_audit_unmapped_source_exits_2(tmp_path, make_chunk):
                "--artifact", str(unmapped), cwd=cwd)
     assert res.returncode == 2
     assert "Source-link mapping MISSING" in res.stdout
+    assert "[V#9]" in res.stdout          # readable tag in the message
+    assert "'],[V#" not in res.stdout     # no mangled separator
 
 
 def _local_toml(tmp_path, extra: str = ""):
@@ -463,3 +466,60 @@ def test_ingest_retry_sweep_recovers_transient_failures(tmp_path, monkeypatch):
     assert attempts["flaky"] == 2
     # Junk verdict must not be retried.
     assert ledger["https://bad.test/junk"]["status"] == "skipped_junk"
+
+
+# --- Friendly action-first CLI (no '_' placeholder) -------------------------
+
+def test_cli_no_args_prints_quickstart():
+    res = _run()
+    assert res.returncode == 0
+    assert "quick start" in res.stdout.lower() or "start here" in res.stdout.lower()
+    assert "hoardcore stats" in res.stdout
+
+
+def test_cli_unknown_command_suggests_close_action():
+    res = _run("serach")
+    assert res.returncode == 2
+    assert "did you mean 'search'" in (res.stdout + res.stderr)
+
+
+def test_cli_short_form_stats_matches_legacy(tmp_path):
+    cwd = _isolated_toml(tmp_path)
+    short = _run("stats", "--json", cwd=cwd)
+    legacy = _run("_", "--action", "stats", "--json", cwd=cwd)
+    assert short.returncode == 0, short.stderr
+    # db_bytes changes as SQLite allocates pages between runs; compare the
+    # semantic stats only (the point is that both forms dispatch identically).
+    def stable(out):
+        return [{k: v for k, v in s.items() if k != "db_bytes"}
+                for s in json.loads(out)]
+    assert stable(short.stdout) == stable(legacy.stdout)
+
+
+def test_cli_short_form_search_passes_query(tmp_path):
+    cwd = _isolated_toml(tmp_path)
+    res = _run("search", "coffee trade", "--json", cwd=cwd)
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout)["action"] == "search"
+
+
+def test_cli_search_without_query_is_usage_error(tmp_path):
+    cwd = _isolated_toml(tmp_path)
+    res = _run("search", cwd=cwd)
+    assert res.returncode == 2
+    assert "--query" in (res.stdout + res.stderr)
+
+
+def test_cli_ingest_without_urls_is_usage_error(tmp_path):
+    cwd = _isolated_toml(tmp_path)
+    res = _run("ingest", cwd=cwd)
+    assert res.returncode == 2
+    assert "--urls" in (res.stdout + res.stderr)
+
+
+def test_cli_short_form_verify_passes_claim(tmp_path):
+    cwd = _isolated_toml(tmp_path)
+    res = _run("verify", "absolutely absent gibberish xyzzy", "--json", cwd=cwd)
+    assert res.returncode == 2  # UNVERIFIED is a real verdict, not a usage error
+    payload = json.loads(res.stdout)
+    assert payload["claim"] == "absolutely absent gibberish xyzzy"
