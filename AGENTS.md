@@ -15,7 +15,8 @@ Cloudflare-aware fetching).
 discover, research, or artifact write — you MUST read `skill.md` in full.** It is
 the agent operating manual: how to invoke the `hoardcore` CLI, which action maps
 to which user request, the `[V]/[E]/[H]` provenance discipline, the adversarial
-audit step, and artifact conventions. Follow it.
+audit step (including source-scoped `[V#N]` checks), and artifact conventions.
+Follow it.
 
 - If you run a task *without* having read `skill.md`, stop and read it first.
 - If the user asks to research/scrape/crawl/search content, default to driving

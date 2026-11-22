@@ -239,3 +239,52 @@ def test_solve_json_report_shape(tmp_path, monkeypatch):
     s, report = _solve(tmp_path, monkeypatch)
     payload = json.dumps(report)  # must be JSON-serializable
     assert json.loads(payload)["dossier_path"] == report["dossier_path"]
+
+
+# --- SIEGE stress-test regressions ------------------------------------------
+
+def test_dossier_source_links_follow_numeric_tag_order(tmp_path, monkeypatch):
+    """Source links must stay bound to their [V#N] number past #9.
+
+    The old emitter sorted URL strings ("[V#10]" < "[V#2]"), so dossiers with
+    more than nine sources silently pointed every later tag at the wrong URL.
+    """
+    import re
+
+    s = _scraper(tmp_path, monkeypatch)
+    fronts = [("F1", "query one"), ("F2", "query two")]
+    chunks = []
+    for i in range(12):
+        url = f"https://source{i}.test/doc"
+        chunks.append(hc.Chunk(
+            text=f"This is a complete sentence about source number {i} and its evidence.",
+            metadata={"source_url": url}))
+    report = {
+        "passes_run": 1, "passes_budget": 2, "sources_per_front": 12,
+        "fronts": {"F1": {"hunted": [1], "sources": 12},
+                   "F2": {"hunted": [], "sources": 0}},
+    }
+    path, cite = s._write_dossier("q", fronts, {"F1": chunks, "F2": []},
+                                  [], [], [], report,
+                                  str(tmp_path / "dossier_test.md"))
+    md = open(path, encoding="utf-8").read()
+    assert all(isinstance(n, int) for n in cite.values())
+    for url, n in cite.items():
+        assert re.search(rf"\[#{n}\] {re.escape(url)}", md), (n, url)
+
+
+def test_dossier_quote_requires_a_complete_sentence():
+    q = hc.HoardCore._dossier_quote
+    assert q("## Transportation & Logistics INVESTMENT") is None
+    assert q("ption for firms seeking scalability without compromising talent access") is None
+    sentence = "This is a complete sentence about renewable energy investment."
+    assert q("Intro. " + sentence) == sentence
+
+
+def test_tension_threshold_is_configurable_and_stricter_by_default(tmp_path, monkeypatch):
+    a = hc.Chunk(text="alpha 10 billion units.", metadata={})
+    b = hc.Chunk(text="alpha 20 billion units.", metadata={})
+    strict = _scraper(tmp_path, monkeypatch, {"solve.tension_min_shared": 5})
+    assert strict._detect_tensions({"F1": [a], "F2": [b]}) == []
+    loose = _scraper(tmp_path, monkeypatch, {"solve.tension_min_shared": 3})
+    assert loose._detect_tensions({"F1": [a], "F2": [b]})

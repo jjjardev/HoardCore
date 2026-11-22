@@ -40,7 +40,7 @@ venv/bin/python hoardcore.py _ --action research --query "<question>" --discover
 
 ### Provenance Mandate (non-negotiable)
 Every quantitative claim / date / unique term in a synthesis gets a tag:
-- `[V#N]` — **verified verbatim** in vault text from source `#N`; the ONLY tag audit machine-checks.
+- `[V#N]` — **verified verbatim in source `#N`** (audit now checks the cited source specifically, not merely the whole vault); the ONLY tag audit machine-checks.
 - `[E]` — external/earlier knowledge, or vault data present only as table/list cells (not contiguous prose). Don't overuse.
 - `[H]` — hypothesis/deduction, not stated in sources.
 
@@ -51,7 +51,7 @@ Every quantitative claim / date / unique term in a synthesis gets a tag:
 - Tabular/list/fiscal data is not contiguous prose → quote only contiguous prose; demote figures to `[E]`.
 - Artifact closes with a **Source Links / Citations** block: each `[#N] URL` on its own line with **no `- ` bullet prefix** (the extractor `re.match`es `[#N]` at line start — bullets silently fail MAPPED).
 - Cross-source conflicts → keep both verbatim quotes `[V#N]`, flag the discrepancy as `[H]`/`[E]`, never assert either as `[V]`.
-- Before tagging: draft, then `verify --claim-list` the exact quote strings; only VERIFIED strings carry `[V#N]`. The audit prints the nearest vault phrase under any failing claim — reword your quote to that exact stored text and re-run.
+- Before tagging: draft, then `verify --claim-list` the exact quote strings; only VERIFIED strings carry `[V#N]`. The audit additionally checks that each quote is in the cited source, not just anywhere in the vault (`not_in_source` exits 2). The audit prints the nearest vault phrase under any failing claim — reword your quote to that exact stored text and re-run.
 - Backtick-wrapped tags (`` `[V#13]` ``) are treated as narrative mentions — audit and lint ignore them by design. Use bare tags only where you mean the chain to be checked.
 - Never place `[V#N]` inside a markdown **table row** or on a line that also carries earlier `[E]`/`[H]` markers — put the verbatim quote + tag on its own body-prose line. Run `--action lint --artifact PATH` (`--strict` escalates warnings) before the full audit.
 
@@ -145,10 +145,10 @@ Read/summarize/analyze a site, PDF, or doc · build a local knowledge base from 
 | `ingest` | index explicit URLs (primary vault only) | `--urls` |
 | `discover` | web-search + ingest (primary vault only) | `--query`, `--limit` |
 | `research` | full loop in one command | `--query`, `--discover`, `--recall`, `--out`, `--vault`, `--no-answer-first`, `--keep-low` |
-| `solve` | SIEGE Protocol: open-ended/grand-challenge task → decomposed fronts hunted per pass; emits an Attack Dossier with verbatim front evidence, claimed barriers, cross-front tensions, and bridge candidates | `--query`, `--fronts`, `--passes`, `--discover` (sources/front), `--recall`, `--vault`, `--out`, `--keep-low`, `--no-answer-first`, `--json` |
+| `solve` | SIEGE Protocol: open-ended/grand-challenge task → decomposed fronts hunted per pass; emits an Attack Dossier with deduplicated, complete-sentence verbatim evidence, claimed barriers, cross-front tensions (`solve.tension_min_shared`, default 5), and bridge candidates | `--query`, `--fronts`, `--passes`, `--discover` (sources/front), `--recall`, `--vault`, `--out`, `--keep-low`, `--no-answer-first`, `--json` |
 | `check` | 3-phase vault integrity | `--migrate` (rebuild at 16 KB pages) |
 | `stats` | vault summary + confidence probe | `--vault`, `--json` |
-| `audit` | audit an artifact's `[V#N]` chain | `--artifact PATH`, `--json` |
+| `audit` | audit an artifact's `[V#N]` chain: verbatim, mapped, ingested, and in the cited source | `--artifact PATH`, `--json` |
 | `lint` | static pre-audit authoring checks (no vault/network): table-cell tags, `[V]` on analysis lines, short quotes, unmapped refs, unclosed quotes | `--artifact PATH`, `--strict` |
 | `prune` | detect & retro-purge transport-error ghost sources (429/timeout stubs indexed pre-v0.16.2); dry-run default | `--apply`, `--urls a,b` (explicit targets) |
 | `local` | index local files from `storage.local_dir` | `--path`, `--list`, `--force` |
@@ -171,7 +171,7 @@ venv/bin/python hoardcore.py _ --action verify --claim-list artifacts/2026-08-18
 ```
 
 ### audit — execution-provenance gate
-`--action audit --artifact PATH` checks every `[V#N]`: **(1) VERBATIM** — verify vs the vault (`verify` semantics; a bare `[V]` is verified but not mapping-checked); **(2) MAPPED** — `N` appears in the Source Links block as `[#N] <url>`; **(3) INGESTED** — the URL has chunks in **any** named vault (with `--vault a,b,c` a companion still passes). Strictness: only the longest inline double-quoted passage (≥24 normalized chars) passes as a claim; paraphrase is `UNVERIFIED`. Repeated same claim+source tag counts once. Exit mirrors `verify` (`0`/`1`/`2`), plus `2` on any unmapped/not-ingested link. **Never pipe through `tail`/`head`.** Failing claims print the nearest vault phrase for rewording. Authoring rules: see the Provenance Mandate tag grammar above.
+`--action audit --artifact PATH` checks every `[V#N]`: **(1) VERBATIM** — verify vs the vault (`verify` semantics; a bare `[V]` is verified but not mapping-checked); **(2) MAPPED** — `N` appears in the Source Links block as `[#N] <url>`; **(3) INGESTED** — the URL has chunks in **any** named vault (with `--vault a,b,c` a companion still passes); **(4) IN SOURCE** — the quoted claim must appear verbatim in the cited source itself, not merely somewhere in the vault (`not_in_source` in `--json`). Strictness: only the longest inline double-quoted passage (≥24 normalized chars) passes as a claim; paraphrase is `UNVERIFIED`. Repeated same claim+source tag counts once. Exit mirrors `verify` (`0`/`1`/`2`), plus `2` on any unmapped/not-ingested/not-in-source link. **Never pipe through `tail`/`head`.** Failing claims print the nearest vault phrase for rewording. Authoring rules: see the Provenance Mandate tag grammar above.
 
 **Claim scanning stops at the Source Links heading**, and that heading must *be* the block — exactly `Source Links`, `Citations`, `Sources`, or the pair joined by a slash (any `#` level). A mid-document section titled e.g. "Citations and grounding" is fine and is still audited; a section titled exactly "Citations" is read as the block, so every tag after it goes unchecked **while the audit still reports its accuracy over the tags it did check**. Keep the links block last and give it a distinct title.
 
@@ -223,7 +223,7 @@ Sources, doc versions, chunks, vectors, embedding dim/mode, schema version, page
 - CLI chunk previews show 300 chars by default; pass `--preview-chars 0` for full text.
 - **Python 3.11+** — on failure run `make install`.
 - **Release gates (CI-enforced):** `tools/check_version.py` must report OK (`__version__` == `pyproject.toml` version, and == the git tag on `v*` pushes) and coverage ≥70% (`--cov-fail-under=70`). Run `venv/bin/python tools/check_version.py` and `make coverage` before tagging.
-- **This file is treated as code.** `tests/test_skill_contract.py` parses `skill.md` and asserts it: every action, CLI flag and config key it names must exist, and every behavioural promise above is re-asserted executably (chrome is demoted at 3 URLs and never deleted, the parallel pipeline is gated at 8+ chunks, quotes fold both ways, a hyphen-split word is not silently rejoined, `[V#N]` is audited wherever it appears, solver `urls` appends to `url`, local re-runs skip by content hash). A behaviour change breaks that suite instead of quietly making this manual wrong — which is what happened in v0.16.5. **If you change behaviour, change this file and that suite in the same commit.**
+- **This file is treated as code.** `tests/test_skill_contract.py` parses `skill.md` and asserts it: every action, CLI flag and config key it names must exist, and every behavioural promise above is re-asserted executably (chrome is demoted at 3 URLs and never deleted, the parallel pipeline is gated at 8+ chunks, quotes fold both ways, a hyphen-split word is not silently rejoined, `[V#N]` is audited wherever it appears and against its cited source, solver `urls` appends to `url`, local re-runs skip by content hash). A behaviour change breaks that suite instead of quietly making this manual wrong — which is what happened in v0.16.5. **If you change behaviour, change this file and that suite in the same commit.**
 
 ## Remember
 You are not just a browser — you are a **knowledge hoarder**. Build a permanent, local memory for yourself and the user.

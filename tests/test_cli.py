@@ -523,3 +523,26 @@ def test_cli_short_form_verify_passes_claim(tmp_path):
     assert res.returncode == 2  # UNVERIFIED is a real verdict, not a usage error
     payload = json.loads(res.stdout)
     assert payload["claim"] == "absolutely absent gibberish xyzzy"
+
+
+def test_cli_audit_rejects_claim_in_wrong_source(tmp_path, make_chunk):
+    """A claim verified in vault A but cited to source B must fail the gate."""
+    import hoardcore as hc  # noqa: F401
+    cwd_s = _isolated_toml(tmp_path)
+    cfg = hc.ConfigManager(str(tmp_path / "hoardcore.toml"))
+    obj = hc.HoardCore.__new__(hc.HoardCore)
+    obj.config = cfg
+    obj.vault = hc.VaultManager(cfg)
+    obj.vaults = [obj.vault]
+    claim = "The coffee trade deficit was 13 million dollars in 2022"
+    good = "https://coffee.test/audit-good"
+    bad = "https://coffee.test/audit-bad"
+    obj.vault.index_document(good, [make_chunk(claim, url=good)], {})
+    obj.vault.index_document(bad, [make_chunk("unrelated boilerplate content", url=bad)], {})
+    art = tmp_path / "art_wrong_source.md"
+    art.write_text(f'X says "{claim}" [V#1]\n\n'
+                   f'## Source Links / Citations\n[#1] {bad} — {bad}\n',
+                   encoding="utf-8")
+    res = _run("_", "--action", "audit", "--artifact", str(art), cwd=cwd_s)
+    assert res.returncode == 2
+    assert "not in cited source" in res.stdout

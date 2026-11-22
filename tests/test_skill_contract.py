@@ -325,3 +325,31 @@ def test_verify_note_in_manual_matches_behaviour():
     inst.vaults = [v]
     assert inst.verify_claim("Values rose 5% - see the annex today.") == "verified"
     assert inst.verify_claim("Values rose 5 percent - see the annex today.") != "verified"
+
+
+def test_source_scoped_audit_is_documented_and_enforced():
+    """The manual promises a fourth audit link; code must enforce it."""
+    assert "IN SOURCE" in SKILL and "not_in_source" in SKILL
+    claim = "The satellite tracking antenna was installed last summer."
+    v = hc.VaultManager(TempConfig(tempfile.mkdtemp()))
+    v.index_document("https://good.test/p", [hc.Chunk(
+        text=claim, metadata={"header_path": "A",
+                              "source": "https://good.test/p"})], {})
+    v.index_document("https://wrong.test/p", [hc.Chunk(
+        text="Unrelated content that does not support the claim.",
+        metadata={"header_path": "A", "source": "https://wrong.test/p"})], {})
+    inst = hc.HoardCore.__new__(hc.HoardCore)
+    inst.config = TempConfig(v.root_dir)
+    inst.vault = v
+    inst.vaults = [v]
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "wrong_source.md"
+        path.write_text(
+            f'X says "{claim}" [V#1]\n\n'
+            "## Source Links / Citations\n\n"
+            "[#1] https://wrong.test/p\n",
+            encoding="utf-8",
+        )
+        report = inst.audit_artifact(str(path))
+    assert report["claims"][0]["source_verified"] is False
+    assert report["not_in_source"]

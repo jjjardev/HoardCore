@@ -2,7 +2,7 @@
 
 Adaptive research engine for AI agents - a memory it can prove, tools you can swap, and a loop that adapts.
 
-![Version](https://img.shields.io/badge/version-0.17.3-blue)
+![Version](https://img.shields.io/badge/version-0.17.4-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -221,7 +221,7 @@ Syntax: `hoardcore ACTION [ARG] [flags]`. Legacy form: `hoardcore URL --action A
 | `research` | DISCOVER -> INGEST -> RECALL -> EMIT; memory-first unless `--no-answer-first` |
 | `solve` | SIEGE Protocol: fronts, passes, barriers/tensions/bridges, Attack Dossier |
 | `verify` | Check `--claim` against stored text (verbatim, partial, unverified) |
-| `audit` | Check an artifact's `[V#N]` chain: verbatim + mapped + ingested |
+| `audit` | Check an artifact's `[V#N]` chain: verbatim + mapped + ingested + in cited source |
 | `lint` | Pre-audit authoring checks on an artifact; `--strict` escalates warnings |
 | `prune` | Find and optionally delete transport-error ghost sources (dry-run unless `--apply`) |
 | `check` | Three-phase vault integrity check; `--migrate` rebuilds at the configured page size |
@@ -271,7 +271,7 @@ Never pipe a gate through `tail`/`head`: the shell reports the pipe's exit statu
 
 `verify` returns `VERIFIED` (exit 0), `PARTIAL` (exit 1), or `UNVERIFIED` (exit 2). It folds typographic dashes, smart quotes and apostrophes, full-width Unicode, Unicode case in every script, whitespace, and markdown markers. It does not fold word identity, order, presence, or `%` versus "percent". A denial means "not stored verbatim in this wording", not "false"; `--hint` helps reword. The candidate scan is widened so long claims and non-ASCII text still resolve.
 
-`audit` checks each `[V#N]`: the quoted claim must verify, `N` must appear in the Source Links block as `[#N] URL`, and that URL must have chunks in the vault. It prints a per-claim table and citation accuracy, then exits `0`/`1`/`2` as above.
+`audit` checks each `[V#N]`: the quoted claim must verify, `N` must appear in the Source Links block as `[#N] URL`, that URL must have chunks in the vault, and the quote must appear in **that cited source** (not merely somewhere in the vault). It prints a per-claim table and citation accuracy, then exits `0`/`1`/`2` as above.
 
 ### Configuration (`hoardcore.toml`)
 
@@ -289,7 +289,7 @@ Generated on first run. Key sections:
 | `[indexer]` | `enable_fts`, `search_limit`, `parallel`, `near_dedup`, `near_dedup_threshold` |
 | `[embeddings]` | `enabled`, `mode`, `dense_model`, `dim`, `cache_dir`, `offline`, `hybrid_search`, `top_k`, `quantize`, `fts_fast_path`, `conf_mode`, `conf_high_abs`, `conf_low_abs`, `reranker_model` |
 | `[discovery]` | `max_results`, `top_rank`, `max_retries`, `backoff_seconds` |
-| `[solve]` | `passes`, `sources_per_front`, `facets`, `refinements`, `barrier_patterns`, `bridge_threshold`, `bridge_top_k`, `saturation_min_sources`, `answer_first` |
+| `[solve]` | `passes`, `sources_per_front`, `facets`, `refinements`, `barrier_patterns`, `bridge_threshold`, `bridge_top_k`, `tension_min_shared`, `saturation_min_sources`, `answer_first` |
 | `[research]` | `answer_first`, `filter_low`, `max_per_source` |
 | `[chunking]` | `max_tokens`, `overlap_tokens`, `strategy` |
 | `[retrieval]` | `chrome_min_urls` |

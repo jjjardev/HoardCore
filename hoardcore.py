@@ -20,7 +20,7 @@ Usage (short form; legacy `URL --action ...` and `_ --action ...` still work):
 """
 from __future__ import annotations
 
-__version__ = "0.17.3"
+__version__ = "0.17.4"
 
 import argparse
 import asyncio
@@ -384,6 +384,7 @@ class ConfigManager:
                       "refinements": DEFAULT_SOLVE_REFINEMENTS,
                       "barrier_patterns": DEFAULT_SOLVE_BARRIERS,
                       "bridge_threshold": 0.55, "bridge_top_k": 8,
+                      "tension_min_shared": 5,
                       "saturation_min_sources": 3, "answer_first": True},
             "discovery": {"max_results": 10, "top_rank": 6, "max_retries": 2, "backoff_seconds": 1.5},
             "chunking": {"max_tokens": 512, "overlap_tokens": 50, "strategy": "heading"},
@@ -5584,6 +5585,38 @@ class HoardCore:
             snippet = snippet[:cut + 1]
         return snippet.replace('"', "'").replace("\u201c", "'").replace("\u201d", "'").strip()
 
+    @staticmethod
+    def _dossier_quote(text: str, start: int = 0, width: int = 240) -> str | None:
+        """Return one *complete sentence* safe to quote in a dossier.
+
+        The old emitter sliced raw chunk windows, so dossiers were full of
+        headings, mid-sentence fragments and figure captions: syntactically
+        auditable, semantically useless. This insists on a sentence boundary,
+        rejects layout markers and lowercase-only starts (a chunk that begins
+        mid-word), and keeps the result a verbatim substring of the chunk.
+        Returns None when the window has no usable sentence.
+        """
+        collapsed = " ".join(text.split())
+        seg = collapsed[start:start + width]
+        if not seg or "#" in seg[:16] or seg.lstrip().startswith(("?", "...", "- ")):
+            return None
+        for m in re.finditer(r"[^.!?\n]{40,}[.!?](?=\s|$)", seg):
+            sent = m.group(0).strip()
+            if len(sent) < 40 or "#" in sent or not sent[0].isupper():
+                continue
+            # A nested double-quoted phrase cannot be replaced without
+            # breaking the verbatim chain (normalize folds curly vs straight
+            # quotes but never single to double). Skip such sentences; there
+            # is almost always another usable one in the same chunk.
+            if '"' in sent or "\u201c" in sent or "\u201d" in sent:
+                continue
+            pos = seg.find(sent)
+            before = seg[:pos].rstrip()
+            if before and before[-1] not in ".!?":
+                continue  # starts mid-sentence in this window
+            return sent
+        return None
+
     def _expand_fronts(self, question: str, fronts_arg: str | None) -> list[str]:
         """Explicit `--fronts "a; b; c"` queries, or the configured facets
         applied to the task ("<task> — <facet>") when the agent leaves the
@@ -5655,6 +5688,11 @@ class HoardCore:
         tension 'verify before asserting', because shared tokens are not
         proof the two numbers describe the same quantity."""
         entries = [(f, c) for f, cs in by_front.items() for c in cs]
+        # A 3-token overlap was mostly shared boilerplate ("billion", "years",
+        # "growth") and produced confident-looking false positives. Five
+        # distinct content tokens is a much better signal that two chunks are
+        # actually discussing the same quantity.
+        min_shared = max(3, int(self.config.get('solve.tension_min_shared', 5) or 5))
         out: list[dict[str, Any]] = []
         for i in range(len(entries)):
             for j in range(i + 1, len(entries)):
@@ -5663,7 +5701,7 @@ class HoardCore:
                     continue
                 shared = (self._distinctive_tokens(ca.text)
                           & self._distinctive_tokens(cb.text))
-                if len(shared) < 3:
+                if len(shared) < min_shared:
                     continue
                 va = {m.group(2).lower(): m.group(1)
                       for m in self._TENSION_NUM_RE.finditer(ca.text)}
@@ -5754,7 +5792,7 @@ class HoardCore:
                        barriers: list[dict[str, Any]],
                        tensions: list[dict[str, Any]],
                        bridges: list[dict[str, Any]],
-                       report: dict[str, Any], out_path: str | None) -> tuple[str, dict[str, str]]:
+                       report: dict[str, Any], out_path: str | None) -> tuple[str, dict[str, int]]:
         """Emit the Attack Dossier (audit-clean by construction) and the
         citation map used to number its [V#N] tags. Returns (path, sources)."""
         if out_path:
@@ -5776,13 +5814,29 @@ class HoardCore:
         os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
 
         lines: list[str] = []
-        cite: dict[str, str] = {}
+        cite: dict[str, int] = {}
+        emitted_quotes: set[str] = set()
 
         def cite_of(chunk: Chunk) -> str:
             url = chunk.metadata.get('source_url') or '?'
             if url not in cite:
-                cite[url] = str(len(cite) + 1)
+                # Integers, not strings: lexicographic sorting of "[V#10]"
+                # before "[V#2]" used to mis-number the Source Links block.
+                cite[url] = len(cite) + 1
             return f"[V#{cite[url]}]"
+
+        def quote_line(text: str, chunk: Chunk, start: int = 0,
+                       width: int = 240, suffix: str = "") -> bool:
+            """Append one deduplicated, complete-sentence quote line."""
+            snippet = self._dossier_quote(text, start, width)
+            if not snippet:
+                return False
+            key = normalize_claim(snippet)
+            if not key or key in emitted_quotes:
+                return False
+            emitted_quotes.add(key)
+            lines.append(f'"{snippet}" {cite_of(chunk)}{suffix}')
+            return True
 
         lines.append(f"# Attack Dossier — {question}")
         lines.append("")
@@ -5823,11 +5877,8 @@ class HoardCore:
                 lines.append("")
                 continue
             for c in chunks:
-                snippet = self._dossier_snippet(c.text)
-                if len(snippet) < 24:
-                    continue
                 conf = c.metadata.get('confidence', 'n/a')
-                lines.append(f'"{snippet}" {cite_of(c)} (confidence: {conf})')
+                quote_line(c.text, c, suffix=f" (confidence: {conf})")
             lines.append("")
 
         lines.append("## Claimed barriers")
@@ -5839,8 +5890,10 @@ class HoardCore:
                          "its date.")
             lines.append("")
             for b in barriers:
-                lines.append(f'"{b["snippet"]}" {cite_of(b["chunk"])} '
-                             f'(matched barrier phrase: "{b["pattern"]}")')
+                idx = " ".join(b["chunk"].text.split()).find(
+                    " ".join(b["snippet"].split())[:60])
+                quote_line(b["chunk"].text, b["chunk"], start=max(0, idx),
+                           suffix=f' (matched barrier phrase: "{b["pattern"]}")')
             lines.append("")
         else:
             lines.append("No barrier phrases surfaced in the recalled set — "
@@ -5858,8 +5911,14 @@ class HoardCore:
                          "the same quantity.")
             lines.append("")
             for t in tensions:
-                sa = self._dossier_snippet(t["chunk_a"].text, width=180)
-                sb = self._dossier_snippet(t["chunk_b"].text, width=180)
+                sa = self._dossier_quote(t["chunk_a"].text, width=180)
+                sb = self._dossier_quote(t["chunk_b"].text, width=180)
+                if not sa or not sb:
+                    continue  # a fragment cannot carry a numeric conflict
+                ka, kb = normalize_claim(sa), normalize_claim(sb)
+                if not ka or not kb or ka in emitted_quotes or kb in emitted_quotes:
+                    continue
+                emitted_quotes.update((ka, kb))
                 vals = ", ".join(f"{u}: {na} vs {nb}"
                                  for u, na, nb in t["conflicts"])
                 lines.append(f'"{sa}" {cite_of(t["chunk_a"])} versus "{sb}" '
@@ -5878,13 +5937,11 @@ class HoardCore:
                          "cross-domain bridge no single source states.")
             lines.append("")
             for b in bridges:
-                snippet = self._dossier_snippet(b["text"])
-                if len(snippet) < 24:
-                    continue
                 fs = " and ".join(b["fronts"])
                 sims = " / ".join(str(s) for s in b["sims"])
-                lines.append(f'"{snippet}" {cite_of(Chunk(text=b["text"], metadata={"source_url": b["url"]}))} '
-                             f'(near fronts {fs}, cosine {sims})')
+                quote_line(b["text"],
+                           Chunk(text=b["text"], metadata={"source_url": b["url"]}),
+                           suffix=f" (near fronts {fs}, cosine {sims})")
             lines.append("")
         else:
             lines.append("No bridge candidates crossed the centroid "
@@ -6048,6 +6105,30 @@ class HoardCore:
             if result == "partial":
                 best = "partial"
         return best
+
+    def verify_claim_in_source(self, claim: str, url: str) -> bool:
+        """True when a claim appears verbatim in the *cited source* only.
+
+        `verify_claim` folds across the whole vault, so a tag can verify
+        against source A while pointing at source B and still pass `audit`.
+        The provenance chain promises quote -> source N, so the audit needs
+        this stricter, source-scoped check. Typography folding is identical.
+        """
+        needle = normalize_claim(claim)
+        if not needle or not url:
+            return False
+        def _chunks(v: VaultManager) -> list[Chunk]:
+            try:
+                return v.get_chunks_for_url(url)
+            except Exception as e:  # a corrupt URL row must not crash an audit
+                logger.debug("source-scoped verify skipped a vault: %s", e)
+                return []
+
+        for vault in self.vaults:
+            for chunk in _chunks(vault):
+                if needle in normalize_claim(chunk.text):
+                    return True
+        return False
 
     def _verify_against_vault(self, vault: VaultManager, claim: str) -> str:
         """Verify a claim against a single VaultManager (the shared per-vault
@@ -6300,10 +6381,9 @@ class HoardCore:
     def audit_artifact(self, path: str) -> dict[str, Any]:
         """Audit a synthesis artifact's `[V#N]` citation chain against the vault.
 
-        For every `[V#N]` tag in the artifact, three links of the evidence chain
-        are checked (this is the execution-provenance gate the stress test
-        exposed as a gap — claim-level verify alone never proves the tag maps
-        to a listed, ingested source):
+        For every `[V#N]` tag in the artifact, four links of the evidence chain
+        are checked (the SIEGE stress test exposed the fourth as a gap — a
+        claim can verify globally while pointing at the wrong source):
 
           1. VERBATIM  — the sentence containing the tag (or its longest inline
                          double-quoted passage) must `verify` as VERIFIED against
@@ -6318,6 +6398,9 @@ class HoardCore:
           2. MAPPED    — N must appear in the artifact's "Source Links /
                          Citations" block as `[#N] <url>`.
           3. INGESTED  — that cited URL must have chunks in the vault.
+          4. IN SOURCE — the quoted claim must appear verbatim in the cited
+                         source specifically, not merely somewhere in the
+                         vault. Failure exits 2 with `not_in_source`.
 
         Returns a dict with: `claims` (list of {line, n, text, verdict, quote}),
         `unmapped` (referenced Ns with no Source Link), `not_ingested` (Ns whose
@@ -6397,6 +6480,7 @@ class HoardCore:
                     "line": ln_no, "n": n,
                     "text": text_cand, "quote": is_quote,
                     "verdict": verdict, "hint": hint,
+                    "source_verified": None,  # filled once links are mapped
                 })
 
         used_n = sorted({c["n"] for c in claims if c["n"]})
@@ -6411,6 +6495,21 @@ class HoardCore:
                 if not any(v.get_chunks_for_url(url) for v in self.vaults):
                     not_ingested.append((n, url))
 
+        # SOURCE-SCOPED VERBATIM: a claim that verifies somewhere in the vault
+        # but not in the source it cites is a broken chain. This closes the
+        # gap the SIEGE stress test exposed (dossier tags verified globally
+        # while pointing at the wrong Source Link).
+        not_in_source: list[tuple[str, str, str]] = []
+        for c in claims:
+            n = c["n"]
+            if not n or n in unmapped or n not in source_block:
+                continue  # bare [V] has no source number to scope against
+            url = source_block[n]
+            ok = self.verify_claim_in_source(c["text"], url)
+            c["source_verified"] = ok
+            if not ok:
+                not_in_source.append((n, url, c["text"][:72]))
+
         counts = {"verified": 0, "partial": 0, "unverified": 0}
         for c in claims:
             counts[c["verdict"]] = counts.get(c["verdict"], 0) + 1
@@ -6418,7 +6517,8 @@ class HoardCore:
         return {
             "path": path, "claims": claims, "counts": counts,
             "total": total, "unmapped": unmapped, "used_n": used_n,
-            "not_ingested": not_ingested, "warnings": warnings,
+            "not_ingested": not_ingested, "not_in_source": not_in_source,
+            "warnings": warnings,
             "accuracy": (counts["verified"] / total) if total else 0.0,
         }
 
@@ -7787,7 +7887,7 @@ async def _main_impl(argv: list[str] | None = None) -> None:
         audit = scraper.audit_artifact(args.artifact)
         if args.json:
             print(json.dumps(audit, ensure_ascii=False))
-            bad_map = bool(audit["unmapped"] or audit["not_ingested"])
+            bad_map = bool(audit["unmapped"] or audit["not_ingested"] or audit["not_in_source"])
             c = audit["counts"]
             sys.exit(2 if (c["unverified"] or bad_map) else (1 if c["partial"] else 0))
         print(f"=== Audit: {audit['path']} ===")
@@ -7816,12 +7916,17 @@ async def _main_impl(argv: list[str] | None = None) -> None:
                 print(f"  ✗ [V#{n}] cites {url} — no chunks in the vault")
         else:
             print("  ✓ every cited source has chunks in the vault")
+        if audit["not_in_source"]:
+            for n, url, preview in audit["not_in_source"]:
+                print(f"  ✗ [V#{n}] claim not in cited source {url}: {preview[:60]}...")
+        else:
+            print("  ✓ every [V#N] quote is in its cited source")
         if audit.get("warnings"):
             for w in audit["warnings"]:
                 print(f"  ⚠ line {w['line']}: {w['tag']} sits on an [H]/[E] "
                       f"analysis line — move the tag to the verbatim quote "
                       f"in the body, or demote the line to [E]")
-        bad_map = bool(audit["unmapped"] or audit["not_ingested"])
+        bad_map = bool(audit["unmapped"] or audit["not_ingested"] or audit["not_in_source"])
         sys.exit(2 if (c["unverified"] or bad_map) else (1 if c["partial"] else 0))
 
     if action == "local":
