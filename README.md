@@ -6,7 +6,7 @@ Terminal tool that turns the web into a permanent, local SQLite vault your AI ag
 
 **Research mode on crack, with the hood off.** It adapts: a research pass has depth presets and termination guards, a hard question gets split into fronts that are re-hunted when the evidence runs thin, and fetching escalates from a plain HTTP request to TLS impersonation to a browser solver. It extends: four plugin entry points and a lifecycle event bus let you swap in parsers, fetchers, discovery providers, and chunkers without editing the engine. It stays honest: every output can be traced to stored text and machine-audited. It is **extensible, not self-modifying** — it does not write new tools at runtime.
 
-![Version](https://img.shields.io/badge/version-0.17.1-blue)
+![Version](https://img.shields.io/badge/version-0.17.2-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
