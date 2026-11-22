@@ -1,8 +1,10 @@
 # HoardCore
 
-Research toolkit for AI agents — give your agent a memory it can prove.
+Adaptive research engine for AI agents — a memory it can prove, tools you can swap, and a loop that adapts.
 
 Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
+
+**Research mode on crack, with the hood off.** It adapts: a research pass has depth presets and termination guards, a hard question gets split into fronts that are re-hunted when the evidence runs thin, and fetching escalates from a plain HTTP request to TLS impersonation to a browser solver. It extends: four plugin entry points and a lifecycle event bus let you swap in parsers, fetchers, discovery providers, and chunkers without editing the engine. It stays honest: every output can be traced to stored text and machine-audited. It is **extensible, not self-modifying** — it does not write new tools at runtime.
 
 ![Version](https://img.shields.io/badge/version-0.17.1-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
@@ -13,12 +15,16 @@ Terminal tool that turns the web into a permanent, local SQLite vault your AI ag
 ## Table of Contents
 
 - [About](#about)
+- [How it adapts](#how-it-adapts)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
+- [60-second first run](#60-second-first-run)
 - [Quick Start for Humans](#quick-start-for-humans)
 - [Quick Start (raw CLI)](#quick-start-raw-cli)
 - [Agent Integration](#agent-integration)
 - [Feature Tour](#feature-tour)
+  - [Plugin System & Event Bus](#plugin-system--event-bus)
+  - [Extend the toolbox](#extend-the-toolbox)
   - [Ingest Mode](#ingest-mode-scrape--crawl)
   - [Hybrid Retrieval](#hybrid-retrieval)
   - [Discovery Mode](#discovery-mode)
@@ -64,6 +70,20 @@ Key characteristics:
 - **MIT licensed.** Free to use, modify, and redistribute.
 
 ---
+
+## How it adapts
+
+The research loop is not a fixed bash script with extra flags. It watches its own evidence and changes behavior:
+
+| What adapts | Mechanism you can see |
+|---|---|
+| Research depth | `research` depth presets (3/6/10 passes, 5/8/15 sources) plus saturation and diminishing-return termination guards |
+| Attack on a hard question | `solve` splits the question into fronts, skips fronts the vault already satisfies, and re-hunts unsaturated fronts with refined queries on later passes |
+| Fetch strategy | `fast` → `balanced` → `aggressive` (aiohttp, then concurrent aiohttp + curl_cffi, then FlareSolverr for Cloudflare-shaped challenges), with backoff and retry |
+| Retrieval backend | Dense ONNX embeddings by default; automatic sparse-hash fallback if the model is unavailable, with RRF fusion either way |
+| Tool surface | Four plugin entry points (`parsers`, `fetchers`, `providers`, `chunkers`) plus four lifecycle event hooks, all failure-tolerant |
+
+None of this hosts an LLM or rewrites the engine. Your harness supplies the judgment; HoardCore supplies the adaptive evidence machinery and the audit trail.
 
 ## Prerequisites
 
@@ -145,6 +165,21 @@ Once installed, image-only/scanned PDF pages are OCR'd automatically (RapidOCR, 
 **Model downloads once, then never again.** The ONNX model (~65 MB) is stored on disk in a *persistent* location — `~/.cache/hoardcore/models` by default (`embeddings.cache_dir`). `fastembed`'s own default lives under `/tmp`, which is wiped on every reboot, so before this the model was re-downloaded at every boot; now it is fetched exactly once and reused forever. Set `embeddings.offline = true` to load strictly from that directory — it skips the per-run revision check, works with no network at all, and *fails loudly* (instead of silently demoting to sparse hashing) if the model was never downloaded. Both the embedding model and the optional `reranker_model` share the same cache. The cache path is deliberately **not** part of the embedding fingerprint, so moving or deleting the cache never invalidates stored vectors.
 
 ---
+
+## 60-second first run
+
+After installation, from the repo root:
+
+```bash
+python hoardcore.py                                  # prints the quick start, does not "scrape" anything
+python hoardcore.py scrape https://example.com        # one page into the local vault
+python hoardcore.py search "example domain"           # recall what you just stored
+python hoardcore.py research "what is reciprocal rank fusion" --discover 3 --recall 5
+python hoardcore.py verify "RRF ignores scores and uses rank positions"  # 0/1/2 exit code
+python hoardcore.py stats                             # what is in the vault
+```
+
+No `_` placeholder, no `--action` ceremony. Every command also works in the legacy form (`python hoardcore.py _ --action stats`) used by agents and older scripts.
 
 ## Quick Start for Humans
 
@@ -486,7 +521,35 @@ Third-party extensions drop in via `importlib.metadata` entry points — no monk
 - `hoardcore.providers` → extra discovery backends (fallback chain)
 - `hoardcore.chunkers` → custom chunkers, selected by `chunking.strategy = "plugin.<name>"`
 
-Any plugin that fails to load, throws, or returns bad output is skipped with a warning — a broken plugin never aborts a crawl. A glossing `hoardcore.EventBus` publishes lifecycle hooks (`document.ingested`, `chunk.embedded`, `discovery.completed`, `search.completed`) for observability or automation.
+Any plugin that fails to load, throws, or returns bad output is skipped with a warning — a broken plugin never aborts a crawl. A built-in `hoardcore.EventBus` publishes lifecycle hooks (`document.ingested`, `chunk.embedded`, `discovery.completed`, `search.completed`) for observability or automation.
+
+### Extend the toolbox
+
+You can extend the engine from a separate installed package, or from your own driver script, without touching `hoardcore.py`:
+
+```python
+# A driver script: observe a lifecycle event, no engine edits.
+import asyncio
+import hoardcore as hc
+
+async def main():
+    engine = hc.HoardCore()
+    engine.bus.on("document.ingested",
+                  lambda **e: print("stored:", e.get("url")))
+    await engine.fetch("https://example.com", action="scrape",
+                       force_refresh=True)  # cached pages do not re-emit
+
+asyncio.run(main())
+```
+
+For a packaged extension, advertise an entry point in *your* package's `pyproject.toml` and HoardCore discovers it on startup:
+
+```toml
+[project.entry-points."hoardcore.parsers"]
+myparser = "mylib:parser_entry"
+```
+
+For a custom splitter, set `[chunking] strategy = "plugin.<name>"` in `hoardcore.toml` and register the callable under `hoardcore.chunkers`. New discovery backends and fetch legs are added the same way, under `hoardcore.providers` and `hoardcore.fetchers`.
 
 ### Hybrid Retrieval
 
