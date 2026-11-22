@@ -2,7 +2,7 @@
 
 Adaptive research engine for AI agents - a memory it can prove, tools you can swap, and a loop that adapts.
 
-![Version](https://img.shields.io/badge/version-0.17.4-blue)
+![Version](https://img.shields.io/badge/version-0.17.5-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -160,7 +160,7 @@ Empty queries return `[]`; punctuation-only queries still run the vector leg in 
 
 `research` runs the full loop in one command: optional answer-first vault recall, DISCOVER, INGEST, RECALL, EMIT. It writes a grounding-context file (source URLs, scores, confidence bands, distinct-source summary, Source Links block) into `artifacts/YYYY-MM-DD/grounding/`. `--no-answer-first` forces a live hunt; `--discover 0` makes it recall-only.
 
-`solve` runs the SIEGE Protocol for grand-challenge questions: decompose into fronts, hunt each front per pass (skipping satisfied fronts, refining unsaturated ones), then emit an Attack Dossier with claimed barriers, cross-front tensions, bridge candidates, and an honest siege budget. The dossier passes `audit` by construction. It is grounding, not an answer; the agent writes the final argument.
+`solve` runs the SIEGE Protocol for grand-challenge questions: decompose into fronts, hunt each front per pass (skipping satisfied fronts, refining unsaturated ones), then emit an Attack Dossier with up to three deduplicated complete-sentence quotes per chunk, claimed barriers, cross-front tensions, bridge candidates, and an honest siege budget. The dossier passes `audit` by construction. It is grounding, not an answer; the agent writes the final argument.
 
 ### Provenance and artifacts
 

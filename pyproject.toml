@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hoardcore"
-version = "0.17.4"
+version = "0.17.5"
 description = "Adaptive research engine for AI agents (single-file Python module + SQLite vault + CLI): self-tuning DISCOVER→INGEST→RECALL→EMIT, swappable tool surface, hybrid retrieval, machine-verifiable provenance."
 readme = "README.md"
 requires-python = ">=3.11"

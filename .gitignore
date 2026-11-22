@@ -47,3 +47,7 @@ densevault-1.py
 tools/oj_harvest.py
 tools/oj_rank_hire.py
 tools/oj_rank_hire4.py
+
+# --- Personal documents must never be committed ---
+/TRUE_JJJarder_Resume_v3.docx
+/*_Resume*.docx

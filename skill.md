@@ -145,7 +145,7 @@ Read/summarize/analyze a site, PDF, or doc · build a local knowledge base from 
 | `ingest` | index explicit URLs (primary vault only) | `--urls` |
 | `discover` | web-search + ingest (primary vault only) | `--query`, `--limit` |
 | `research` | full loop in one command | `--query`, `--discover`, `--recall`, `--out`, `--vault`, `--no-answer-first`, `--keep-low` |
-| `solve` | SIEGE Protocol: open-ended/grand-challenge task → decomposed fronts hunted per pass; emits an Attack Dossier with deduplicated, complete-sentence verbatim evidence, claimed barriers, cross-front tensions (`solve.tension_min_shared`, default 5), and bridge candidates | `--query`, `--fronts`, `--passes`, `--discover` (sources/front), `--recall`, `--vault`, `--out`, `--keep-low`, `--no-answer-first`, `--json` |
+| `solve` | SIEGE Protocol: open-ended/grand-challenge task → decomposed fronts hunted per pass; emits an Attack Dossier with up to three deduplicated, complete-sentence verbatim quotes per chunk, claimed barriers (`solve.barrier_patterns` is tunable), cross-front tensions (`solve.tension_min_shared`, default 5), and bridge candidates | `--query`, `--fronts`, `--passes`, `--discover` (sources/front), `--recall`, `--vault`, `--out`, `--keep-low`, `--no-answer-first`, `--json` |
 | `check` | 3-phase vault integrity | `--migrate` (rebuild at 16 KB pages) |
 | `stats` | vault summary + confidence probe | `--vault`, `--json` |
 | `audit` | audit an artifact's `[V#N]` chain: verbatim, mapped, ingested, and in the cited source | `--artifact PATH`, `--json` |

@@ -288,3 +288,34 @@ def test_tension_threshold_is_configurable_and_stricter_by_default(tmp_path, mon
     assert strict._detect_tensions({"F1": [a], "F2": [b]}) == []
     loose = _scraper(tmp_path, monkeypatch, {"solve.tension_min_shared": 3})
     assert loose._detect_tensions({"F1": [a], "F2": [b]})
+
+
+def test_dossier_quotes_returns_multiple_complete_sentences():
+    text = ("Solar power now supplies a meaningful share of the island grid. "
+            "Battery storage costs have fallen sharply in the last five years. "
+            "Local technicians can maintain the systems without outside help. "
+            "## References and unrelated layout text")
+    quotes = hc.HoardCore._dossier_quotes(text, limit=3)
+    assert len(quotes) == 3
+    assert all(q.endswith(".") and q[0].isupper() for q in quotes)
+    assert all("#" not in q for q in quotes)
+    assert any("Battery storage" in q for q in quotes)
+
+
+def test_dossier_keeps_multiple_quotes_from_one_informative_chunk(tmp_path, monkeypatch):
+    """Evidence yield regression: one rich chunk must not collapse to one line."""
+    s = _scraper(tmp_path, monkeypatch)
+    text = ("Solar power now supplies a meaningful share of the island grid and its cost keeps falling. "
+            "Battery storage prices have dropped sharply in the last five years across the region. "
+            "Local technicians can maintain the systems without any outside help or extra cost.")
+    chunk = hc.Chunk(text=text, metadata={"source_url": "https://energy.test/case"})
+    fronts = [("F1", "energy case")]
+    report = {"passes_run": 1, "passes_budget": 1, "sources_per_front": 1,
+              "fronts": {"F1": {"hunted": [1], "sources": 1}}}
+    path, cite = s._write_dossier("q", fronts, {"F1": [chunk]}, [], [], [],
+                                  report, str(tmp_path / "rich_dossier.md"))
+    md = open(path, encoding="utf-8").read()
+    quote_lines = [line for line in md.splitlines()
+                   if line.startswith('"') and "[V#" in line]
+    assert len(quote_lines) >= 3
+    assert cite == {"https://energy.test/case": 1}

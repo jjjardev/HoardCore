@@ -20,7 +20,7 @@ Usage (short form; legacy `URL --action ...` and `_ --action ...` still work):
 """
 from __future__ import annotations
 
-__version__ = "0.17.4"
+__version__ = "0.17.5"
 
 import argparse
 import asyncio
@@ -5617,6 +5617,44 @@ class HoardCore:
             return sent
         return None
 
+    @staticmethod
+    def _dossier_quotes(text: str, limit: int = 3,
+                        window: int = 1200) -> list[str]:
+        """Up to `limit` distinct, complete, audit-safe sentences from a chunk.
+
+        The single-quote helper kept dossiers sound but starved them: 400+
+        chunks often produced only four quote lines. This scans the whole
+        chunk, scores sentences for informational content, drops reference
+        stubs and markup, and returns the best few in original order. Every
+        returned sentence remains a verbatim substring of the stored text.
+        """
+        collapsed = " ".join(text.split())
+        seg = collapsed[:window]
+        candidates: list[tuple[int, int, str]] = []
+        for m in re.finditer(r"[^.!?\n]{40,}[.!?](?=\s|$)", seg):
+            sent = m.group(0).strip()
+            if len(sent) < 40 or "#" in sent or not sent[0].isupper():
+                continue
+            if '"' in sent or "\u201c" in sent or "\u201d" in sent:
+                continue
+            pos = seg.find(sent)
+            before = seg[:pos].rstrip()
+            if before and before[-1] not in ".!?":
+                continue
+            low = sent.lower()
+            if any(marker in low for marker in ("<sup>", "http", "doi", "et al", "fig.", "table ")):
+                continue
+            tokens = re.findall(r"[a-z][a-z0-9-]{3,}", low)
+            score = len(set(tokens))
+            if 80 <= len(sent) <= 240:
+                score += 2
+            if re.search(r"\b(19|20)\d\d\b", sent):
+                score -= 3  # citation stubs and dated reference titles
+            candidates.append((pos, score, sent))
+        candidates.sort(key=lambda item: (-item[1], item[0]))
+        best = sorted(candidates[:limit], key=lambda item: item[0])
+        return [s for _pos, _score, s in best]
+
     def _expand_fronts(self, question: str, fronts_arg: str | None) -> list[str]:
         """Explicit `--fronts "a; b; c"` queries, or the configured facets
         applied to the task ("<task> — <facet>") when the agent leaves the
@@ -5825,10 +5863,9 @@ class HoardCore:
                 cite[url] = len(cite) + 1
             return f"[V#{cite[url]}]"
 
-        def quote_line(text: str, chunk: Chunk, start: int = 0,
-                       width: int = 240, suffix: str = "") -> bool:
-            """Append one deduplicated, complete-sentence quote line."""
-            snippet = self._dossier_quote(text, start, width)
+        def add_quote(snippet: str | None, chunk: Chunk,
+                      suffix: str = "") -> bool:
+            """Append one deduplicated, verbatim quote line."""
             if not snippet:
                 return False
             key = normalize_claim(snippet)
@@ -5878,7 +5915,8 @@ class HoardCore:
                 continue
             for c in chunks:
                 conf = c.metadata.get('confidence', 'n/a')
-                quote_line(c.text, c, suffix=f" (confidence: {conf})")
+                for snippet in self._dossier_quotes(c.text):
+                    add_quote(snippet, c, suffix=f" (confidence: {conf})")
             lines.append("")
 
         lines.append("## Claimed barriers")
@@ -5892,8 +5930,9 @@ class HoardCore:
             for b in barriers:
                 idx = " ".join(b["chunk"].text.split()).find(
                     " ".join(b["snippet"].split())[:60])
-                quote_line(b["chunk"].text, b["chunk"], start=max(0, idx),
-                           suffix=f' (matched barrier phrase: "{b["pattern"]}")')
+                snippet = self._dossier_quote(b["chunk"].text, max(0, idx))
+                add_quote(snippet, b["chunk"],
+                          suffix=f' (matched barrier phrase: "{b["pattern"]}")')
             lines.append("")
         else:
             lines.append("No barrier phrases surfaced in the recalled set — "
@@ -5939,9 +5978,11 @@ class HoardCore:
             for b in bridges:
                 fs = " and ".join(b["fronts"])
                 sims = " / ".join(str(s) for s in b["sims"])
-                quote_line(b["text"],
-                           Chunk(text=b["text"], metadata={"source_url": b["url"]}),
-                           suffix=f" (near fronts {fs}, cosine {sims})")
+                for snippet in self._dossier_quotes(b["text"], limit=1):
+                    add_quote(snippet,
+                              Chunk(text=b["text"],
+                                    metadata={"source_url": b["url"]}),
+                              suffix=f" (near fronts {fs}, cosine {sims})")
             lines.append("")
         else:
             lines.append("No bridge candidates crossed the centroid "
