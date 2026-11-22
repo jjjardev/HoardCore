@@ -225,6 +225,7 @@ Sources, doc versions, chunks, vectors, embedding dim/mode, schema version, page
 - **Fetch chain** (`balanced`/`aggressive`): aiohttp ∥ curl_cffi concurrently, first leg wins; a curl_cffi `200` beats an aiohttp anti-bot `404`/`403` body; FlareSolverr is the serialized terminal leg.
 - **Plugins:** `hoardcore.*` entry-point plugins auto-discovered (`plugins.enabled`); chunker via `chunking.strategy = "plugin.<name>"`; lifecycle hooks on `hoardcore.EventBus`.
 - **Discovery failure playbook:** one built-in engine (DuckDuckGo, solver-escalated). If discover fails: run `venv/bin/python tools/check_flaresolverr.py` (exit 0=healthy, 1=degraded, 2=unreachable); if degraded, recreate the container with `deploy/docker-compose.flaresolverr.yml` (needs sudo docker); meanwhile use the harness-search → `ingest --urls` rescue pattern above.
+- **curl_cffi native crash (0.17.7 known issue):** a malformed/203 response can abort the process before the fallback chain runs; use `--strategy fast` or the harness-search → `ingest --urls` rescue until fixed.
 - CLI chunk previews show 300 chars by default; pass `--preview-chars 0` for full text.
 - **Python 3.11+** — on failure run `make install`.
 - **Release gates (CI-enforced):** `tools/check_version.py` must report OK (`__version__` == `pyproject.toml` version, and == the git tag on `v*` pushes) and coverage ≥70% (`--cov-fail-under=70`). Run `venv/bin/python tools/check_version.py` and `make coverage` before tagging.

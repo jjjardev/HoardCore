@@ -352,6 +352,7 @@ Python 3.11+, `from __future__ import annotations` throughout, annotated public 
 | `Status 403 Blocked` on a protected site | Default `aggressive` strategy plus a running FlareSolverr with `[solver] enabled = true` |
 | Solver times out or every solve fails | Check `docker ps`; verify `[solver] url`; run `venv/bin/python tools/check_flaresolverr.py`. For wedged DNS, recreate from `deploy/docker-compose.flaresolverr.yml` |
 | Discovery returns nothing | DuckDuckGo may be IP-blocked; use harness search plus `ingest --urls`, or add a `hoardcore.providers` plugin |
+| Process aborts with `munmap_chunk(): invalid pointer` | The curl_cffi native leg crashed on a malformed/203 response; retry with `--strategy fast`, or use harness search plus `ingest --urls`, and report the triggering page |
 | Search returns empty | Empty queries return `[]` safely; try hybrid mode or a broader query |
 | Vault has junk or ghost sources | Purge with `prune --apply`, then re-ingest with `--force` |
 | Cache seems stale | `cache.ttl_seconds` defaults to 86400; set to `0` never to expire, or use `--force` |
