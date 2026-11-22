@@ -310,7 +310,7 @@ def test_search_challenge_page_skips_provider_without_retries():
     p = hc.WebSearchProvider(cfg, FakeFetcher())
     res = asyncio.run(p.search("what is x", max_results=5))
     assert res == []
-    assert calls["n"] == 1  # no retry storm against a hard block
+    assert calls["n"] == 2  # one attempt per provider, no retry storm
 
 
 def test_parse_duckduckgo_filters_ad_tracking_links():
@@ -708,3 +708,49 @@ def test_aggressive_runs_aiohttp_and_curl_concurrently(tmp_path):
     out = asyncio.run(f.fetch("http://x/", "aggressive"))
     assert out[0] == "curl content"
     assert calls["aio"] == 1 and calls["curl"] == 1
+
+
+def test_curl_native_crash_is_contained(tmp_path, monkeypatch):
+    """A curl_cffi native abort in the child must degrade the leg, not kill the CLI."""
+    monkeypatch.setattr(hc, "CURL_AVAILABLE", True)
+    dead = hc.subprocess.CompletedProcess(
+        args=[], returncode=-6, stdout="",
+        stderr="munmap_chunk(): invalid pointer")
+    monkeypatch.setattr(hc.subprocess, "run", lambda *a, **k: dead)
+    f = _fetcher(tmp_path)
+    out = asyncio.run(f._fetch_curl_cffi("https://x.test/page"))
+    assert out == (None, None, "", None)
+
+
+def test_curl_child_json_path_returns_text(tmp_path, monkeypatch):
+    monkeypatch.setattr(hc, "CURL_AVAILABLE", True)
+    good = hc.subprocess.CompletedProcess(
+        args=[], returncode=0,
+        stdout=hc.json.dumps({"status": 200, "final_url": "https://x.test/page",
+                              "content_type": "text/html",
+                              "text": "hello from child"}), stderr="")
+    monkeypatch.setattr(hc.subprocess, "run", lambda *a, **k: good)
+    f = _fetcher(tmp_path)
+    out = asyncio.run(f._fetch_curl_cffi("https://x.test/page"))
+    assert out == ("hello from child", None, "text/html", 200)
+
+
+def test_discovery_falls_back_to_bing_when_duckduckgo_blocks(tmp_path):
+    """A DuckDuckGo challenge must fall through to the second built-in provider."""
+    cfg = TempConfig(str(tmp_path), {"discovery.max_retries": 0})
+    calls = []
+
+    class FakeFetcher:
+        async def fetch(self, url, strategy):
+            calls.append(url)
+            if "duckduckgo" in url:
+                return ("<html><body>prove you are human</body></html>",
+                        None, "text/html")
+            return ('<li class="b_algo"><h2><a href="https://fallback.test/a">'
+                    'Fallback result</a></h2></li>', None, "text/html")
+
+    p = hc.WebSearchProvider(cfg, FakeFetcher())
+    res = asyncio.run(p.search("some query", max_results=5))
+    assert [r.url for r in res] == ["https://fallback.test/a"]
+    assert len(calls) == 2
+    assert "bing.com" in calls[1]

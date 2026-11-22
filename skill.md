@@ -113,7 +113,7 @@ Exit codes: `0` every front saturated · `1` dossier written but open fronts
 remain (label them in the synthesis) · `2` hard error.
 
 ## Capabilities
-Scrape (one URL: HTML/PDF/DOCX/EPUB) · Crawl (whole site via sitemap) · Search (local vault) · Discover (live DuckDuckGo + ingest top results) · Local (ingest `storage.local_dir`, no network) · Export (JSONL vault dump) · Emit (`artifacts/`).
+Scrape (one URL: HTML/PDF/DOCX/EPUB) · Crawl (whole site via sitemap) · Search (local vault) · Discover (live DuckDuckGo → Bing fallback + ingest top results) · Local (ingest `storage.local_dir`, no network) · Export (JSONL vault dump) · Emit (`artifacts/`).
 
 ## Hybrid Discovery — HoardCore + your harness's web tools
 - **Prime the hunt:** if you already hold the URLs, skip discovery and `ingest --urls "u1,u2"` (or `scrape`/`crawl` with `--urls`) — discovery is for *unknown* sources, not re-finding known ones.
@@ -224,8 +224,8 @@ Sources, doc versions, chunks, vectors, embedding dim/mode, schema version, page
 - **SSRF protection on** (`network.ssrf_protection=true`): refuses private/LAN/loopback/non-http(s); redirects re-validated on every hop/leg (curl_cffi/FlareSolverr re-validate the post-redirect final URL). Ask before disabling for internal targets.
 - **Fetch chain** (`balanced`/`aggressive`): aiohttp ∥ curl_cffi concurrently, first leg wins; a curl_cffi `200` beats an aiohttp anti-bot `404`/`403` body; FlareSolverr is the serialized terminal leg.
 - **Plugins:** `hoardcore.*` entry-point plugins auto-discovered (`plugins.enabled`); chunker via `chunking.strategy = "plugin.<name>"`; lifecycle hooks on `hoardcore.EventBus`.
-- **Discovery failure playbook:** one built-in engine (DuckDuckGo, solver-escalated). If discover fails: run `venv/bin/python tools/check_flaresolverr.py` (exit 0=healthy, 1=degraded, 2=unreachable); if degraded, recreate the container with `deploy/docker-compose.flaresolverr.yml` (needs sudo docker); meanwhile use the harness-search → `ingest --urls` rescue pattern above.
-- **curl_cffi native crash (0.17.7 known issue):** a malformed/203 response can abort the process before the fallback chain runs; use `--strategy fast` or the harness-search → `ingest --urls` rescue until fixed.
+- **Discovery failure playbook:** two built-in engines (DuckDuckGo, then Bing; both solver-escalated). If discover fails: run `venv/bin/python tools/check_flaresolverr.py` (exit 0=healthy, 1=degraded, 2=unreachable); if degraded, recreate the container with `deploy/docker-compose.flaresolverr.yml` (needs sudo docker); meanwhile use the harness-search → `ingest --urls` rescue pattern above.
+- **curl_cffi leg isolation:** the TLS-impersonation leg runs in a subprocess; a native failure is logged as a leg failure and the chain falls through to FlareSolverr or the next leg.
 - CLI chunk previews show 300 chars by default; pass `--preview-chars 0` for full text.
 - **Python 3.11+** — on failure run `make install`.
 - **Release gates (CI-enforced):** `tools/check_version.py` must report OK (`__version__` == `pyproject.toml` version, and == the git tag on `v*` pushes) and coverage ≥70% (`--cov-fail-under=70`). Run `venv/bin/python tools/check_version.py` and `make coverage` before tagging.

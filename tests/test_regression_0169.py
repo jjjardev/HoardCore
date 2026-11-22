@@ -172,7 +172,7 @@ def test_search_blocked_is_never_retried():
     p = hc.WebSearchProvider(cfg, FakeFetcher())
     res = asyncio.run(p.search("what is x", max_results=5))
     assert res == []
-    assert calls["n"] == 1  # hard block: no retry storm
+    assert calls["n"] == 2  # one attempt per provider; no retry storm
 
 
 # ---------------------------------------------------------------------------

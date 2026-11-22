@@ -2,7 +2,7 @@
 
 Adaptive research engine for AI agents - a memory it can prove, tools you can swap, and a loop that adapts.
 
-![Version](https://img.shields.io/badge/version-0.17.7-blue)
+![Version](https://img.shields.io/badge/version-0.17.8-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -156,7 +156,7 @@ Empty queries return `[]`; punctuation-only queries still run the vector leg in 
 
 ### Discovery and research
 
-`discover` turns a query into ingested sources through DuckDuckGo HTML (or `hoardcore.providers` plugins) with bounded retry and backoff. If it is blocked, harness-side search plus `ingest --urls` is the documented rescue path.
+`discover` turns a query into ingested sources through DuckDuckGo HTML, falling back to Bing if DuckDuckGo is blocked, and then to `hoardcore.providers` plugins. It uses bounded retry and backoff. If both built-in providers are blocked, harness-side search plus `ingest --urls` is the documented rescue path.
 
 `research` runs the full loop in one command: optional answer-first vault recall, DISCOVER, INGEST, RECALL, EMIT. It writes a grounding-context file (source URLs, scores, confidence bands, distinct-source summary, Source Links block) into `artifacts/YYYY-MM-DD/grounding/`. `--no-answer-first` forces a live hunt; `--discover 0` makes it recall-only.
 
@@ -351,8 +351,8 @@ Python 3.11+, `from __future__ import annotations` throughout, annotated public 
 |---|---|
 | `Status 403 Blocked` on a protected site | Default `aggressive` strategy plus a running FlareSolverr with `[solver] enabled = true` |
 | Solver times out or every solve fails | Check `docker ps`; verify `[solver] url`; run `venv/bin/python tools/check_flaresolverr.py`. For wedged DNS, recreate from `deploy/docker-compose.flaresolverr.yml` |
-| Discovery returns nothing | DuckDuckGo may be IP-blocked; use harness search plus `ingest --urls`, or add a `hoardcore.providers` plugin |
-| Process aborts with `munmap_chunk(): invalid pointer` | The curl_cffi native leg crashed on a malformed/203 response; retry with `--strategy fast`, or use harness search plus `ingest --urls`, and report the triggering page |
+| Discovery returns nothing | Both built-in providers may be blocked; use harness search plus `ingest --urls`, or add a `hoardcore.providers` plugin |
+| curl_cffi leg fails or crashes | The curl leg runs in a subprocess; a native failure degrades to the next fetch leg. Check the warning and the successful leg's status |
 | Search returns empty | Empty queries return `[]` safely; try hybrid mode or a broader query |
 | Vault has junk or ghost sources | Purge with `prune --apply`, then re-ingest with `--force` |
 | Cache seems stale | `cache.ttl_seconds` defaults to 86400; set to `0` never to expire, or use `--force` |

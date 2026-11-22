@@ -20,10 +20,11 @@ Usage (short form; legacy `URL --action ...` and `_ --action ...` still work):
 """
 from __future__ import annotations
 
-__version__ = "0.17.7"
+__version__ = "0.17.8"
 
 import argparse
 import asyncio
+import base64
 import difflib
 import hashlib
 import importlib.metadata
@@ -37,6 +38,7 @@ import queue
 import re
 import socket
 import sqlite3
+import subprocess  # nosec B404 - isolated curl_cffi leg, fixed argv
 import sys
 import threading
 import time
@@ -49,9 +51,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
+from html import unescape as _html_unescape
 from itertools import combinations
 from typing import Any
-from urllib.parse import unquote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
 
 # --- GUARANTEED DEPENDENCIES (Installed via Makefile) ---
 import aiohttp
@@ -109,6 +112,35 @@ except ImportError:
     curl_requests = None  # type: ignore[assignment]
     CURL_AVAILABLE = False
     print("Warning: curl_cffi not found. Advanced TLS impersonation disabled.", file=sys.stderr)
+
+# curl_cffi is a native extension: a malformed/203 response can abort the whole
+# process with `munmap_chunk(): invalid pointer`, which no Python try/except
+# can catch. The leg therefore runs in a short-lived child process. A child
+# crash is treated exactly like any other leg failure: the chain falls through.
+_CURL_CHILD = r'''
+import base64, json, sys
+try:
+    from curl_cffi import requests as cr
+except Exception:
+    sys.exit(3)
+p = json.load(sys.stdin)
+try:
+    r = cr.get(p["url"], cookies=p.get("cookies"), headers=p.get("headers"),
+               impersonate=p.get("impersonate", "chrome120"),
+               timeout=p.get("timeout", 30))
+    ct = r.headers.get("Content-Type", "text/plain").split(";")[0].strip()
+    out = {"status": r.status_code,
+           "final_url": str(getattr(r, "url", p["url"]) or p["url"]),
+           "content_type": ct, "text": None, "binary_b64": None}
+    if r.status_code == 200:
+        if "text" in ct or not getattr(r, "content", None):
+            out["text"] = r.text
+        else:
+            out["binary_b64"] = base64.b64encode(r.content).decode("ascii")
+    print(json.dumps(out))
+except Exception as exc:
+    print(json.dumps({"error": str(exc)}))
+'''
 
 # --- Logging ---
 logging.basicConfig(
@@ -3461,46 +3493,63 @@ class NetworkFetcher:
             return None, None, '', None
 
     async def _fetch_curl_cffi(self, url: str) -> tuple[str | None, bytes | None, str, int | None]:
+        """TLS-impersonating fetch leg, isolated in a subprocess.
+
+        A native crash in curl_cffi is contained to the child and degrades to
+        the next leg instead of aborting the CLI process.
+        """
         if not CURL_AVAILABLE:
             return None, None, '', None
+        payload = {
+            "url": url,
+            "cookies": self._parse_cookies(),
+            "headers": {'User-Agent': self._user_agent},
+            "impersonate": "chrome120",
+            "timeout": self._timeout,
+        }
 
-        cookies = self._parse_cookies()
+        def _run() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(  # nosec B603 - fixed interpreter/argv, no shell
+                [sys.executable, "-c", _CURL_CHILD],
+                input=json.dumps(payload), capture_output=True, text=True,
+                timeout=self._timeout + 10,
+            )
+
         try:
-            def _sync_fetch():
-                if curl_requests is None:
-                    raise RuntimeError("curl_cffi unexpectedly unavailable")
-                resp = curl_requests.get(
-                    url,
-                    cookies=cookies,
-                    headers={'User-Agent': self._user_agent},
-                    impersonate="chrome120",
-                    timeout=self._timeout,
-                )
-                return resp
-            resp = await asyncio.to_thread(_sync_fetch)
-
-            # curl follows redirects internally; re-validate the FINAL URL so a
-            # redirect chain into an internal address is never accepted (C1).
-            final_url = str(getattr(resp, 'url', url) or url)
-            if self._ssrf_protected and not self.validate_url_target(final_url):
-                logger.warning(f"curl_cffi: SSRF guard refused final URL {final_url}")
-                return None, None, 'text/html', 403
-
-            content_type = resp.headers.get('Content-Type', 'text/plain').split(';')[0].strip()
-            if resp.status_code == 200:
-                if 'text' in content_type:
-                    return resp.text, None, content_type, resp.status_code
-                else:
-                    return None, resp.content, content_type, resp.status_code
-            elif resp.status_code == 403:
-                logger.warning("curl_cffi: 403 Blocked.")
-                return None, None, content_type, resp.status_code
-            else:
-                logger.warning(f"curl_cffi: Status {resp.status_code}")
-                return None, None, content_type, resp.status_code
+            proc = await asyncio.to_thread(_run)
         except Exception as e:
-            logger.debug(f"curl_cffi failed: {e}")
+            logger.warning(f"curl_cffi leg unavailable: {e}")
             return None, None, '', None
+        if proc.returncode != 0:
+            logger.warning(
+                f"curl_cffi leg exited {proc.returncode} "
+                f"({proc.stderr.strip()[:120]}); falling through")
+            return None, None, '', None
+        try:
+            data = json.loads(proc.stdout or "{}")
+        except (TypeError, ValueError):
+            logger.warning("curl_cffi leg returned no JSON; falling through")
+            return None, None, '', None
+        if data.get("error"):
+            logger.debug(f"curl_cffi failed: {data['error']}")
+            return None, None, '', None
+
+        final_url = str(data.get("final_url") or url)
+        if self._ssrf_protected and not self.validate_url_target(final_url):
+            logger.warning(f"curl_cffi: SSRF guard refused final URL {final_url}")
+            return None, None, 'text/html', 403
+        content_type = str(data.get("content_type") or 'text/plain')
+        status = int(data.get("status") or 0)
+        text = data.get("text")
+        binary = (base64.b64decode(data["binary_b64"])
+                  if data.get("binary_b64") else None)
+        if status == 200 and (text is not None or binary is not None):
+            return text, binary, content_type, status
+        if status == 403:
+            logger.warning("curl_cffi: 403 Blocked.")
+        elif status:
+            logger.warning(f"curl_cffi: Status {status}")
+        return None, None, content_type, status
 
     async def _solver_cmd(self, payload: dict[str, Any],
                           timeout: ClientTimeout) -> dict[str, Any] | None:
@@ -4683,6 +4732,32 @@ class WebSearchProvider:
                 break
         return results
 
+    @staticmethod
+    def _parse_bing(text: str, max_results: int) -> list[SearchResult]:
+        """Parse Bing HTML results (fallback provider for DuckDuckGo blocks)."""
+        results: list[SearchResult] = []
+        for m in re.finditer(
+            r'<li class="b_algo".*?<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+            text, re.IGNORECASE | re.DOTALL,
+        ):
+            href = _html_unescape(m.group(1))
+            if "bing.com/ck/a" in href:
+                u = parse_qs(urlparse(href).query).get("u", [""])[0]
+                if u.startswith("a1"):
+                    raw = u[2:]
+                    raw += "=" * ((4 - len(raw) % 4) % 4)
+                    try:
+                        href = base64.urlsafe_b64decode(raw).decode("utf-8", "replace")
+                    except Exception:
+                        href = ""
+            if not href.startswith("http") or is_ad_tracking_url(href):
+                continue
+            results.append(SearchResult(
+                title=WebSearchProvider._clean_title(m.group(2)), url=href))
+            if len(results) >= max_results:
+                break
+        return results
+
     async def _try_provider(self, url: str, strategy: str, max_results: int,
                             parser) -> list[SearchResult]:
         try:
@@ -4710,6 +4785,8 @@ class WebSearchProvider:
         providers = [
             ("duckduckgo", f"https://html.duckduckgo.com/html/?{q}",
              self._parse_duckduckgo),
+            ("bing", f"https://www.bing.com/search?{q}&count=20",
+             self._parse_bing),
         ]
 
         for label, url, parser in providers:
