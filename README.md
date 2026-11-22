@@ -1,534 +1,189 @@
 # HoardCore
 
-Adaptive research engine for AI agents — a memory it can prove, tools you can swap, and a loop that adapts.
+Adaptive research engine for AI agents - a memory it can prove, tools you can swap, and a loop that adapts.
 
-Terminal tool that turns the web into a permanent, local SQLite vault your AI agent can hunt with, recall from, and cite. DuckDuckGo web discovery, Cloudflare-aware fetching, hybrid FTS5 + dense-vector retrieval (ONNX, no PyTorch), and a bounded `DISCOVER → INGEST → RECALL → EMIT` research loop with mandatory `[V]/[E]/[H]` provenance. Lightweight and single-file — but with real semantic retrieval, not a toy hash.
-
-**Research mode on crack, with the hood off.** It adapts: a research pass has depth presets and termination guards, a hard question gets split into fronts that are re-hunted when the evidence runs thin, and fetching escalates from a plain HTTP request to TLS impersonation to a browser solver. It extends: four plugin entry points and a lifecycle event bus let you swap in parsers, fetchers, discovery providers, and chunkers without editing the engine. It stays honest: every output can be traced to stored text and machine-audited. It is **extensible, not self-modifying** — it does not write new tools at runtime.
-
-![Version](https://img.shields.io/badge/version-0.17.2-blue)
+![Version](https://img.shields.io/badge/version-0.17.3-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
----
+## Contents
 
-## Table of Contents
-
-- [About](#about)
+- [What it is](#what-it-is)
 - [How it adapts](#how-it-adapts)
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [60-second first run](#60-second-first-run)
-- [Quick Start for Humans](#quick-start-for-humans)
-- [Quick Start (raw CLI)](#quick-start-raw-cli)
-- [Agent Integration](#agent-integration)
-- [Feature Tour](#feature-tour)
-  - [Plugin System & Event Bus](#plugin-system--event-bus)
-  - [Extend the toolbox](#extend-the-toolbox)
-  - [Ingest Mode](#ingest-mode-scrape--crawl)
-  - [Hybrid Retrieval](#hybrid-retrieval)
-  - [Discovery Mode](#discovery-mode)
-  - [Research Workflow](#research-workflow)
-  - [Provenance Discipline & Epistemic Hygiene](#provenance-discipline--epistemic-hygiene)
-  - [Cross-Domain Synthesis](#cross-domain-synthesis)
-  - [Learning & Education Workflows](#learning--education-workflows)
-  - [Artifacts](#artifacts)
-  - [Vault durability, dedup & integrity](#vault-durability-dedup--integrity)
-- [CLI Reference](#cli-reference)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Working with an agent](#working-with-an-agent)
+- [Core capabilities](#core-capabilities)
+- [CLI reference](#cli-reference)
 - [Architecture](#architecture)
-- [Package Structure](#package-structure)
+- [Repository layout](#repository-layout)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
 - [License](#license)
 
----
+## What it is
 
-## About
+HoardCore is a single-file Python engine plus CLI. It fetches web pages and local documents into a persistent SQLite vault, retrieves from that vault with hybrid search (SQLite FTS5 fused with ONNX vector search via Reciprocal Rank Fusion), and gives every claim a provenance tag that can be machine-audited.
 
-HoardCore is a research toolkit for AI agents — a single-file Python module (SQLite vault + CLI) for retrieval and deep research. It hoards knowledge: it turns the web into a permanent, local, searchable SQLite vault, then backs your agent's research with explicit discovery budgets, hybrid retrieval, and citeable provenance. Retrieval is **dense by default** — an ONNX-quantized sentence-transformer (via `fastembed` on `onnxruntime`, no PyTorch) fused with SQLite FTS5 keyword search via Reciprocal Rank Fusion (RRF). A lightweight sparse-hash fallback kicks in automatically only where the dense model is unavailable. The vault is schema-versioned and embedding-fingerprinted, so model/config switches never serve stale vectors.
+**Research mode on crack, with the hood off.** The research loop has depth presets and termination guards. A hard question is split into fronts that are re-hunted when evidence runs thin. Fetching escalates from plain HTTP to TLS impersonation to a browser solver. Four plugin entry points and a lifecycle event bus let you swap in parsers, fetchers, discovery providers, and chunkers. The engine is **extensible, not self-modifying**: it does not write new tools at runtime.
 
-**HoardCore is not an agent harness.** It provides the DISCOVER → INGEST → RECALL → EMIT loop, hybrid retrieval, and provenance tagging — but it does not host an LLM or manage context. That is the job of your **agent harness** (e.g., OpenCode, Claude Code, or any other): the harness hosts the agent, the agent reads `skill.md`, and the agent executes HoardCore commands via its CLI.
+HoardCore is **not an agent harness**. It hosts no LLM and manages no context. Your harness (OpenCode, Claude Code, or any other) hosts the agent; the agent reads `skill.md` and calls HoardCore through its CLI. The relationship is a protocol, not a portal: you set the discovery budget (`--discover N`), recall depth (`--recall N`), fetch strategy (`--strategy`), vault scope (`--vault NAME`), and epistemic standard (`[V]/[E]/[H]`) instead of hoping a chat product applied them.
 
-The relationship to the agent is the point. Chat-based "deep research" is a ride — you get in, it drives, you hope it took the right route. HoardCore is a **vehicle with the hood off**: you set the discovery budget (`--discover N`), the recall depth (`--recall N`), the anti-bot escalation (`--strategy`), the output schema, and the epistemic standard (`[V]/[E]/[H]` on every claim). Consumer AI is a portal you enter; HoardCore is a protocol your agent follows.
-
-**Stress-tested on frontier problems.** The research loop has been validated on live theoretical computer science questions — e.g., deterministic approximation schemes for Edit Distance and Longest Common Subsequence — where it successfully ingested contemporaneous papers from disjoint domains (geometric grid sparsification, combinatorial streaming, algebraic fingerprinting), synthesized a non-obvious algorithmic bridge, and emitted a falsifiable research proposal with zero hallucinated citations and explicit impossibility barriers. The protocol does not eliminate human judgment; it makes the evidence chain machine-auditable so that human oversight scales.
-
-Key characteristics:
-
-- **Single-file core.** The entire engine is one module, `hoardcore.py`, runnable as a CLI or imported as a library.
-- **Real semantic retrieval, dense by default.** An ONNX-quantized sentence-transformer (`BAAI/bge-small-en-v1.5`, 384-dim) runs on `onnxruntime` — no PyTorch, no GPU. Hybrid retrieval fuses FTS5 keyword search with dense vector similarity so both exact terms and *meaning* surface. A lightweight sparse hash (`mode = "sparse"`) is available as a fallback for environments without `fastembed`, and dense mode degrades to it automatically if the dependency is missing.
-- **Lightweight and self-hosted.** One file, local-first, everything on your machine. **FlareSolverr (Docker) is required for Cloudflare-protected pages** — set `[solver] enabled = true` in `hoardcore.toml` and the `aggressive` (default) strategy routes Cloudflare-shaped challenges through FlareSolverr rather than failing on them. The shipped default config has `solver.enabled = false`; until you flip it, the FlareSolverr leg is a silent no-op and anti-bot pages will fail (open pages fetch fine). Lazy binary imports mean HTML-only usage never pulls in PDF/DOCX/EPUB libraries.
-- **Resilient fetch chain.** `fast` → aiohttp; `balanced`/`aggressive` → aiohttp and curl_cffi TLS-impersonation **concurrently** (the first leg that returns content wins); `aggressive` (default) → adds FlareSolverr as a serialized terminal leg for Cloudflare-shaped challenges. Discovery adds bounded retry with exponential backoff and challenge-page detection; alternative engines plug in via `hoardcore.providers`.
-- **Hybrid retrieval.** Merges keyword (BM25-style FTS5) and vector-similarity ranks via RRF, so both exact terms and near-literal matches surface. The dense scan is a cached numpy matrix–vector product over the whole vector table — no per-row Python loop. Empty or punctuation-only queries return safely instead of crashing. Hits carry **confidence bands** (`high`/`medium`/`low`) surfaced in chunk metadata and grounding output; an optional cross-encoder (`embeddings.reranker_model`) can re-rank the final set.
-- **Research workflow.** A single `research` action runs `DISCOVER → INGEST → RECALL → EMIT`, writing a grounding-context file into the `artifacts/` directory for direct injection into an LLM.
-- **Programmatic provenance audit.** A `verify` action re-checks a claim against the vault's stored text (verbatim, partial, or unverified) with CI-wireable exit codes, so the `[V]` tag is machine-checkable, not just prompt-enforced.
-- **Artifacts discipline.** Finished deliverables live in `artifacts/` with `[V]/[E]/[H]` provenance tags and numbered source links; a safe `write_artifact()` helper includes path-traversal protection, and deliverables are day-sorted into `artifacts/YYYY-MM-DD/`.
-- **SSRF protection on by default.** Fetch targets are validated before any request (aiohttp re-validates every redirect hop; the curl_cffi/FlareSolverr fallbacks re-validate the post-redirect final URL) — non-`http(s)` schemes, private/LAN/loopback/link-local addresses, and DNS-special names are refused (`network.ssrf_protection`, default `true`).
-- **Plugin system & event bus.** Third-party parsers/fetchers/providers/chunkers drop in via `importlib.metadata` entry points, and a lifecycle `EventBus` publishes `document.ingested` / `chunk.embedded` / `discovery.completed` / `search.completed` hooks — a broken plugin never aborts a crawl.
-- **Self-verifying vault.** Content-addressed chunks (BLAKE2b), schema versioning (`PRAGMA user_version`), and embedding fingerprints (`embed_fp`) mean re-ingested content dedupes, stale vectors are never served, and `--action check` proves integrity with CI-wireable exit codes.
-- **MIT licensed.** Free to use, modify, and redistribute.
-
----
+Retrieval is dense by default: an ONNX-quantized sentence-transformer runs on `onnxruntime` (no PyTorch, no GPU), with an automatic sparse-hash fallback if the model is unavailable. The vault is schema-versioned and embedding-fingerprinted, so a model or config change never serves stale vectors.
 
 ## How it adapts
 
-The research loop is not a fixed bash script with extra flags. It watches its own evidence and changes behavior:
-
-| What adapts | Mechanism you can see |
+| What adapts | Mechanism |
 |---|---|
-| Research depth | `research` depth presets (3/6/10 passes, 5/8/15 sources) plus saturation and diminishing-return termination guards |
-| Attack on a hard question | `solve` splits the question into fronts, skips fronts the vault already satisfies, and re-hunts unsaturated fronts with refined queries on later passes |
-| Fetch strategy | `fast` → `balanced` → `aggressive` (aiohttp, then concurrent aiohttp + curl_cffi, then FlareSolverr for Cloudflare-shaped challenges), with backoff and retry |
-| Retrieval backend | Dense ONNX embeddings by default; automatic sparse-hash fallback if the model is unavailable, with RRF fusion either way |
-| Tool surface | Four plugin entry points (`parsers`, `fetchers`, `providers`, `chunkers`) plus four lifecycle event hooks, all failure-tolerant |
+| Research depth | `research` depth presets (3/6/10 passes, 5/8/15 sources) with saturation and diminishing-return termination guards |
+| Attack on a hard question | `solve` skips fronts the vault already answers, then re-hunts unsaturated fronts with refined queries on later passes |
+| Fetch strategy | `fast` to `balanced` to `aggressive`: aiohttp, then concurrent aiohttp + curl_cffi, then FlareSolverr for challenge pages, with backoff and retry |
+| Retrieval backend | Dense ONNX embeddings by default, sparse hashing as fallback, RRF fusion either way |
+| Tool surface | Four plugin groups (`parsers`, `fetchers`, `providers`, `chunkers`) and four event hooks, all failure-tolerant |
 
-None of this hosts an LLM or rewrites the engine. Your harness supplies the judgment; HoardCore supplies the adaptive evidence machinery and the audit trail.
+The judgment stays with the agent. HoardCore supplies the adaptive evidence machinery and the audit trail.
 
-## Prerequisites
+## Install
 
-| Requirement | Purpose | Install |
-|---|---|---|
-| **Python 3.11+** | Runtime (uses `tomllib`) | `python3 --version` |
-| **fastembed + onnxruntime** | Dense retrieval (ONNX-quantized sentence-transformer; no PyTorch/GPU) | Installed via Makefile |
-| **curl_cffi** | TLS-fingerprint impersonation for harder anti-bot pages | Installed via Makefile |
-| **FlareSolverr** *(required for Cloudflare-protected pages)* | Fetch Cloudflare-protected pages — the `aggressive` strategy routes challenges through it once `[solver] enabled = true` in `hoardcore.toml`. The shipped default config has the solver disabled, so open pages work with no FlareSolverr at all | `docker run -d --name=flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr` |
-| **PyMuPDF / python-docx / ebooklib** *(optional)* | PDF, DOCX, EPUB parsing | Installed via Makefile |
-| **rapidocr_onnxruntime** *(optional)* | OCR fallback for scanned/image-only PDF pages (local ONNX, no system deps) | `pip install .[ocr]` |
-
-FlareSolverr is **required for Cloudflare-protected coverage**: run the container, set `[solver] enabled = true` in `hoardcore.toml`, and the default `aggressive` strategy routes anti-bot-protected pages through it. It runs as a small Docker container on `http://localhost:8191/v1` (override the endpoint via `[solver] url`).
-
-**Session reuse (the default) is what makes bulk crawls practical.** Every `request.get` without a session spins up a fresh browser context, so each URL re-pays the Cloudflare challenge — the ~50 s/URL cost that turns a few dozen pages into an overnight job. HoardCore therefore creates **one browser session per run** (`[solver] session_reuse = true`) and reuses it, so only the first solve is slow; a session rejected mid-batch is dropped and that URL retried statelessly once, and the session is destroyed at the end of the run so no browser context is left holding memory. Measured against a live solver: three solves went from **8.6 s to 4.5 s** (per-URL 3.4/2.2/3.0 s → 2.2/1.1/1.0 s); the gap widens on a site that challenges harder.
-
-**More throughput:** `[solver] urls` takes extra endpoints (comma/space separated) and *appends* to `url`, which is always tried first. Commands fall through in order, so a second container doubles throughput on a large protected crawl and a dead one degrades instead of failing every fetch. The shipped default config has `solver.enabled = false`, so a stock install never calls FlareSolverr — open pages work, protected ones fail. For environments that cannot run Docker, keep the solver off and rely on the curl_cffi TLS-impersonation leg of `balanced`/`aggressive` — but expect more anti-bot blocks, since FlareSolverr is what actually clears the challenge.
-
----
-
-## Installation
+Requirements: Python 3.11+, and Docker only if you need Cloudflare-protected pages.
 
 ```bash
 git clone https://github.com/jjjardev/HoardCore.git
 cd HoardCore
+make install                 # venv + core deps: fastembed, onnxruntime, curl_cffi, parsers, test/lint tools
+make test                    # 352 tests
 ```
 
-### Option A: Makefile (zero-config)
+Editable install for development: `pip install -e ".[test]"` gives a `hoardcore` console script. Running in place works too: `venv/bin/python hoardcore.py ...`. All three launch the same CLI. The vault lives at `hoardcore_data/vault.db` and deliverables at `artifacts/` by default; both are git-ignored.
 
-```bash
-make install    # create venv + install core deps
-make run        # smoke-test a scrape
-make discover   # web-search + ingest (feed the vault from a live query)
-make test       # run the pytest suite
-make bench      # run the vector-search benchmark (float32/int8 x page sizes)
-make clean      # wipe vault, caches, and config
-```
-
-### Option B: pip editable (development install)
-
-```bash
-pip install -e ".[test]"
-hoardcore        # console script
-```
-
-### Option C: run in-place (no install)
-
-```bash
-venv/bin/python hoardcore.py https://example.com --action scrape
-```
-
-The console script `hoardcore` (or `python -m hoardcore` / `python hoardcore.py`) all launch the same CLI. The vault is written to `hoardcore_data/vault.db` and deliverables to `artifacts/` (both configurable).
-
-**Start FlareSolverr (required for Cloudflare-protected coverage):**
+**FlareSolverr (only for protected pages).** Open pages work without it. For challenge pages, start the container and enable the solver:
 
 ```bash
 docker run -d --name=flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr
 ```
-
-Then enable the solver so the `aggressive` strategy (the default) actually hands challenges to it:
 
 ```toml
 [solver]
 enabled = true
 ```
 
-Without the container **and** `enabled = true`, the `aggressive` strategy's FlareSolverr leg is a silent no-op, and Cloudflare-protected pages will be blocked. HoardCore still works on open pages either way — FlareSolverr is only needed to reach the many sites that gate their content behind a challenge.
+The default `aggressive` strategy then routes challenges through `http://localhost:8191/v1`. One browser session is reused per run and destroyed on exit, so a bulk crawl does not re-pay the challenge for every URL. Extra endpoints go in `[solver] urls`; a dead endpoint degrades instead of failing the run. Without Docker, leave the solver off and rely on curl_cffi, accepting more blocks.
 
-**Optional — OCR for scanned PDFs**:
+Optional: `pip install rapidocr_onnxruntime` (or `pip install .[ocr]`) enables local OCR of scanned/image-only PDF pages.
 
-```bash
-make install && venv/bin/python -m pip install rapidocr_onnxruntime   # or: pip install .[ocr]
-```
+## Quick start
 
-Once installed, image-only/scanned PDF pages are OCR'd automatically (RapidOCR, local ONNX, no system deps); without it, those pages degrade gracefully. See [Ingest](#ingest-mode-scrape--crawl).
+**Easiest path with an agent:** clone the repo, open your harness inside the `HoardCore/` folder, and either say *"set up HoardCore"* or just ask your first research question. `AGENTS.md` makes the agent read `skill.md` before any task, and `skill.md` tells it to run `make install` when Python prerequisites are missing, so the first real request usually bootstraps the venv on its own. To be certain, ask explicitly:
 
-**Retrieval modes.** Dense retrieval is **on by default** — `make install` includes `fastembed`, so hybrid search uses an ONNX-quantized sentence-transformer (default `BAAI/bge-small-en-v1.5`, 384-dim, runs on `onnxruntime` — no PyTorch, no GPU) for meaning-based matching. If `fastembed` is unavailable in a given environment, dense mode **degrades gracefully to the lightweight sparse hash** — it never crashes. To force the sparse hash explicitly, set `mode = "sparse"` in the `[embeddings]` section of `hoardcore.toml`. Switching modes rebuilds the vector table automatically (resumable across interrupts). See [Hybrid Retrieval](#hybrid-retrieval) and [Configuration](#configuration-file-hoardcoretoml).
+> Read `skill.md` first, then set up HoardCore (`make install`) and start FlareSolverr if I need protected pages.
 
-**Model downloads once, then never again.** The ONNX model (~65 MB) is stored on disk in a *persistent* location — `~/.cache/hoardcore/models` by default (`embeddings.cache_dir`). `fastembed`'s own default lives under `/tmp`, which is wiped on every reboot, so before this the model was re-downloaded at every boot; now it is fetched exactly once and reused forever. Set `embeddings.offline = true` to load strictly from that directory — it skips the per-run revision check, works with no network at all, and *fails loudly* (instead of silently demoting to sparse hashing) if the model was never downloaded. Both the embedding model and the optional `reranker_model` share the same cache. The cache path is deliberately **not** part of the embedding fingerprint, so moving or deleting the cache never invalidates stored vectors.
-
----
-
-## 60-second first run
-
-After installation, from the repo root:
+The commands below are the manual path. From the repo root, after install:
 
 ```bash
-python hoardcore.py                                  # prints the quick start, does not "scrape" anything
-python hoardcore.py scrape https://example.com        # one page into the local vault
-python hoardcore.py search "example domain"           # recall what you just stored
+python hoardcore.py                                   # prints a short guide; scrapes nothing
+python hoardcore.py scrape https://example.com         # fetch one page into the vault
+python hoardcore.py search "example domain"            # recall what you stored
 python hoardcore.py research "what is reciprocal rank fusion" --discover 3 --recall 5
-python hoardcore.py verify "RRF ignores scores and uses rank positions"  # 0/1/2 exit code
-python hoardcore.py stats                             # what is in the vault
+python hoardcore.py verify "RRF ignores scores and uses rank positions"   # exit 0/1/2
+python hoardcore.py stats                              # vault summary
 ```
 
-No `_` placeholder, no `--action` ceremony. Every command also works in the legacy form (`python hoardcore.py _ --action stats`) used by agents and older scripts.
+Commands use the short form: `hoardcore ACTION [ARG] [flags]`. The legacy form (`python hoardcore.py _ --action search --query "..."`, or `URL --action scrape`) remains fully supported and is what `skill.md` teaches agents to use. `python hoardcore.py` with no arguments prints the quick start instead of trying to scrape a placeholder.
 
-## Quick Start for Humans
-
-HoardCore is a tool *for your AI agent* to hoard, recall, and cite — you rarely type its commands yourself; your agent does. This README is for you, the human, so here is the human's onboarding. Two paths — pick one.
-
-### Path A — Let an AI agent set it up (recommended)
-
-If you already use an agent harness (OpenCode, Claude Code, any other), you don't need to touch the terminal:
-
-1. Open your harness in any directory and paste the clone URL to the agent:
-   ```
-   git clone https://github.com/jjjardev/HoardCore.git
-   ```
-2. Tell the agent: *"install HoardCore's dependencies and start FlareSolverr."* The agent reads the repo and runs `make install` plus the FlareSolverr container (below) for you.
-3. When setup is done, **close the harness and reopen it inside the `HoardCore/` folder.** Your harness auto-loads `AGENTS.md` at session start, which tells the agent to read `skill.md` in full before any task. HoardCore is now ready: ask it to research, scrape, or summarize anything and it drives the CLI for you.
-   - If your harness does not auto-load `AGENTS.md`, just start with the words: *"Read skill.md first, then ..."*.
-
-Try it now — an example query you can type to your agent:
-
-```
-You: research deep the state of lunar exploration in 2026.
-Agent: (reads skill.md -> opens the Hardcore Research Loop, budget 6 passes x >=8 sources)
-  venv/bin/python hoardcore.py _ --action research \
-     --query "lunar exploration 2026" --discover 6 --recall 8
-  -> writes a [V]/[E]/[H]-tagged report to artifacts/ and replies with a 3-bullet summary
-```
-
-### Path B — Manual setup (no agent)
+More one-liners:
 
 ```bash
-git clone https://github.com/jjjardev/HoardCore.git
-cd HoardCore
-make install                      # create venv + install core deps
-
-# Start FlareSolverr (required for full anti-bot coverage):
-docker run -d --name=flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr
-```
-
-Then either drive the raw CLI yourself (see [Quick Start (raw CLI)](#quick-start-raw-cli)) or reopen your harness in this folder so the agent reads `skill.md` and takes over.
-
-> Once set up, the human's job is done: **you ask, the agent reads `skill.md`, and the agent runs HoardCore's CLI for you.** The vault persists between sessions — later questions are answered instantly from local memory, with no network.
-
----
-
-## Quick Start (raw CLI, no agent)
-
-```bash
-# Scrape a single URL and index it
-python hoardcore.py scrape https://en.wikipedia.org/wiki/Solar_power
-
-# Search the vault (full-text or hybrid) for previously ingested content
-python hoardcore.py search "renewable energy negros"
-
-# Ingest an explicit list of URLs
 python hoardcore.py ingest "https://a.test/1,https://b.test/2"
-
-# Discover the web for a topic and ingest the top results
-python hoardcore.py discover "negros renewable energy" --limit 5
-
-# Run the full agentic research workflow -> artifact under artifacts/
-python hoardcore.py research "how does bokashi compost" --discover 5 --recall 6
-
-# Programmatically verify a claim against the vault (0=verified, 1=partial, 2=unverified)
-python hoardcore.py verify "the Epoch doubling time is 6 months" --recall 5
-
-# Audit an artifact's [V#N] evidence chain (verbatim verify + source-link mapping + ingested)
-python hoardcore.py audit artifacts/2026-08-18/synthesis_x.md
-
-# Pre-audit authoring lint (no vault/network; --strict escalates warnings)
-python hoardcore.py lint artifacts/2026-08-18/synthesis_x.md --strict
-
-# Detect & purge transport-error ghost sources (dry-run by default)
-python hoardcore.py prune                 # scan all vaults in scope
-python hoardcore.py prune --apply         # actually delete rows
-
-# Run a three-phase vault integrity check (0=pass, 1=fail)
-python hoardcore.py check
-echo "exit code: $?"
-
-# Rebuild an existing vault at the new 16 KB page size (legacy 4 KB vaults keep their old size otherwise)
-python hoardcore.py check --migrate
-
-# Search ergonomics: force FTS-only (fast) or force hybrid vector+RRF (hybrid)
-python hoardcore.py search "solar farm" --mode fast
-python hoardcore.py search "solar farm" --mode hybrid
-
-# Same, but write the grounding context to a specific file
-python hoardcore.py research "negros economy" --out artifacts/report.md
-
-# Crawl an entire site via its sitemap
+python hoardcore.py discover "renewable energy negros" --limit 5
 python hoardcore.py crawl https://docs.python.org --strategy aggressive
-
-# Machine-readable output for scripts
+python hoardcore.py audit artifacts/2026-11-22/report.md --vault mytopic
+python hoardcore.py lint artifacts/2026-11-22/report.md --strict
+python hoardcore.py check --migrate
+python hoardcore.py export backup.jsonl --vault mytopic
 python hoardcore.py stats --json
-python hoardcore.py search "solar farm" --json
 ```
 
-Every command above also works in the legacy form (`python hoardcore.py _ --action search --query ...`), which agents and older scripts use. `python hoardcore.py` with no arguments prints a short quick start instead of trying to scrape a placeholder.
+## Working with an agent
 
-The vault persists between runs. Later searches are instant and require no network.
+HoardCore is usually driven by an agent, not typed by a human. Three documents define the contract:
 
----
-
-## Agent Integration
-
-**HoardCore is a research toolkit and memory protocol that any AI agent or harness can call into. It is not itself a harness.** The harness (e.g., [OpenCode](https://opencode.ai), Claude Code, or any other) hosts the LLM and manages context; the agent that runs inside it reads `skill.md` and drives HoardCore via its CLI. HoardCore's role is to give the agent a persistent, verifiable memory: the agent calls it to hoard the web, then queries the vault instead of trusting its own (decaying or invented) recall.
-
-**HoardCore is a protocol, not a portal.** Chat products are portals you enter and whose epistemic standards you accept. HoardCore specifies *how* your agent hunts (`discover` → `ingest`), recalls (`FTS5 + RRF`), verifies (`[V]/[E]/[H]` + adversarial audit), and emits (`artifacts/` with grounding context). You can plug any LLM and any harness into this protocol; HoardCore doesn't care which harness hosts the agent — it only requires that the agent follows the protocol.
-
-| HoardCore provides (on your machine) | The agent does (any model, any harness) |
-|---|---|
-| Fetch web content (HTML/PDF/DOCX/EPUB/OCR) | Reads the user's request and `skill.md` |
-| Store everything in a persistent SQLite vault | Drives the `hoardcore` CLI (discover / ingest / search / research) |
-| Hybrid-retrieve the most relevant chunks (FTS5 + vectors, RRF) | Reads the grounding context and cross-checks claims |
-| Stay single-file, with dense ONNX retrieval built in (no PyTorch/GPU) | Writes the finished, `[V]/[E]/[H]`-tagged report |
-
-### First-class controls (not buried in prompt engineering)
-
-Because an agent drives HoardCore via `skill.md` and the CLI, these parameters are **exposed as first-class controls**, not buried in prompt engineering:
-
-| Parameter | What It Controls | Why It Matters |
-|---|---|---|
-| `--discover N` | How many sources to hunt before ingesting (`0` = recall-only: vault query + grounding only, web hunt skipped) | More sources = broader coverage; fewer = faster turnaround |
-| `--recall N` | How many chunks to retrieve per synthesis pass | More chunks = deeper context; fewer = sharper focus |
-| `--strategy {fast,balanced,aggressive}` | Anti-bot escalation chain | Government sites and job boards require FlareSolverr; lightweight blogs don't |
-| `--vault NAME` | Scope the whole session to a per-topic vault (`hoardcore_data/NAME/`); a list (`a,b,c`) adds read-only companions for cross-vault search/verify/audit | Keeps recall clean: research memory is isolated per topic/domain instead of polluting one shared pool |
-| **Depth presets** (`research` / `deep` / `exhaustive` / `x N`) | Pass count × source quota | You decide when "enough" is enough, not the platform |
-| **Output schema** | Defined in the prompt / `skill.md` | A SWOT matrix, a legal brief, a lead list — the agent emits what you specify |
-| **Provenance tags** | `[V]/[E]/[H]` enforcement | You decide the epistemic standard |
-| **Termination conditions** | Saturation, source quota, diminishing returns, pass cap, user interrupt | The loop is bounded and auditable |
-
-In a chat product you *plead* ("please be thorough, cite sources, check your work"). In HoardCore you *command* via `skill.md` — and the agent **must** read the manual before it acts.
-
-### The three companion documents
-
-| File | Audience | Purpose |
+| File | Audience | Role |
 |---|---|---|
 | `README.md` | Humans / maintainers | Install, config, architecture, CLI reference |
-| `AGENTS.md` | The AI agent (loaded first) | The **trigger**: a short file your harness auto-loads into the agent's context at every session start, mandating that the agent read `skill.md` before any task |
-| `skill.md` | The AI agent | The **manual**: what the agent reads to learn **how** to use the tool |
+| `AGENTS.md` | The agent | Trigger file auto-loaded at session start; requires reading `skill.md` first |
+| `skill.md` | The agent | Operating manual: action mapping, provenance rules, audit step |
 
-`skill.md` is written as an agent skill (YAML frontmatter + instructions). It teaches the agent when to trigger, which actions map to which user request, the `[V]/[E]/[H]` provenance discipline, and the adversarial-audit step before finalizing an artifact.
+The chain is: harness loads `AGENTS.md` -> `AGENTS.md` forces `skill.md` -> `skill.md` drives the CLI. If your harness does not auto-load `AGENTS.md`, start by telling the agent to read `skill.md` first.
 
-### Where the agent reads `skill.md` first
-
-The order is enforced by the harness's session-start loading, not by habit:
-
-1. **Session start** — your harness (e.g., OpenCode, Claude Code) loads the repo-root `AGENTS.md` into the agent's context automatically. It contains one hard rule: *"Before any task, you MUST read `skill.md` in full."*
-2. **First task** — the agent obeys that rule and reads `skill.md` before touching the web, the vault, or `artifacts/`. Everything the agent then does (scrape / crawl / search / discover / research) is driven by `skill.md`'s action mapping.
-3. **Ongoing** — `skill.md` stays the reference: if a task needs an action the agent is unsure of, it re-consults `skill.md`, never its own memory.
-
-So the chain is: **harness auto-loads `AGENTS.md` → `AGENTS.md` forces `skill.md` → `skill.md` drives the agent's use of the HoardCore CLI.** If your harness does not auto-read `AGENTS.md`, treat that file as the instruction to point the agent at first.
-
-### DeepResearch: the Hardcore Research Loop
-
-**DeepResearch is the default research mode.** Any open-ended research request — "research", "investigate", "deep dive", "find out about" — triggers a full end-to-end investigation instead of an ad-hoc scrape/search. The agent reads the behavior out of `skill.md` and runs a **bounded, adversarial** loop:
-
-1. **Parse** the directive into the core question.
-2. **Hunt** — DISCOVER the web for high-authority primary sources and INGEST them into the local vault (uses `--strategy aggressive` past anti-bot protection).
-3. **Recall** — hybrid-retrieve the **5–10 most relevant chunks**, discarding any that feel flimsy or lack context.
-4. **Synthesize** — emit `grounding_context` (source URLs + hybrid scores + distinct sources), then write the deliverable into `artifacts/`.
-5. **Adversarial audit** — re-query the vault to confirm each `[V]` tag before presenting it; for every `[H]` claim, generate the falsification experiment that would invalidate it.
-
-**Depth presets — control effort, not a raw number.** At kickoff the agent maps a direction to a budget, then stops as soon as **any one** trips:
+For any open-ended request, the agent runs the bounded **Hardcore Research Loop**: parse the question, discover and ingest high-authority sources, hybrid-recall 5-10 chunks, emit grounding context, then adversarially audit every `[V]` tag. Depth is a direction, not a guessed number:
 
 | Direction | Passes | Sources |
-|-----------|--------|---------|
-| `research` (default) | 3 | ≥5 |
-| `research deep` | 6 | ≥8 |
-| `research exhaustive` | up to 10 | ≥15 |
+|---|---|---|
+| `research` (default) | 3 | at least 5 |
+| `research deep` | 6 | at least 8 |
+| `research exhaustive` | up to 10 | at least 15 |
 
-A raw-count override exists for strictness: `research x 10 <topic>` hard-caps the loop at exactly 10 passes. The stop conditions are answer saturation (two re-queries with no new `[V]` claim), the distinct-source quota, diminishing returns (identical re-ranking), the pass cap, or a user interrupt. **Conversational deepening** — after a stop the user can simply say **"go deeper"** to re-enter one more pass (retaining all prior evidence, interruptible, capped by the session's pass budget) or **"that's enough"** to finalize — so nobody has to predict the right count up front. On stop the agent runs the audit, emits the artifact (labeled `[INCOMPLETE — N passes]` if a budget guard or interrupt cut it short), and returns a **3-bullet Executive Summary**.
+`research x N <topic>` is a prompt directive to the agent that caps passes at exactly N; it is not a CLI flag. The loop stops on answer saturation, source quota, diminishing returns, pass cap, or user interrupt, emits an artifact, and returns a three-bullet executive summary. "Go deeper" adds one more pass; "enough" finalizes.
 
-**Frontier synthesis.** The loop has demonstrated the ability to produce research artifacts that include: (1) explicit barrier analysis citing impossibility theorems, (2) novel `[H]` protocol proposals combining two distinct technical objects from disconnected literatures, (3) falsification experiments that would invalidate the proposal if failed, and (4) honest scoping that admits when a problem is blocked by known lower bounds rather than hallucinating a solution. This is not "AI writes a paper"; it is "AI produces a falsifiable research agenda with the receipts attached."
+Typical agent calls (legacy form, as in `skill.md`):
 
-### Workflow examples (driving HoardCore from an agent)
-
-The examples below assume you run an agent inside the `HoardCore` project directory and are chatting with it. In each, the agent reads `skill.md` first, then drives the `hoardcore` CLI.
-
-**0. DeepResearch — the Hardcore Research Loop (default)**
-
-```
-You: research deep the economic impact of renewable energy in Negros
-
-Agent: (loads skill.md -> recognizes 'research' + 'deep' preset
-       -> opens the Hardcore Research Loop, budget: 6 passes x >=8 sources)
-  venv/bin/python hoardcore.py _ --action research \
-     --query "economic impact renewable energy Negros" \
-     --discover 6 --recall 8 --strategy aggressive
-  -> "Engaging the Hardcore Research Loop... budget: 6 passes x >=8 sources"
-  -> DISCOVER (web) -> INGEST (vault) -> RECALL 5-10 chunks -> EMIT
-  -> stops on saturation / source quota / pass budget / user interrupt
-  -> writes artifacts/*.md with source URLs + hybrid scores + distinct-sources
-  -> tags each claim [V]/[E]/[H] and adversarially audits them against the vault
-  -> replies with a 3-bullet Executive Summary; full evidence in the artifact file
-
-You: go deeper
-Agent: (re-enters the loop for one more pass, retaining all prior evidence)
+```bash
+venv/bin/python hoardcore.py _ --action research --query "lunar exploration 2026" --discover 6 --recall 8
+venv/bin/python hoardcore.py _ --action search --query "bagasse wind capacity"
+venv/bin/python hoardcore.py _ --action verify --claim "Change-of-control clause is unenforceable per Delaware Ch. 251"
 ```
 
-**1. Research a new topic from scratch**
+First-class controls the agent can expose directly: `--discover N` (`0` = recall-only, no web hunt), `--recall N`, `--strategy`, `--vault NAME` (or `a,b,c` for read-only companion vaults), depth presets, output schema, and `[V]/[E]/[H]` tags.
 
-```
-You: Summarize the latest state of renewable energy in Negros Occidental,
-     with sources.
+## Core capabilities
 
-Agent: (loads skill.md -> runs)
-  venv/bin/python hoardcore.py _ --action research \
-     --query "negros occidental renewable energy 2026" --discover 6 --recall 8
-  -> writes artifacts/grounding_context.md  (sources + scores)
-  -> drafts a synthesis into artifacts/, tagging each figure [V]/[E]/[H]
-  -> re-queries the vault to verify the key numbers before showing you
-```
+### Ingest: scrape, crawl, local files
 
-**2. Persistent memory across sessions**
+`scrape` fetches one URL; `crawl` follows sitemap/robots URLs with a bounded worker pool; `ingest` takes an explicit `--urls` list; `local` indexes files from `local_inputs/` with no network (`.pdf .docx .epub .html .htm .txt .md`, `--path` scopes inside that folder, `--list` previews).
 
-```
-You: I had you ingest docs on solar earlier. Now: "which figure did we capture
-     on bagasse vs wind capacity?"
+Each document goes through: fetch (strategy chain) -> parse (trafilatura + readability for HTML; PyMuPDF / python-docx / ebooklib for binaries, optional OCR) -> junk filter (boilerplate, 404s, captchas, transport-error stubs) -> heading-aware chunking -> store in FTS5 plus a content-addressed chunk table, with embeddings backfilled. Batch ingests stream `[ingest n/N]` progress with an ETA and close with an `INGEST LEDGER` naming skipped URLs and reasons. Sitemap indexes are recursed; a crawl that finds URLs but indexes nothing is an error, not a pass. SSRF protection is on by default: non-HTTP schemes, private/LAN/loopback/link-local addresses, and DNS-special names are refused, and redirect hops are re-validated.
 
-Agent: (no network needed)
-  venv/bin/python hoardcore.py _ --action search --query "bagasse wind capacity"
-  -> instant answer grounded in the local vault, with source URLs
-```
+### Hybrid retrieval
 
-**3. A single source, now**
+`search` fuses two candidate lists with RRF (`k=60`): FTS5 keyword ranking and dense vector similarity (or sparse hashing if the dense model is absent). Hits carry:
 
-```
-You: Read and summarize this: https://arxiv.org/pdf/2401.xxxxx.pdf
+- **Confidence bands** (`high`/`medium`/`low`). Default relative mode ranks within the returned set; only a keyword-backed set can crown `high`. `conf_mode = "absolute"` restores the legacy fixed thresholds.
+- **`corroborated`** count: distinct vault URLs holding the exact same text. Distinct URL is not independence, so treat it as a lead.
+- **`chrome` demotion**: text repeated across at least `retrieval.chrome_min_urls` (default 3) URLs is moved to the tail and flagged, never deleted, so it stays verifiable.
 
-Agent: venv/bin/python hoardcore.py https://arxiv.org/pdf/2401.xxxxx.pdf --action scrape
-  -> fetches, parses, chunks, indexes, returns the text to summarize
-  -> FYI: also saved to hoardcore_data/.../extracted/ for future lookup
-```
+Empty queries return `[]`; punctuation-only queries still run the vector leg in hybrid mode. Query operators are sanitized. The dense scan is a single cached numpy matrix-vector product, not a per-row loop.
 
-**4. An explicit list of documents**
+### Discovery and research
 
-```
-You: Soak up these three URLs so I can ask follow-ups later:
-  https://a.example/report , https://b.example/analysis , https://c.example/paper
+`discover` turns a query into ingested sources through DuckDuckGo HTML (or `hoardcore.providers` plugins) with bounded retry and backoff. If it is blocked, harness-side search plus `ingest --urls` is the documented rescue path.
 
-Agent: venv/bin/python hoardcore.py _ --action ingest \
-       --urls "https://a.example/report,https://b.example/analysis,https://c.example/paper"
-  -> indexes all three; your follow-ups now hit the vault instantly
-```
+`research` runs the full loop in one command: optional answer-first vault recall, DISCOVER, INGEST, RECALL, EMIT. It writes a grounding-context file (source URLs, scores, confidence bands, distinct-source summary, Source Links block) into `artifacts/YYYY-MM-DD/grounding/`. `--no-answer-first` forces a live hunt; `--discover 0` makes it recall-only.
 
-**5. Reach a Cloudflare-protected page**
+`solve` runs the SIEGE Protocol for grand-challenge questions: decompose into fronts, hunt each front per pass (skipping satisfied fronts, refining unsaturated ones), then emit an Attack Dossier with claimed barriers, cross-front tensions, bridge candidates, and an honest siege budget. The dossier passes `audit` by construction. It is grounding, not an answer; the agent writes the final argument.
 
-```
-You: That page is behind Cloudflare. Get me the text of
-  https://protected.example.com/article
+### Provenance and artifacts
 
-Agent: venv/bin/python hoardcore.py https://protected.example.com/article \
-       --action scrape --strategy aggressive
-  -> aiohttp ⟂ curl_cffi (concurrent) -> (FlareSolverr, required & running) until it succeeds
+Every artifact claim is tagged:
+
+- `[V]` / `[V#N]` - verbatim in a stored source; `[V#N]` also maps to source `N`. Only `[V#N]` is machine-audited.
+- `[E]` - external or earlier knowledge, or table/list data rather than contiguous prose.
+- `[H]` - hypothesis or authored framing, ideally with a falsification experiment.
+
+A `[V#N]` tag must sit immediately after a verbatim double-quoted passage in a body paragraph, never in a table row or on an `[E]`/`[H]` line. The artifact ends with a **Source Links / Citations** block (`[#N] URL`, one per line, last). `write_artifact()` refuses path-traversing filenames; day-foldering is automatic. `verify` checks one claim against stored text; `audit` checks that every `[V#N]` is verbatim, mapped to a listed source, and that the source has chunks in the vault.
+
+### Extending the toolbox
+
+No engine edits required. Installed packages advertise entry points:
+
+```toml
+[project.entry-points."hoardcore.parsers"]
+myparser = "mylib:parser_entry"
 ```
 
-**6. Academic frontier synthesis (cross-domain)**
-
-```
-You: Can a deterministic single-pass sketch achieve (1+ε) Edit Distance on
-     structured inputs? I have the Mao-Rubinstein grid paper and the Boneh
-     certifier, but I need you to bridge them.
-
-Agent: (loads skill.md -> recognizes a frontier synthesis request)
-  venv/bin/python hoardcore.py _ --action research --vault ed_frontier \
-     --query "deterministic single pass edit distance sketch structured inputs" \
-     --discover 6 --recall 8 --strategy aggressive
-  -> ingests arXiv:2603.29702, arXiv:2507.22486, streaming lower-bound papers
-  -> recalls chunks across all three domains
-  -> emits a proposal combining geometric grid sparsification + deterministic
-     algebraic fingerprinting, tagged [V]/[E]/[H]
-  -> includes explicit falsification experiments (F1–F4) and a benchmark spec
-```
-
-**7. Legal due diligence with citation verification**
-
-```
-You: Verify every claim in this draft merger memo against our deal vault.
-
-Agent: (iterates over claims)
-  venv/bin/python hoardcore.py _ --action verify --vault mna_2026 \
-     --claim "Change-of-control clause is unenforceable per Delaware Ch. 251" \
-     --recall 5
-  -> exit 0: VERIFIED -> keep [V] tag
-  -> exit 1: PARTIAL -> flag for associate review
-  -> exit 2: UNVERIFIED -> strip or demote to [H]
-```
-
-**8. Student study guide from ingested course materials**
-
-```
-You: I uploaded the syllabus and 12 papers last week. Build me a study guide
-     on electron transport chain ATP yield.
-
-Agent: venv/bin/python hoardcore.py _ --action research --vault biology101 \
-     --query "electron transport chain ATP yield" --discover 0 --recall 10
-  -> no live search; builds guide purely from ingested course vault
-  -> tags every claim [V] to the specific paper chunk
-```
-
-Each example ends with content that is **grounded and recallable later** — the vault is the source of truth, not the agent's memory.
-
-### Agent-friendly fact
-
-Because dense retrieval runs on `onnxruntime` (no PyTorch, no GPU) and the `hoardcore.toml` config is auto-generated, HoardCore is lightweight to install and runs inside most sandboxes and CI environments — the agent can bootstrap a vault on first run with no setup ceremony. Dense mode never blocks startup: if its dependency is absent it degrades to the sparse hash and keeps working.
-
----
-
-## Feature Tour
-
-### Ingest Mode (Scrape / Crawl)
-
-**Scrape** fetches a single URL (HTML, PDF, DOCX, EPUB), cleans it, chunks it semantically by headings, and indexes it. **Crawl** discovers a site's URLs via `robots.txt` / sitemap and ingests them with a bounded, semaphore-limited worker pool (`crawler.parallel_workers`).
-
-**Sitemap indexes are recursed.** Once a site passes 50k pages or 50 MB, WordPress/Yoast-style plugins emit a `<sitemapindex>` that lists *child sitemaps* instead of pages. A non-recursive crawler fetches those children as if they were pages, discards them as junk XML, and reports a **green crawl that captured nothing**. HoardCore detects the index by root-element name and follows it depth-first (`crawler.sitemap_index_depth`, default 3); only leaf URL sets are handed to the fetcher. Relatedly, **a crawl that discovers URLs but indexes none is an error, not a pass** — the crawl log states the per-URL outcomes and names the sitemap-index cause.
-
-**Bulk ingest is not silent.** `ingest --urls` streams one `[ingest n/N] status: url — elapsed Xs, ~Ys left` line to stderr per URL. A Cloudflare-protected batch is slow by nature (every URL costs a serialized FlareSolverr round-trip), so a quiet run is indistinguishable from a hang; the ETA lets a supervisor decide when to intervene. ONNX forward passes are also **serialized** by an internal lock: a single InferenceSession is already multi-threaded, so concurrent embed callers only oversubscribe the CPU (observed: 427% with no forward progress).
-
-**Decoded binary is never indexed.** Images and other binaries listed in a sitemap decode "successfully" with `errors='ignore'` into strings that are mostly control bytes; the quality ratio can't see this (garbage over garbage ≈ 1.0), so character-class composition is the signal — a document with >10% non-printable characters is refused as `binary_as_text`. On one real crawl this cut binary chunks from **93% of the vault to 0**.
-
-The pipeline for each document:
-
-1. **Fetch** — tries the strategy chain (aiohttp ⟂ curl_cffi concurrently → FlareSolverr) until one returns content. With the default `aggressive` strategy and `[solver] enabled = true`, FlareSolverr is the terminal leg that clears Cloudflare-shaped challenges.
-2. **Parse** — HTML via `trafilatura` + `readability` with a self-selecting-best fallback; PDF/DOCX/EPUB via lazy-loaded binaries; else raw-text strip. **Scanned PDFs:** pages with no extractable text are auto-OCRed via RapidOCR (optional `pip install .[ocr]`, fully local ONNX, no system deps); OCR'd pages are flagged in metadata (`parser: pymupdf+ocr`, `ocr_pages`).
-3. **Junk-filter** — boilerplate/redirect/404/captcha pages, near-empty extractions, and transport-error stubs rendered at HTTP 200 (`HTTP ERROR 429`, timed-out shells) are detected and refused entry to the vault; batch ingests close with an `--- INGEST LEDGER ---` naming every skipped/failed URL and reason.
-4. **Chunk** — semantic splitting respecting headers (or paragraphs for binaries).
-5. **Store** — chunks persisted to FTS5, mirrored as markdown + chunks JSON under `hoardcore_data/`, and embeddings backfilled.
-
-### SSRF Protection
-
-Fetch targets are validated before any request — non-`http(s)` schemes, private/LAN/loopback/link-local (incl. `169.254.x.x` cloud-metadata) addresses, and DNS-special names are refused unless `network.ssrf_protection` is set to `false` (default `true`) for a trusted isolated network. The aiohttp leg re-validates every redirect hop; the curl_cffi/FlareSolverr fallbacks follow redirects internally, so they re-validate the post-redirect final URL instead.
-
-### Plugin System & Event Bus
-
-Third-party extensions drop in via `importlib.metadata` entry points — no monkey-patching:
-- `hoardcore.parsers` → binary parsers keyed by content type
-- `hoardcore.fetchers` → extra fetch strategies appended to the strategy chain
-- `hoardcore.providers` → extra discovery backends (fallback chain)
-- `hoardcore.chunkers` → custom chunkers, selected by `chunking.strategy = "plugin.<name>"`
-
-Any plugin that fails to load, throws, or returns bad output is skipped with a warning — a broken plugin never aborts a crawl. A built-in `hoardcore.EventBus` publishes lifecycle hooks (`document.ingested`, `chunk.embedded`, `discovery.completed`, `search.completed`) for observability or automation.
-
-### Extend the toolbox
-
-You can extend the engine from a separate installed package, or from your own driver script, without touching `hoardcore.py`:
+Groups: `hoardcore.parsers`, `hoardcore.fetchers`, `hoardcore.providers`, `hoardcore.chunkers` (select with `chunking.strategy = "plugin.<name>"`). Broken plugins are skipped with a warning; they never abort a run. For in-process automation, use the event bus:
 
 ```python
-# A driver script: observe a lifecycle event, no engine edits.
 import asyncio
 import hoardcore as hc
 
@@ -542,473 +197,170 @@ async def main():
 asyncio.run(main())
 ```
 
-For a packaged extension, advertise an entry point in *your* package's `pyproject.toml` and HoardCore discovers it on startup:
+Hooks: `document.ingested`, `chunk.embedded`, `discovery.completed`, `search.completed`.
 
-```toml
-[project.entry-points."hoardcore.parsers"]
-myparser = "mylib:parser_entry"
-```
+### Vault durability and proof
 
-For a custom splitter, set `[chunking] strategy = "plugin.<name>"` in `hoardcore.toml` and register the callable under `hoardcore.chunkers`. New discovery backends and fetch legs are added the same way, under `hoardcore.providers` and `hoardcore.fetchers`.
+Documents are append-only by version; chunks are BLAKE2b content-addressed and embedded once. `check` runs a three-phase integrity verification (counts, canonical hashes, vector dimensions) with exit 0/1. Switching embedding config recomputes vectors in place using an embedding fingerprint, so stale vectors are never served and migration is resumable. SQLite runs in WAL mode through a pooled connection manager.
 
-### Hybrid Retrieval
+The frontier-synthesis stress test and its reproducible scripts live in `peel_anchor/`; see `peel_anchor/README.md` for the results and how to re-run them.
 
-`search` fuses two candidate lists via Reciprocal Rank Fusion (RRF):
-- **FTS5** keyword ranking across chunk text (BM25-style).
-- **Dense vector** similarity from an ONNX-quantized sentence-transformer (default).
+## CLI reference
 
-**Dense mode (default):** chunks are embedded with a sentence-transformer (`BAAI/bge-small-en-v1.5`, 384-dim) via `fastembed` on `onnxruntime` — no PyTorch, no GPU. This captures *semantic* similarity: a conceptual query surfaces on-topic sources even with no shared vocabulary.
-
-**Sparse mode (fallback):** set `[embeddings] mode = "sparse"`. Uses FNV-1a feature hashing of word + 3-gram shingles into a 256-dim unit vector for lexical overlap. It's the automatic fallback when the dense dependency is missing and the mode for environments that want zero model weight. A lexical query can still surface near-literal matches (e.g., `sol*r` → `solar`).
-
-**Confidence bands.** Every hybrid hit is tagged `high`, `medium`, or `low`. The default (`conf_mode = "relative"`) ranks *within* the returned recall set — the top hit(s) clearly above the set's own tail are `high`, hits hugging the coincidence floor are `low`, the middle is `medium`. Only a **keyword-backed** set (a genuine FTS match near the top) can crown `high`; a pure-vector/off-topic set never does. This fixes the "all-`medium`" flatness that absolute-score thresholds produced on homogeneous vaults (where RRF scores cluster into one band). The legacy behavior (`conf_mode = "absolute"`) tags `high` only for hits that matched *both* the keyword and vector lists or clear an absolute `conf_high_abs`/`conf_low_abs` ceiling. The band is attached to chunk metadata and printed in grounding-context output (e.g. `score 0.0325 | high`). A low-confidence hit signals a weak match that should be **re-verified before being tagged `[V]`** — or demoted to `[E]`. FTS fast-path hits (which skip the vector scan) are tagged `medium`, since semantic closeness is unverified.
-
-Empty and whitespace-only queries return `[]` instead of raising. A punctuation-only query (no FTS tokens) still runs the vector scan in hybrid mode — the embedding model can match semantic content even when keywords are absent — while the FTS-only (`fast`) path returns `[]`.
-
-**Corroboration.** Every search hit carries a `corroborated` count: how many distinct source URLs in the vault hold the exact same chunk text (`1` = uncorroborated). It is the cheapest honesty signal an agent can read before citing — but distinct-URL ≠ independence (syndicated reprints inflate it), so treat it as a lead, not proof.
-
-The dense vector scan is a single numpy matrix–vector product over the whole vector table (`argpartition` for top-k, cached when the table is unchanged) instead of a per-row Python loop. Optionally, `embeddings.reranker_model` runs a cross-encoder over the final recalled set, loaded lazily and degrading to input order on any failure.
-
-Queries are sanitized: operator characters (`" ( ) * ^ : -`) are stripped and tokens quoted, so free-text input cannot alter query semantics or raise FTS syntax errors.
-
-**Site chrome is demoted, never deleted.** On a template-driven site the extracted navigation menu, accessibility statement and footer are byte-identical on every page, so they embed near-perfectly for a generic query and crowd the real content out of the recall set. HoardCore records a cross-URL occurrence ledger at ingest (`chunk_urls`, backfilled once on upgrade) and demotes any chunk whose text is stored under ≥ `retrieval.chrome_min_urls` (default 3) distinct URLs to the tail of the set, flagged `chrome=True` / `chrome_urls=N`. Nothing is removed: the text stays in the vault and stays verifiable for `[V]`, and a set whose *only* matches are chrome is still returned rather than emptied. Set `chrome_min_urls = 0` to disable.
-
-### Discovery Mode
-
-`discover` turns a plain-language query into ingested sources. It hits DuckDuckGo's HTML endpoint via the same resilient fetch chain (so a rate-limited/shaped search page gets retried and can even be solved by FlareSolverr). The top `--limit` results are ingested (`discovery.top_rank`, default 6, when no `--limit` is given), with bounded retry + exponential backoff on transient failures. DuckDuckGo is the single built-in provider — alternative engines plug in via `hoardcore.providers`, and when discovery is fully blocked the documented rescue path is harness-side search + `ingest --urls`.
-
-### Research Workflow
-
-`research` is the full agentic loop in one command:
-```
-[0/ANSWER-FIRST] optionally: serve a high-confidence existing memory hit, skip live DISCOVER
-[1/DISCOVER] web-search the question, ingest top sources
-[2/RECALL]   hybrid-retrieve the best chunks
-[3/EMIT]     write a grounding-context file
-```
-By default the vault is queried *before* any web traffic: a high-confidence
-memory hit for a repeat question answers immediately (no network; the
-grounding file is flagged "Answer-first recall"). Pass `--no-answer-first` to
-always run live DISCOVER. The emitted file lists each retrieved chunk with its
-source URL, hybrid score, and confidence band, plus a distinct-sources summary
-and a **Source Links / Citations** block — ready to be injected verbatim as
-grounding context for an LLM.
-
-### The SIEGE Protocol (grand-challenge tasks)
-
-`solve` is HoardCore's answer to open-ended tasks — "Humanity's Last Exam"-type questions, "how would you attack <disease>", "design a system that <ambitious thing>". A plain research pass retrieves; a siege **decomposes, hunts on every front, and maps the battlefield**:
-
-1. **Decompose.** The task becomes 3–6 independent attack fronts — your own (`--fronts "mechanisms of X; known barriers to X; benchmarks for X"`) or generated from `solve.facets` (mechanisms, state of the art, barriers, benchmarks, critiques).
-2. **Lay siege.** Each pass hunts every front (`sources_per_front` each; unsaturated fronts re-hunt with `solve.refinements` terms) into the task vault, front-stamped.
-3. **Map the battlefield.** The engine then surfaces, deterministically: **claimed barriers** (impossibility statements in the literature, quoted verbatim), **cross-front tensions** (sources from different fronts that share distinctive vocabulary but disagree on a same-unit measurement — a heuristic, labeled as one), and **bridge candidates** (chunks whose embedding sits near two front centroids at once — the computational form of the cross-domain synthesis the peel_anchor stress test demonstrated).
-4. **Emit the Attack Dossier.** An audit-clean markdown dossier in `artifacts/`: verbatim front evidence with `[V#N]` tags, barriers, tensions, bridges, the honest siege budget (which fronts saturated, which ran answer-first), and a solver brief. The dossier's own evidence chain passes `audit` by construction.
-5. **The agent assaults.** The dossier is grounding, not an answer: the calling agent reasons over it, writes the attack plan under the provenance mandate, and gates it with `verify --claim-list` → `lint --strict` → `audit`.
-
-```bash
-python hoardcore.py _ --action solve \
-  --query "How would you actually build a cure for pancreatic cancer by 2035?" \
-  --fronts "oncology mechanisms; current standard of care and outcomes; known barriers and failure modes; emerging trials and benchmarks; delivery and manufacturing constraints" \
-  --passes 3 --vault cancer2035 --recall 8
-```
-
-`--json` prints the machine-readable siege report (fronts, saturation, counts, dossier path). Exit codes: `0` every front saturated · `1` dossier written but open fronts remain · `2` hard error. HoardCore still hosts no LLM — the SIEGE Protocol manufactures the evidence battlefield; the breakthrough is your agent's to earn.
-
-### Provenance Discipline & Epistemic Hygiene
-
-Every claim in a research artifact is tagged by the agent:
-
-- `[V]` — **Verified.** The claim appears verbatim in a chunk stored in the vault. Machine-checkable via `verify`.
-- `[E]` — **External.** Known fact or extracted evidence not currently in the vault.
-- `[H]` — **Hypothesis.** Novel synthesis, inference, or authored framing by the agent.
-
-This is not prompt-engineered politeness; it is a **structural feature of the loop**. The `verify` action punishes false `[V]` tags with exit code `2` (unverified). Over iterative research passes, the system selects for verifiable claims because unverified claims are flagged and must be defended. The emergent behavior is **epistemic caution**: the agent becomes more conservative in its assertions than the base model would be in chat mode, because the protocol makes honesty the path of least resistance.
-
-In practice, this means:
-- A `[V]` claim is a promise that `verify --claim "..."` will return exit `0`.
-- An `[H]` claim must be accompanied by a falsification experiment: *"If you run X and get Y, this claim is dead."*
-- The agent cannot retreat to "just use randomness and take the min over rounds" when the user asked for a deterministic protocol; the `[H]` tag forces it to own the limitation.
-
-### Cross-Domain Synthesis
-
-Because the vault persists across DISCOVER/INGEST cycles, the agent can hold evidence from multiple disjoint fields simultaneously. Retrieval surfaces structural analogies that no single source stated explicitly. In stress tests, the agent has combined:
-
-- **Geometric approximation** (grid curvature sparsification)
-- **Combinatorial streaming** (document exchange protocols)
-- **Algebraic hashing** (deterministic fingerprinting)
-
-into a single protocol — despite these papers sharing no authors, citations, or arXiv categories. The RRF retrieval and persistent vault make the **juxtaposition** computationally accessible. This is not creativity in the human sense; it is the emergent capability of a shared, queryable memory substrate that does not decay between sessions.
-
-### Learning & Education Workflows
-
-Students and self-learners can use HoardCore as a **second brain with integrity checks**:
-
-1. **Scope by course:** `--vault biology101`, ingest the syllabus, textbook PDFs, and assigned papers.
-2. **Study from your own vault:** `research --discover 0 --recall 10` builds study guides purely from ingested material, tagging every claim `[V]` to a specific source chunk.
-3. **Opinion audit:** Write an essay, then run `verify` on every claim. If your draft is full of `[H]` and `[E]` with few `[V]` tags, your understanding is built on sand.
-4. **Cumulative expertise:** After a semester, your vault is your intellectual history — machine-searchable, verifiable, and independent of any platform.
-
-### Artifacts
-
-Finished deliverables live in `artifacts/` (configurable via `storage.artifacts_dir`), day-sorted into `artifacts/YYYY-MM-DD/` subfolders. The tool ships `write_artifact(filename, content)` which refuses path-traversing names, plus `citation_list()` to render the source-links block. Research EMITs its grounding context into the day folder's `grounding/` subfolder (`storage.grounding_subdir`) — a working instrument, not a deliverable, so it never pollutes the day folder of finished syntheses/audits. Research outputs carry provenance tags:
-
-- `[V#N]` — **verified verbatim** against full primary text in the current vault, traced to source `#N`. The only tag the audit machine-checks.
-- `[E]` — extracted/captured earlier, or data present only as table/list cells (not contiguous prose); not in the current vault.
-- `[H]` — hypothesis / authored framing.
-
-Tag grammar: `[V#N]` appears only immediately after a verbatim `"…"` quote in a body paragraph; `[E]`/`[H]` claims carry **no** `[V#N]` (they can never verify). Every `[V#N]` resolves against the artifact's **Source Links / Citations** block.
-
-Example artifacts already produced: the renewable-island synthesis, its adversarial audit, and the master research portfolio.
-
-### Vault durability, dedup & integrity
-
-HoardCore's SQLite vault is built for durable, append-only research memory:
-
-- **WORM (write-once-read-many) documents.** Re-ingesting the same URL appends a new `version` row (`UNIQUE(url, version)`) rather than overwriting the previous one, so the vault is append-only and historical versions remain queryable. Existing vaults are auto-migrated on first run.
-- **Content-addressed deduplication.** Chunks are hashed with BLAKE2b-256 into a canonical `chunks_ca` table; identical chunk text across documents is stored once and embedded only once (`chunk_vectors_ca` cache). Re-ingesting similar pages no longer grows storage linearly.
-- **Connection pooling.** A reusable `ConnectionPool` (8 connections, WAL + mmap + page-cache tuning) replaces open-a-new-connection-per-query, improving concurrent throughput.
-- **Integrity checking.** `--action check` runs a three-phase verification (document chunk counts, canonical content hashes, vector dimensions) and exits `0` on pass / `1` on fail, so it can gate CI or scheduled jobs.
-
-### Proving the claims — the `peel_anchor/` directory
-
-HoardCore's frontier-synthesis stress test is not a claim you have to take on faith. The deterministic-LCS research that produced it, and the streaming-edit-distance sketch that extends it, are committed **in-repo** under `peel_anchor/` so anyone can re-run them and see the algorithm validate. This is the proof-of-record for the "Stress-tested on frontier problems" section above — every number there is reproducible from these files.
-
-```
-peel_anchor/
-    peel_anchor_lcs.py        Deterministic near-linear LCS approximation (Boneh–Golan–Kraus 2025)
-                              + exact O(n²) DP baseline. Self-tests soundness (never over-estimates).
-    sample_round_lcs.py       2026 Mao–Rubinstein 45°-rotated-grid reproduction (sample-and-round). Validates rotated-DP == exact LCS.
-    peel_anchor_hybrid.py     The deterministic bridge: peel-certified active scales + deviation-ranked
-                              sub-interval selection. Runs soundness, adversarial (2000-instance) probe,
-                              and the per-instance certificate test.
-    benchmark.py + benchmark_results.json   Full numeric benchmark (ratios, runtime, smoothed, certificate).
-    cs_hard_problem_novel_idea.md   The original research proposal.
-    deterministic_single_pass_edit_distance_sketch.md
-                            The 6-pass HARDORE-loop deliverable: deterministic single-pass ED sketch (DASS),
-                              with [V]/[E]/[H] provenance, falsification experiments F1–F4, and a benchmark spec.
-    README.md               Provenance-tagged report of every result.
-```
-
-**To reproduce the headline claim** (deterministic sound-by-construction LCS with a per-instance certificate, 0/2000 violations):
-
-```bash
-venv/bin/python peel_anchor/peel_anchor_hybrid.py     # validation + 2000-instance certificate probe
-venv/bin/python peel_anchor/peel_anchor_lcs.py        # selftest: soundness against exact DP
-venv/bin/python peel_anchor/sample_round_lcs.py       # rotated-grid == exact validation
-venv/bin/python peel_anchor/benchmark.py              # full numeric benchmark (A–H)
-```
-
-Each script prints its pass/fail explicitly — a failed soundness check would exit with an assertion error rather than a plausible-looking number. The `deterministic_single_pass_edit_distance_sketch.md` deliverable records the frontier-mapping, the deterministic protocol, and the falsification experiments; its `[V]` citations were verified against the `cshard` vault during the research loop.
-
----
-
-## CLI Reference
-
-```
-hoardcore [URL] [options]
-```
+Syntax: `hoardcore ACTION [ARG] [flags]`. Legacy form: `hoardcore URL --action ACTION` or `hoardcore _ --action ACTION`, still supported everywhere.
 
 ### Actions
 
 | Action | Purpose |
 |---|---|
-| `scrape` *(default)* | Fetch + ingest a single URL/document — or an explicit `--urls` list (batch). Requires a URL positional (or `--urls`). |
-| `crawl` | Crawl a whole site via sitemap/robots.txt, or ingest an explicit `--urls` list (batch). Requires a domain URL positional (or `--urls`). |
-| `search` | Query the vault with `--query`; restrict to a domain by passing its host as the positional. `--limit` caps returned chunks. |
-| `ingest` | Index an explicit URL list given as a comma/space separated `--urls` string. |
-| `discover` | Web-search `--query`, ingest the top `--limit` results (default `discovery.top_rank`). |
-| `research` | Run `discover -> ingest -> recall -> emit` (memory-first: live DISCOVER is skipped when the vault already has a high-confidence answer, unless `--no-answer-first`); writes to `--out` or a day-sorted `artifacts/YYYY-MM-DD/grounding/grounding_context.md` (the grounding subdir is configurable via `storage.grounding_subdir`). |
-| `solve` | The SIEGE Protocol for open-ended/grand-challenge tasks: decompose into fronts (`--fronts` or `solve.facets`), hunt every front per pass, detect claimed barriers / cross-front tensions / bridge candidates, and emit an audit-clean Attack Dossier. |
-| `verify` | Programmatic provenance audit: confirm `--claim` against vault text (exact phrasing, typography-blind; `--hint` prints the nearest stored phrase to reword toward (OR-relaxed candidate rescue; opt-in `verify.hint_vector` semantic assist). |
-| `audit` | Audit an artifact's `[V#N]` evidence chain (verbatim + source-link mapping + ingested). |
-| `lint` | Static pre-audit authoring checks on an artifact (no vault/network): `[V#N]` inside table rows, tags sharing a line with earlier `[E]`/`[H]`, sub-24-char attributed quotes, unmapped `[#N]` refs, unclosed quotes. `--strict` escalates warnings to failures. |
-| `prune` | Detect & retro-purge transport-error ghost sources (429/timeout stubs that were indexed before the junk gate). Dry-run by default; `--apply` deletes. `--urls a,b` targets specific URLs instead of scanning. |
-| `check` | Run a three-phase vault integrity check (content hashes, counts, vector dims). |
-| `stats` | Vault summary in one command: sources, chunks, vectors, embedding dim/mode, schema version, DB size, plus a sampled confidence-band distribution (`high`/`medium`/`low`) to spot retrieval flatness. With `--vault a,b,c` prints a block per named vault. |
-| `export` | Stream every chunk of the selected vault(s) as JSONL (`{"text", "metadata"}`) to `--out PATH` or stdout — vault portability, diffable backups, and a machine-readable handoff to other tooling. |
-| `local` | Index local files from `storage.local_dir` (default `local_inputs/`, git-ignored) — no network. Supported: `.pdf .docx .epub .html .htm .txt .md`, walked recursively. `--path` scopes to a file/folder inside it, `--list` is a read-only scan. Freshness is content-based (unchanged extracted content is skipped unless `--force`). |
-
-Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `audit`, `lint`, `check`, `prune`, `stats`, `export`) does not need a URL.
+| `scrape` (default) | Fetch and index one URL/document, or an explicit `--urls` list |
+| `crawl` | Walk a site via robots.txt/sitemap, or ingest `--urls` |
+| `search` | Query the vault with `--query`; a URL positional restricts to that host; `--limit` caps chunks |
+| `ingest` | Index a comma/space separated `--urls` list |
+| `discover` | Web-search `--query`, ingest the top `--limit` results |
+| `research` | DISCOVER -> INGEST -> RECALL -> EMIT; memory-first unless `--no-answer-first` |
+| `solve` | SIEGE Protocol: fronts, passes, barriers/tensions/bridges, Attack Dossier |
+| `verify` | Check `--claim` against stored text (verbatim, partial, unverified) |
+| `audit` | Check an artifact's `[V#N]` chain: verbatim + mapped + ingested |
+| `lint` | Pre-audit authoring checks on an artifact; `--strict` escalates warnings |
+| `prune` | Find and optionally delete transport-error ghost sources (dry-run unless `--apply`) |
+| `check` | Three-phase vault integrity check; `--migrate` rebuilds at the configured page size |
+| `stats` | Sources, versions, chunks, vectors, embedding mode/dim, schema, DB size, confidence sample |
+| `export` | Stream the vault as JSONL to `--out PATH` or stdout |
+| `local` | Index local files from `local_inputs/` (no network); `--list` previews, `--path` scopes |
 
 ### Flags
 
-| Flag | Description |
+| Flag | Meaning |
 |---|---|
-| `--action ACTION` | One of `scrape`, `crawl`, `search`, `ingest`, `discover`, `research`, `verify`, `audit`, `lint`, `prune`, `check`, `stats`, `local`. |
-| `--strategy S` | `fast`, `balanced`, or `aggressive` (default from config). |
-| `--json` | Print machine-readable JSON instead of human output (supported by `search`, `stats`, `verify`, and `audit`; the JSON is the only stdout content). Exit codes are unchanged, so CI gates keep working. |
-| `--query Q` | Required for `search`, `discover`, `research`. |
-| `--limit N` | Top results to ingest for `discover` (default `discovery.top_rank`); max chunks returned for `search`. |
-| `--urls U1,U2,U3` | Explicit URL list for `scrape`/`crawl`/`ingest` (overrides the URL positional). |
-| `--discover N` | Sources to discover first in `research` (default 5; `0` = recall-only, no web). |
-| `--recall N` | Chunks to retrieve in `research` (default 6). |
-| `--fronts F1; F2; ...` | With `solve`: semicolon-separated attack fronts (sub-questions). Omit to use `solve.facets`. |
-| `--passes N` | With `solve`: siege passes (each re-hunts only unsaturated fronts). Default `solve.passes` (2). |
-| `--no-answer-first` | With `research`: always run live DISCOVER, even if the vault already has a high-confidence answer (default: `research.answer_first = true` skips it). |
-| `--keep-low` | With `research`: retain low-confidence hits in the grounding context (skip `filter_low`) — for exhaustive/deep hunts that want the full evidence tail. |
-| `--out PATH` | Output file for `research` (default: `artifacts/YYYY-MM-DD/grounding/grounding_context.md`, suffixed `_N` when today's already exists); with `export`, the JSONL file to write (default stdout). |
-| `--artifact PATH` | With `audit`: path to a synthesis artifact to audit. |
-| `--strict` | With `lint`: escalate warning-severity findings to failures (exit code). |
-| `--preview-chars N` | Characters shown per chunk in the CLI preview (default 300; `0` prints full text). |
-| `--apply` | With `prune`: actually delete detected rows (default is a dry-run report). |
-| `--claim C` | Claim text to verify for the `verify` action. In shells, escape `$` as `\$` (bash expands `$13` to empty); or use `--claim-file` to read the claim from a file so `$` survives untouched. |
-| `--claim-file PATH` | With `verify`: read the claim from this file instead of `--claim` (preserves `$`, e.g. `$13`). |
-| `--claim-list PATH` | With `verify`: batch-audit a file of claims (one per line; `#`/blank lines skipped). Prints a per-claim verdict table plus an aggregate **citation-accuracy %** (VERIFIED ÷ total) and exits with the worst verdict (2 on any UNVERIFIED) — so it doubles as a CI-wireable citation-accuracy gate. Mutually exclusive with `--claim`/`--claim-file`. |
-| `--vault NAME` | Scope the whole session to a per-topic vault (`hoardcore_data/NAME/`). A comma/space list (`a,b,c`) enables **cross-vault read**: vault `a` is the write-primary; `b,c` are read-only companions. Search/verify/audit/`--hint` fuse across all of them; new ingest/discover only touches `a`. Single name behaves exactly as before. |
-| `--path PATH` | With `local`: relative path (file or directory) inside `storage.local_dir` to process; defaults to the whole `local_dir`. |
-| `--list` | With `local`: read-only scan — list supported files under `--path` without ingesting. |
-| `--mode MODE` | For `search`: `fast` (FTS-only) or `hybrid` (vector+RRF). Default follows config. Note: with `embeddings.fts_fast_path=true` (default), `hybrid` still short-circuits to the FTS fast path whenever FTS5 alone fills the result set — hits are then tagged `retrieval='fts_fast'`, not `'hybrid'`. Set `fts_fast_path=false` to always force the vector+RRF path. |
-| `--parallel` / `--no-parallel` | Override threaded ingest for this run (in-memory only, not written to `hoardcore.toml`). Engages the parallel reader→embed→write pipeline for batches of 8+ chunks; default follows `indexer.parallel` (on). On smaller batches it is a silent no-op (sequential path). |
-| `--log-level LEVEL` | Override log verbosity for this run: `debug`, `info` (default), `warning`, or `error`. |
-| `--migrate` | With `check`: rebuild the vault at the configured `storage.page_size` (16 KB default) via `VACUUM INTO`. |
-| `--force` | Ignore the cache and re-fetch / re-index. |
+| `--action ACTION` | Legacy form action selector; all 15 actions above are valid |
+| `--query Q` | Required for `search`, `discover`, `research`, `solve` |
+| `--claim C` / `--claim-file PATH` / `--claim-list PATH` | `verify`: one claim, one claim from a file (keeps `$` intact), or a file of claims (one per line; prints accuracy, exits with worst verdict) |
+| `--hint` | `verify`: on denial, print the nearest vault phrase to reword toward |
+| `--artifact PATH` | `audit` / `lint`: artifact to check |
+| `--strict` | `lint`: warnings become failures |
+| `--discover N` / `--recall N` | `research`/`solve`: source count and chunk count (`0` discover = recall-only) |
+| `--fronts "F1; F2"` / `--passes N` | `solve`: attack fronts and pass budget |
+| `--no-answer-first` / `--keep-low` | Force live discovery; retain low-confidence hits at EMIT |
+| `--limit N` | `discover` top results; `search` max chunks |
+| `--urls U1,U2` | Explicit URL list for scrape/crawl/ingest |
+| `--vault NAME` | Per-topic vault; `a,b,c` adds read-only companions for cross-vault recall |
+| `--out PATH` | Research output path, or `export` JSONL destination |
+| `--mode fast|hybrid` / `--preview-chars N` | Force FTS-only or vector+RRF; CLI preview length (`0` = full) |
+| `--strategy fast|balanced|aggressive` | Fetch chain selection (default from config) |
+| `--parallel` / `--no-parallel` | Per-run override of threaded ingest (8+ chunks) |
+| `--log-level LEVEL` | `debug`, `info` (default), `warning`, `error` |
+| `--json` | Machine-readable stdout for `search`, `stats`, `verify`, `audit`, `solve`; exit codes unchanged |
+| `--path PATH` / `--list` | `local`: scoped path inside `local_inputs/`; read-only preview |
+| `--apply` / `--migrate` / `--force` | Execute prune deletions; rebuild page size; bypass cache |
 
-Use a positional of `_` when an action (e.g. `search`, `discover`, `research`, `ingest`, `verify`, `check`, `audit`, `export`) does not need a URL.
+`--query` is required for the query actions: omitting it exits 2 with a `Try:` line. Unknown commands such as `hoardcore serach` suggest the closest action.
 
-### Exit codes (CI-wireable)
+### Exit codes
 
 | Actions | Codes |
 |---|---|
-| `verify`, `audit`, `check`, `lint`, `research`, `local` | unchanged: `0` pass/verified, `1` partial/incomplete, `2` unverified/error (see their sections) |
-| `solve` | `0` every front saturated · `1` dossier written but open fronts remain · `2` hard error |
-| `scrape`, `crawl`, `ingest`, `discover` | `0` — at least one source ingested or served from cache; `1` — every URL failed, nothing was retrievable, or (discover) no results; `2` — hard error (SSRF refusal, fetch-chain exhaustion, usage) |
+| `verify`, `audit`, `check`, `lint`, `research`, `local` | `0` pass/verified, `1` partial/incomplete, `2` unverified/error |
+| `solve` | `0` all fronts saturated, `1` dossier written with open fronts, `2` hard error |
+| `scrape`, `crawl`, `ingest`, `discover` | `0` ingested or served from cache, `1` nothing retrievable, `2` hard error |
+| `search` | `0` even for an empty result set (`chunks: []` under `--json`) |
 
-Search returns `0` even for an empty result set — "no match" is a legal answer, visible as `chunks: []` under `--json`. As with `verify`, never pipe these commands through `tail`/`head`: the shell reports the pipe's exit status, not the gate's.
+Never pipe a gate through `tail`/`head`: the shell reports the pipe's exit status, not the gate's. Capture `$?` from an unpiped run.
 
-### `verify` — the programmatic audit
+### `verify` and `audit`
 
-Makes the `[V]` honor-system tag machine-checkable. It checks a claim against the vault's stored text and reports one of three states:
+`verify` returns `VERIFIED` (exit 0), `PARTIAL` (exit 1), or `UNVERIFIED` (exit 2). It folds typographic dashes, smart quotes and apostrophes, full-width Unicode, Unicode case in every script, whitespace, and markdown markers. It does not fold word identity, order, presence, or `%` versus "percent". A denial means "not stored verbatim in this wording", not "false"; `--hint` helps reword. The candidate scan is widened so long claims and non-ASCII text still resolve.
 
-```bash
-python hoardcore.py _ --action verify --claim "the Epoch doubling time is 6 months" --recall 5
-```
+`audit` checks each `[V#N]`: the quoted claim must verify, `N` must appear in the Source Links block as `[#N] URL`, and that URL must have chunks in the vault. It prints a per-claim table and citation accuracy, then exits `0`/`1`/`2` as above.
 
-| Result | Meaning | Exit code |
-|---|---|---|
-| `VERIFIED` | The normalized claim appears verbatim in stored chunk text (a sliding 60-char window is tested across the whole claim, so a distinctive tail still verifies even if the opening is generic; comparison is *typography-blind* — en/em dashes, smart quotes, curly vs straight apostrophes and full-width Unicode are folded so a typesetter's punctuation never flips a verdict) | `0` |
-| `PARTIAL` | The top all-terms FTS5 hit **measurably beats the vault's coincidence floor** (the best rank any single claim term achieves alone, by a corpus-scaled relative margin), but there is no verbatim match; co-occurrence of a few common words in unrelated boilerplate does *not* count as partial | `1` |
-| `UNVERIFIED` | No vault support for the claim | `2` |
+### Configuration (`hoardcore.toml`)
 
-The verbatim stage checks the full normalized claim (not just a fixed-size prefix) against all candidate rows — it does not truncate candidates to the first 100. Agents and CI can branch on the exit code: refuse to emit a `[V]` tag unless `verify` returns `0`.
-
-> **CI gotcha: don't pipe `verify` output.** The exit code is the contract — but if you pipe `verify` through `tail`/`head` (e.g. to trim logs), the shell returns the *pipe's* exit status, not `verify`'s. Capture `$?` from an unpiped invocation, or branch directly on `subprocess.run(...).returncode`. Same caveat applies to `--claim-list` batch runs (they fail loudly with `2` on any UNVERIFIED — don't let a `| tail` mask that).
-
-> **A denial is not a falsification.** `PARTIAL`/`UNVERIFIED` mean "the vault does not hold this wording verbatim" — they do **not** mean the claim is false. The claim may well be true; it just isn't supported by the stored text as phrased. Treat a denial as a *rewording* instruction, not a verdict.
-
-**What `verify` is lenient about** (folded, so these never flip a verdict): typographic en/em/hyphen dashes, smart quotes **and curly vs straight apostrophes** (`’` ≡ `'`), full-width Unicode (NFKC), **Unicode case for every script** (`É` ≡ `é`, `П` ≡ `п` — case never flips a verdict in any language), whitespace/newlines, and parser-emitted markdown markers (`**bold**`, `*italic*`, `` `code` ``) — while markers glued inside a token (`2*3`) are content and never stripped.
-
-**What `verify` is strict about** (these cause `PARTIAL`/`UNVERIFIED`): token identity, word **order**, and whether a word is present or absent — adding, dropping, or reordering words (e.g. a prefix the source doesn't have) fails even if the meaning is identical, and `%` never folds to "percent". To confirm a claim, quote the source's *exact stored words*; `--hint` prints the nearest vault phrase to reword toward.
-
-### `audit` — execution-provenance gate
-
-Where `verify` checks a claim against the vault, `audit` checks an artifact's *evidence chain*: every `[V#N]` tag must trace to a listed, ingested source, not just verify in isolation.
-
-```bash
-python hoardcore.py _ --action audit --artifact artifacts/2026-08-18/synthesis_x.md
-```
-
-For each `[V#N]` tag in the artifact it checks three links:
-
-1. **VERBATIM** — the claim sentence (or its longest inline double-quoted passage, ≥24 normalized chars) `verify`s against the vault. A quote wrapped across two physical lines (normal markdown wrapping) is joined into one claim, and a line carrying several tags attributes each tag to the double-quoted passage ending nearest before it — so a paraphrased claim can't hide behind another tag's verbatim quote. A bare `[V]` (no `#N`) is verified but not mapping-checked.
-2. **MAPPED** — `N` appears in the artifact's Source Links / Citations block as `[#N] <url>`.
-3. **INGESTED** — the cited URL has chunks in the vault.
-
-Strictness mirrors `verify` — paraphrased prose is `UNVERIFIED`; only verbatim quoted passages pass. Repeated `[V#N]` tags of the same claim+source count once. A `[V#N]` that appears on an `[H]`/`[E]` analysis line is flagged with an informational warning (it never changes the exit code, but it signals the tag belongs on a verbatim quote in the body). Outputs a per-claim table plus citation-accuracy %, then exits `0` verified / `1` partial / `2` (any unverified **or** any unmapped/not-ingested link). Same CI gotcha as `verify`: never pipe through `tail`/`head` — the shell reports the pipe's exit, not the gate's.
-
-### Configuration file (`hoardcore.toml`)
-
-Created automatically on first run. Key sections:
+Generated on first run. Key sections:
 
 | Section | Notable keys |
 |---|---|
 | `[general]` | `timeout_seconds`, `user_agent` |
-| `[network]` | `default_strategy` (`fast`/`balanced`/`aggressive`), `enable_preflight`, `ssrf_protection` (block private/LAN/non-http(s) targets + re-validate redirects, default true) |
-| `[auth]` | `cookie_string` (e.g. `cf_clearance=...; session=...`) |
-| `[storage]` | `root_dir`, `artifacts_dir`, `artifacts_by_day`, `grounding_subdir` (research grounding contexts land in `artifacts/YYYY-MM-DD/<subdir>/` so they don't pollute the day folder of finished deliverables; default `grounding`), `local_dir` (read-only root for `--action local`; default `local_inputs/`, git-ignored), `save_binary`, `save_raw_html`, `page_size` (16 KB default) |
-| `[parsers]` | `enable_pdf`, `enable_docx`, `enable_epub` (refuse heavy formats even when their libraries are installed; wired v0.15.1), `enable_pdf_ocr` (auto-OCR scanned PDF pages when `rapidocr_onnxruntime` is present, default true) |
-| `[solver]` | `enabled` (default `false` — the FlareSolverr leg is a no-op until you set it to `true`), `url` (always tried first), `urls` (extra endpoints, appended in order for failover/throughput), `solver_timeout`, `session_reuse` (one browser session per run; false solves statelessly) |
-| `[crawler]` | `respect_robots`, `sitemap_limit`, `sitemap_index_depth` (recurse into `<sitemapindex>` children, 0 = off), `parallel_workers` |
-| `[indexer]` | `enable_fts`, `search_limit`, `parallel` (threaded ingest, default on for batches of 8+ chunks), `near_dedup` (simhash dup filter, default off), `near_dedup_threshold` |
-| `[embeddings]` | `enabled`, `mode` (`sparse`/`dense`), `dense_model`, `dim`, `mrl_dims` (Matryoshka truncation, 0 = full), `cache_dir` (ONNX model on disk; empty = `~/.cache/hoardcore/models`, must be persistent), `offline` (`true` = load from cache only, never hit HuggingFace), `hybrid_search`, `top_k`, `quantize`, `fts_fast_path`, `recency_half_life_days`, `conf_mode` (`relative` default / `absolute` legacy), `conf_high_abs`, `conf_low_abs`, `reranker_model` (optional cross-encoder re-ranker) |
+| `[network]` | `default_strategy`, `enable_preflight`, `ssrf_protection` |
+| `[auth]` | `cookie_string` (e.g. `cf_clearance=...`) |
+| `[storage]` | `root_dir`, `artifacts_dir`, `artifacts_by_day`, `grounding_subdir`, `local_dir`, `page_size`, `save_binary`, `save_raw_html` |
+| `[parsers]` | `enable_pdf`, `enable_docx`, `enable_epub`, `enable_pdf_ocr` |
+| `[solver]` | `enabled` (default false), `url`, `urls`, `solver_timeout`, `session_reuse` |
+| `[crawler]` | `respect_robots`, `sitemap_limit`, `sitemap_index_depth`, `parallel_workers` |
+| `[indexer]` | `enable_fts`, `search_limit`, `parallel`, `near_dedup`, `near_dedup_threshold` |
+| `[embeddings]` | `enabled`, `mode`, `dense_model`, `dim`, `cache_dir`, `offline`, `hybrid_search`, `top_k`, `quantize`, `fts_fast_path`, `conf_mode`, `conf_high_abs`, `conf_low_abs`, `reranker_model` |
 | `[discovery]` | `max_results`, `top_rank`, `max_retries`, `backoff_seconds` |
-| `[solve]` | `passes`, `sources_per_front`, `facets` (default fronts), `refinements` (re-hunt terms), `barrier_patterns`, `bridge_threshold`, `bridge_top_k`, `saturation_min_sources`, `answer_first` |
-| `[research]` | `answer_first` (memory-first routing, default true), `filter_low` (at EMIT drops duplicate `low` hits but keeps one `low` chunk per distinct source; set `false` to retain all low hits — honored since v0.15.1), `max_per_source` (cap recall chunks per source URL so one rich page can't crowd out others; 0 = unlimited, default 2) |
-| `[chunking]` | `max_tokens`, `overlap_tokens` (sliding window, CJK-aware), `strategy` (`heading` / `paragraph` / `plugin.<name>`) |
-| `[retrieval]` | `chrome_min_urls` (recall-time demotion of site chrome replicated across ≥ N distinct URLs; 0 = off) |
-| `[plugins]` | `enabled` (discover `hoardcore.*` entry-point plugins) |
+| `[solve]` | `passes`, `sources_per_front`, `facets`, `refinements`, `barrier_patterns`, `bridge_threshold`, `bridge_top_k`, `saturation_min_sources`, `answer_first` |
+| `[research]` | `answer_first`, `filter_low`, `max_per_source` |
+| `[chunking]` | `max_tokens`, `overlap_tokens`, `strategy` |
+| `[retrieval]` | `chrome_min_urls` |
+| `[plugins]` | `enabled` |
 | `[cache]` | `ttl_seconds` |
 
----
+The ONNX model is cached in `~/.cache/hoardcore/models` (`embeddings.cache_dir`) and downloaded once; `offline = true` loads only from that directory and fails loudly if absent.
 
 ## Architecture
 
-### Processing Pipeline (single document)
-
-```
-  +-------------------------------------------------------------+
-  | Fetch  aiohttp ∥ curl_cffi (concurrent) -> (FlareSolverr)     |
-  +-------------------------------------------------------------+
-              |  (text, binary, content_type)
-              v
-  +-------------------------------------------------------------+
-  | Parse   trafilatura + readability  |  PDF / DOCX / EPUB      |
-  |         (HTML)                     |  (lazy binaries)        |
-  +-------------------------------------------------------------+
-              |  markdown + parser_meta
-              v
-  +-------------------------------------------------------------+
-  | Junk-filter  boilerplate / captcha / 404 / empty detection   |
-  +-------------------------------------------------------------+
-              |  clean markdown
-              v
-  +-------------------------------------------------------------+
-  | Chunk   heading-aware semantic chunking (or paragraph)       |
-  +-------------------------------------------------------------+
-              |  List[Chunk]
-              v
-  +-------------------------------------------------------------+
-  | Store   SQLite FTS5 + content-addressed chunks (chunks_ca)  |
-  |         + chunk_vectors | markdown/chunks on disk            |
-  +-------------------------------------------------------------+
+```text
+ Fetch   aiohttp + curl_cffi (concurrent) -> FlareSolverr (challenge pages)
+   |
+ Parse   trafilatura/readability (HTML) | lazy PDF/DOCX/EPUB | local text
+   |
+ Filter  boilerplate / captcha / transport-error stubs
+   |
+ Chunk   heading-aware splitting (or paragraph / plugin)
+   |
+ Store   SQLite FTS5 + content-addressed chunks + vectors + markdown mirror
 ```
 
-### Hybrid Retrieval (RRF)
+Retrieval fuses FTS5 rank and vector rank with `1 / (k + rank + 1)`, `k = 60`. The vector scan is one cached numpy matrix-vector product with `argpartition`; embeddings carry a fingerprint (model + dim + quantization) so config switches trigger in-place, resumable backfill. All database access goes through a pooled connection manager with WAL, commit/rollback context managers, and connection reuse. FlareSolverr sessions are destroyed on every exit path, including errors and Ctrl-C.
 
-`_search_hybrid()` computes two candidate lists (`k=60` RRF constant):
-- **FTS**: `SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank`.
-- **Vector**: a single numpy matrix–vector product over the whole vector table (`argpartition` for top-k, matrix cached when the table is unchanged), falling back to per-row cosine when numpy is absent. In dense mode this is an ONNX-quantized sentence-transformer embedding (384-dim); in sparse mode it is the FNV-1a lexical hash.
+## Repository layout
 
-Each candidate contributes `1 / (k + rank + 1)`; results are sorted by the sum and the top-N returned. Hits carry a **confidence band** (`high`/`medium`/`low`) derived per-recall-set rather than from a ratio-to-top (which stays ~0.9 even for weak queries because RRF scores cluster). The default relative mode ranks within the set: the top hit(s) clearly above the set's tail are `high`, the tail hugging the coincidence floor is `low`, and only a keyword-backed set can crown `high`. `conf_mode = "absolute"` restores the legacy thresholds (`conf_high_abs`/`conf_low_abs` on the fused score, plus the matched-both-lists signal). The vector scan is O(N) per query (one matmul + `argpartition`), but the numpy matrix form keeps the constant tiny — ideal for thousands of chunks, still fine at hundreds of thousands (measured: ~26 ms/query at 50 K vectors, int8, warm).
-
-**Dimension / embedding-config migration.** Each cached vector is keyed by an embedding fingerprint (`embed_fp` = model + dim + quantize). `backfill_vectors` recomputes rows whose fingerprint no longer matches the configured mode/`dense_model`/`dim` (e.g. switching sparse 256-dim ↔ dense 384-dim, or swapping models) *in place*, in batch transactions with stale-row cleanup — so stale vectors are never served and a config switch is resumable across interrupts, no destructive delete-all.
-
-### Resilience & DB Hygiene
-
-A fetch chain runs `aiohttp` and `curl_cffi` concurrently (first leg that returns content wins), with `FlareSolverr` as a serialized terminal leg under the default `aggressive` strategy. With FlareSolverr running (the required Docker container), the chain fully covers Cloudflare-protected pages; discovery's DuckDuckGo hits also get retried and, if shaped, can be solved through the same container. Discovery wraps fetches in bounded retries with exponential backoff, detects challenge/captcha bodies, and supports plugin providers as a fallback tail. **FlareSolverr sessions are released on every exit path.** A reused solver session holds a headless Chromium context on the solver host and lives server-side — it would outlive the CLI process unless destroyed. `NetworkFetcher.aclose()` destroys the session first (then closes the shared aiohttp session), and the CLI's `main()` runs every live fetcher through it in a `finally` block, so no run (normal, error, or Ctrl-C) leaves the container holding memory. Library callers `await fetcher.aclose()` when done. All SQLite access flows through `VaultManager._db()`, which acquires a connection from a reusable **`ConnectionPool`** (default 8 connections, env-overridable via `HC_POOL_SIZE`):
-
+```text
+hoardcore.py       Entire engine: config, fetcher, parsers, chunker, crawler,
+                   discovery, vault, CLI, research and SIEGE actions
+skill.md           Agent operating manual (read by AGENTS.md)
+AGENTS.md          Agent trigger file loaded at session start
+peel_anchor/       Reproducible frontier-synthesis stress test
+tools/             Version-sync gate, solver health check, benchmarks
+tests/             352 pytest tests (CLI, vault, network, audit, solve, OCR, ...)
+artifacts/         Runtime deliverables (git-ignored)
+hoardcore_data/    Vault files (git-ignored)
+local_inputs/      Read-only source folder for --action local (git-ignored)
 ```
-with self._db() as (conn, cursor):
-    cursor.execute(...)     # conn.commit() on success, rollback() on error
-```
-
-Each pooled connection is opened once with WAL, `synchronous=NORMAL`, a 512 MB mmap, an in-memory temp store, and a page cache — so query traffic reuses warm connections instead of paying SQLite open/close per call. A context manager guarantees commit/rollback per block. WAL mode and `synchronous=NORMAL` balance durability against speed. The vault is WORM (write-once-read-many): documents are append-only per version and chunks are content-addressed, so the normal ingest flow never deletes FTS rows — old versions stay queryable. (An earlier `AFTER DELETE` trigger that wiped a document's chunks on a URL-scoped delete was removed, since it could nuke every version's chunks in one row surgery.)
-
----
-
-## Package Structure
-
-```
-HoardCore/
-    hoardcore.py           The entire engine (config, fetcher, parsers, chunker,
-                           crawler, discovery, vault, CLI, research action)
-                           (research.py was merged into this single file)
-    hoardcore.toml         Generated config on first run (git-ignored)
-    Makefile               install / run / discover / test / bench / clean
-    pyproject.toml         Packaging, deps + extras, console script
-    AGENTS.md              Agent trigger doc — auto-loaded by your harness at
-                           session start; mandates reading skill.md first
-    skill.md               Uses-guide / agent skill (the agent operating manual)
-    CHANGELOG.md           Release history (SemVer)
-    artifacts/               Runtime deliverables (git-ignored, not in repo)
-    tests/
-        conftest.py            TempConfig + vault / chunk fixtures
-        test_vault.py          indexing (WORM versions), RRF, backfill + dimension migration,
-                               empty-query safety, content-addressed dedup, verify_vault
-                               integrity, confidence bands, verify_claim, dense-mode fallback,
-                               bge default model
-        test_cli.py            argparse CLI smoke suite (actions, flags, unknown-flag rejection)
-        test_network.py        fetch chain fallback, provider parsing/fallback,
-                               research strategy forwarding
-        test_junk.py           boilerplate/empty/real-content detection
-        test_crawler.py        sitemap/robots/discovery (no network I/O)
-        test_ocr.py            OCR fallback path for scanned PDF pages
-        test_local.py          --action local list/ingest/content-hash-skip/search
-        test_multivault.py     cross-vault --vault a,b search + verify fold
-        test_audit.py          artifact [V#N] evidence-chain audit
-        test_parser_robust.py  parser crash-resistance (random bytes + corrupt binaries)
-        test_regressions.py    regression coverage for past bugs
-        test_regression_0169.py  v0.16.9 audit-fix regression coverage (verify case
-                               folding, recall caps on every path, lazy dense model,
-                               --json/export, structured exit codes)
-    deploy/
-        docker-compose.flaresolverr.yml   known-good FlareSolverr container
-                                          (explicit DNS + shm; see troubleshooting)
-    tools/
-        check_version.py       CI version-sync gate (__version__ == pyproject == git tag == README badge)
-        check_flaresolverr.py  solver health check (real solve test; exit 0/1/2)
-        bench_vector.py        numpy matmul vector-scan benchmark (float32/int8 x page sizes)
-        bench_hoardcore_full.py  full numeric benchmark: ingest throughput, search latency,
-                               retrieval quality (P@1/P@5/MRR/nDCG), storage footprint,
-                               integrity + page-size migration
-    hoardcore_data/         The vault (vault.db, per-domain binaries/extracted)
-```
-
----
 
 ## Development
 
-### Quick commands
-
 ```bash
-make install            # create venv + install deps
-make test               # run pytest suite
-make clean              # wipe vault, caches, and config
+make install     # venv + deps
+make test        # pytest suite
+make lint        # ruff
+make audit       # bandit
+make typecheck   # pyright
+make coverage    # 70% gate
+make bench       # vector-search benchmark
+make check       # all of the above
+make clean       # wipe vault, caches, config
 ```
 
-### Manual
-
-```bash
-venv/bin/python -m pip install -e ".[test]"
-venv/bin/python -m pytest tests/ -v     # run the pytest suite
-```
-
-### Code standards
-
-- **Python 3.11+**, `from __future__ import annotations` throughout
-- **Minimal global mutable state** — `ConfigManager` is a singleton **only on the default config path**; constructing one with a non-default `config_path` builds a fresh, independent instance (fixing state bleed between separately-constructed managers), and tests isolate via a `TempConfig` stand-in
-- **DB access always through `_db()`** — the context manager guarantees commit/rollback/close
-- **Optional heavy dependencies lazy-imported** — HTML-only usage never pulls PDF/DOCX/EPUB libraries
-- **Annotated signatures** (PEP 605 unions like `str | None` and builtin generics) on all public methods
-
----
+Python 3.11+, `from __future__ import annotations` throughout, annotated public signatures, heavy dependencies lazy-imported, minimal global state. Run `venv/bin/python tools/check_version.py` before a release: `__version__`, `pyproject.toml`, the README badge, and the git tag must agree.
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `Status 403 Blocked` on a protected site | Anti-bot challenging connection | Use `--strategy aggressive` (default); ensure FlareSolverr is running (`docker ps`), since it is required to clear Cloudflare challenges |
-| `FlareSolverr: Solving challenge...` then timeout | FlareSolverr container not started, or endpoint mismatch | `docker run -d --name=flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr`; verify `[solver] url = "http://localhost:8191/v1"` |
-| `aiohttp: Status 202` on discovery / FlareSolverr timeouts | Rate-limit or proxy-shaped search page | Discovery auto-retries with backoff; ensure FlareSolverr is healthy (`tools/check_flaresolverr.py`), then rerun |
-| Discovery returns nothing | Built-in provider blocked or empty | There is one built-in engine (DuckDuckGo); when it is IP-blocked, rescue via harness-side search + `ingest --urls`, or add an engine through `hoardcore.providers` |
-| FlareSolverr API answers but every solve times out | Container egress/DNS wedged (systemd-resolved stub) or stale container filesystem | Recreate with the known-good config: `sudo docker compose -f deploy/docker-compose.flaresolverr.yml up -d --force-recreate`, then `venv/bin/python tools/check_flaresolverr.py` (exit 0 = healthy; it also explains the DNS root cause) |
-| `PyMuPDF (fitz) not installed` printed | Optional PDF lib missing | `make install` (installs PyMuPDF) or `pip install pymupdf` |
-| `python-docx` / `ebooklib` message | Optional binaries missing | `pip install python-docx ebooklib` |
-| Search returns empty for an unusual query | FTS operator / empty tokens | Search is safe now (returns `[]`, never raises); try hybrid mode |
-| Vault garbled / bad results | Indexed junk before detection | Junk detection now filters boilerplate/empty/transport-errors; purge ghosts with `--action prune --apply`, then re-ingest with `--force` after upgrade |
-| Cache expiry surprises | `cache.ttl_seconds` | Default 24h (`86400`); set to `0` to never expire |
-
----
+| Symptom | Fix |
+|---|---|
+| `Status 403 Blocked` on a protected site | Default `aggressive` strategy plus a running FlareSolverr with `[solver] enabled = true` |
+| Solver times out or every solve fails | Check `docker ps`; verify `[solver] url`; run `venv/bin/python tools/check_flaresolverr.py`. For wedged DNS, recreate from `deploy/docker-compose.flaresolverr.yml` |
+| Discovery returns nothing | DuckDuckGo may be IP-blocked; use harness search plus `ingest --urls`, or add a `hoardcore.providers` plugin |
+| Search returns empty | Empty queries return `[]` safely; try hybrid mode or a broader query |
+| Vault has junk or ghost sources | Purge with `prune --apply`, then re-ingest with `--force` |
+| Cache seems stale | `cache.ttl_seconds` defaults to 86400; set to `0` never to expire, or use `--force` |
+| Missing PyMuPDF / python-docx / ebooklib | `make install` or install those packages directly |
 
 ## Contributing
 
-Bug reports, feature requests, and pull requests are welcome.
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/description`)
-3. Set up: `make install`
-4. Make changes; add/update tests in `tests/`
-5. Run `make test` (all tests must pass)
-6. Commit with a conventional prefix (`fix:`, `feat:`, `refactor:`, `docs:`, `chore:`)
-7. Push and open a pull request
-
-Areas open to contribution:
-- Plugin-provider end-to-end coverage for discovery (live engines beyond DuckDuckGo)
-- Multi-process config reload
-- Expanded end-to-end test coverage (crawl with network, live discovery, plugin registration)
-
----
+Fork, branch, add tests under `tests/`, run `make check`, commit with a conventional prefix (`fix:`, `feat:`, `docs:`, `chore:`), and open a pull request. Useful areas: live plugin-provider coverage, multi-process config reload, end-to-end crawl and discovery tests.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for full text.
-
-This tool is intended for personal, research, and educational use. When accessing third-party websites, respect their terms of service and robots.txt. Support the sites and creators you rely on.
+MIT. See [LICENSE](LICENSE). For personal, research, and educational use; respect the terms of service and robots.txt of sites you access.
