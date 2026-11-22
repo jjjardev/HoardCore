@@ -193,7 +193,6 @@ def test_audit_links_heading_rule_as_documented():
     assert hc.HoardCore._is_links_heading("## Source Links / Citations")
     assert hc.HoardCore._is_links_heading("## Citations")
     assert not hc.HoardCore._is_links_heading("## Citations and grounding")
-    assert not hc.HoadCore if False else True
     assert not hc.HoardCore._is_links_heading("## 4. Techniques that raise citation quality")
 
 

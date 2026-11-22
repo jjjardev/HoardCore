@@ -42,3 +42,8 @@ densevault-1.py
 *.swp
 .idea/
 .vscode/
+
+# --- Local job-hunt harvest tooling (not part of the HoardCore engine) ---
+tools/oj_harvest.py
+tools/oj_rank_hire.py
+tools/oj_rank_hire4.py
