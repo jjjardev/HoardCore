@@ -2,7 +2,7 @@
 
 Adaptive research engine for AI agents - a memory it can prove, tools you can swap, and a loop that adapts.
 
-![Version](https://img.shields.io/badge/version-0.17.8-blue)
+![Version](https://img.shields.io/badge/version-0.17.9-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -115,6 +115,22 @@ HoardCore is usually driven by an agent, not typed by a human. Three documents d
 | `skill.md` | The agent | Operating manual: action mapping, provenance rules, audit step |
 
 The chain is: harness loads `AGENTS.md` -> `AGENTS.md` forces `skill.md` -> `skill.md` drives the CLI. If your harness does not auto-load `AGENTS.md`, start by telling the agent to read `skill.md` first.
+
+### Output contract
+
+Before producing any artifact, the agent confirms what the deliverable is. If your prompt already contains a one-shot brief, it should not ask again. The brief uses five fields:
+
+```text
+ARTIFACT: decision memo
+AUDIENCE: founder choosing a vendor
+DECISION: which vendor to pilot
+FORMAT: two pages, subject line, three options, kill criteria
+GATES: strict
+```
+
+`ARTIFACT`, `AUDIENCE`, and `DECISION` are required. `FORMAT` may be one sentence; `GATES` is `normal` or `strict`. Aliases: `TYPE`/`OUTPUT` for `ARTIFACT`, `FOR` for `AUDIENCE`. The parser is available as `hoardcore.parse_output_brief(text)` and `hoardcore.output_brief_missing(brief)`.
+
+If the brief is incomplete, the agent asks at most two forced-choice questions (artifact type, then audience or decision). If you say "whatever you think", it picks the best fit and marks the artifact `[ASSUMED]`. Every authored artifact opens with an `Output contract:` line so the purpose is visible to later readers.
 
 For any open-ended request, the agent runs the bounded **Hardcore Research Loop**: parse the question, discover and ingest high-authority sources, hybrid-recall 5-10 chunks, emit grounding context, then adversarially audit every `[V]` tag. Depth is a direction, not a guessed number:
 

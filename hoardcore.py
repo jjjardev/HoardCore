@@ -20,7 +20,7 @@ Usage (short form; legacy `URL --action ...` and `_ --action ...` still work):
 """
 from __future__ import annotations
 
-__version__ = "0.17.8"
+__version__ = "0.17.9"
 
 import argparse
 import asyncio
@@ -7581,6 +7581,36 @@ def _summarize_ingest_ledger(ledger: dict[str, dict[str, Any]]) -> dict[str, int
         if st in summary:
             summary[st] += 1
     return summary
+
+
+OUTPUT_BRIEF_KEYS = ("ARTIFACT", "AUDIENCE", "DECISION", "FORMAT", "GATES")
+OUTPUT_BRIEF_ALIASES = {"TYPE": "ARTIFACT", "OUTPUT": "ARTIFACT", "FOR": "AUDIENCE"}
+
+
+def parse_output_brief(text: str) -> dict[str, str]:
+    """Parse a one-shot output contract into its named fields.
+
+    Accepts ``ARTIFACT: dossier; AUDIENCE: founder; DECISION: choose vendor``
+    with semicolons or newlines. Unknown fields are ignored; aliases TYPE and
+    OUTPUT map to ARTIFACT, FOR maps to AUDIENCE. The agent still decides
+    whether a brief is clear enough; this helper only makes parsing exact.
+    """
+    brief: dict[str, str] = {}
+    for part in re.split(r"[;\n]+", text or ""):
+        if ":" not in part:
+            continue
+        key, value = part.split(":", 1)
+        key = key.strip().upper()
+        key = OUTPUT_BRIEF_ALIASES.get(key, key)
+        if key in OUTPUT_BRIEF_KEYS and value.strip():
+            brief[key] = value.strip()
+    return brief
+
+
+def output_brief_missing(brief: dict[str, str],
+                         required: tuple[str, ...] = ("ARTIFACT", "AUDIENCE", "DECISION")) -> list[str]:
+    """Return required output-contract fields the user has not specified."""
+    return [key for key in required if not brief.get(key)]
 
 
 def citation_list(sources: list[str] | dict[str, str]) -> str:

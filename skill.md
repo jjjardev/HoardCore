@@ -59,8 +59,41 @@ Every quantitative claim / date / unique term in a synthesis gets a tag:
 
 ### Interaction contract
 - **Initiation:** state you're running the Hardcore Research Loop at its depth preset.
+- **Output contract first (before any artifact work):** if the user has not specified what the deliverable must be, ask before researching. Accept a one-shot brief and proceed without questions only when it is complete; otherwise ask the minimum forced-choice clarifications.
 - **Completion:** artifact path + a **3-bullet executive summary** (sources/citations live in the artifact).
 - "go deeper" → one more pass (within cap); "enough"/"done"/"good" → finalize immediately.
+
+### Output contract (new)
+
+Before any task whose result is an artifact, establish the output contract in this order:
+
+1. **Read the request for a one-shot brief.** Parse `ARTIFACT`, `AUDIENCE`, `DECISION`, `FORMAT`, `GATES` with `hoardcore.parse_output_brief(text)` or by hand. `TYPE`/`OUTPUT` mean `ARTIFACT`; `FOR` means `AUDIENCE`.
+2. **If complete, do not ask.** A brief is complete when `ARTIFACT`, `AUDIENCE`, and `DECISION` are present. `FORMAT` may be a single sentence, e.g. "three paragraphs, no bullets, 800 words, subject line first"; if absent, use the type's default and label it `[ASSUMED]`.
+3. **If incomplete, ask forced-choice questions, not open essays.** Ask for the artifact type first, then only the missing audience or decision. Offer 5-7 concrete types plus "Other (one line)". Never ask more than two rounds.
+4. **Offer defaults, do not stall.** If the user says "whatever you think", pick the best fit, write `[ASSUMED]` in the artifact header, and continue.
+
+Artifact type menu (use these names unless the user overrides):
+
+- `dossier`: what the evidence says. Fronts, claims, tensions, bridges, Source Links.
+- `decision memo`: choose one option. Context, options, recommendation, kill criteria.
+- `method`: how to execute a plan. Diagnosis, pillars, sequence, gates, falsification.
+- `comparison`: pick between candidates. Criteria table, winner, caveats.
+- `lead list`: who to contact or pursue. Ranked rows with evidence per row.
+- `audit report`: whether a document is trustworthy. Claim table, verdicts, mapping, fixes.
+- `letter`: send to a specific reader. Subject, body, link, no fabricated facts.
+- `spec`: what to build. Decisions, contract, open questions.
+- `benchmark`: which option performs best. Protocol, metric tables, limitations.
+- `other`: whatever the user names. Follow their one-line brief.
+
+Required header in every authored artifact:
+
+```text
+# <title>
+
+Output contract: ARTIFACT=<type>; AUDIENCE=<who>; DECISION=<what they decide>; FORMAT=<brief or default>; GATES=<normal|strict>
+```
+
+Keep the contract line before the evidence ledger; it is not a provenance tag and is never audited as a claim. Put it in the deliverable so a later reader knows what the artifact was for.
 
 ### Termination (stop on ANY of)
 Answer saturation (2 re-queries, no new `[V]`) · distinct-source quota (≥5/8/15) · diminishing returns (identical re-ranking) · pass budget (3/6/10 or `x N`) · user interrupt (stop/enough/halt/ctrl-c). On early stop from a guard: label `[INCOMPLETE — N passes]`.
@@ -125,6 +158,7 @@ Scrape (one URL: HTML/PDF/DOCX/EPUB) · Crawl (whole site via sitemap) · Search
 
 ## Artifacts
 - **Where:** `artifacts/` (`storage.artifacts_dir`), day-sorted `artifacts/YYYY-MM-DD/`. Research EMITs its grounding context into the day folder's `grounding/` subdir (`storage.grounding_subdir`) — a working instrument, not a deliverable.
+- **Contract first:** every authored artifact opens with an `Output contract:` line as specified above; never write a deliverable before the user has chosen or accepted the artifact type, audience, and decision it must support.
 - **Provenance:** every quantitative claim `[V]`/`[E]`/`[H]`; never claim a number the vault can't support.
 - **Citations:** verbatim claims carry `[V#N]`; `[E]`/`[H]` claims carry none; close with a Source Links / Citations block via `hoardcore.citation_list(urls)` or by hand. Keep that block **last** and title it distinctly (see the `audit` section on the links-heading rule).
 - **Pass `--out` a path inside `artifacts/`, or omit it.** A path elsewhere is written exactly as asked but is *not* day-foldered, and a later run's `organize_artifacts_by_day` re-homes it into a day folder — silently invalidating the path you were just handed. The CLI warns when this happens; treat the warning as a path mistake. Omitting `--out` writes the grounding context to `artifacts/YYYY-MM-DD/grounding/` automatically.
@@ -205,6 +239,7 @@ Three phases: doc chunk counts, content hashes, vector dims. Exit `0` pass / `1`
 Sources, doc versions, chunks, vectors, embedding dim/mode, schema version, page size, DB size, and a sampled `high/medium/low` confidence probe (spot retrieval flatness). With `--vault a,b,c` prints a block per named vault.
 
 ## Workflow Guidance
+0. Deliverable? Apply the Output Contract first. If not complete, ask forced-choice questions before spending a hunt.
 1. Single article/paper → `scrape`, then summarize.
 2. Docs site → `crawl` (may take minutes).
 3. Follow-up question → `search` (instant, no network).
